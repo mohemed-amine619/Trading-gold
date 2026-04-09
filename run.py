@@ -1,611 +1,413 @@
+# -*- coding: utf-8 -*-
+import sys
+import time
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
-import time
-import logging
-from datetime import datetime, timedelta
-import threading
-import winsound  # For Sound Alerts on Windows
-import requests  # For Telegram API
-from sklearn.ensemble import RandomForestClassifier  # REAL AI MODEL
-
-# --- CONFIGURATION ---
-CONFIG = {
-    # ------------------------------------------------------------------
-    # ⚠️ CRITICAL: ACCOUNT MUST ALLOW ALGO TRADING
-    # ------------------------------------------------------------------
-    "account": 261009880,
-    "password": "Amine2002@",
-    "server": "Exness-MT5Trial16",
-    "symbol": "BTCUSDm",  # Ensure this matches your broker
-    "timeframe": mt5.TIMEFRAME_M15,
-    # --- NOTIFICATIONS ---
-    "enable_sound": False,
-    "telegram_token": "8423946950:AAF0Ja88p_52coyDsh48nQD1yNZW7NwAgck",
-    "telegram_chat_id": "6476316022",
-    # --- STRATEGY: REAL AI (MACHINE LEARNING) ---
-    "lot_size": 0.5,
-    "target_profit_money": 50.0,  # Cash Target: Close if profit > $40
-    # --- AUTO CLOSE SETTINGS ---
-    "close_on_reversal": False,
-    # --- VOLATILITY SETTINGS ---
-    "use_atr_stops": True,
-    "atr_multiplier": 3.0,
-    # --- TRAILING STOP STRATEGY (CORRECTED FOR BTC) ---
-    # 1. Breakeven: If price moves 15000 points ($150) in favor
-    "breakeven_trigger_points": 15000,
-    # Lock in $20 (2,000 points) profit when triggered
-    "breakeven_cushion_points": 2000,
-    # Trail the price by $200 (20,000 points)
-    "trailing_stop_points": 20000,
-    # 3. Anti-Spam: Only move SL if the new level is at least 100 points different
-    "min_sl_step_points": 100,
-    # --- RISK MANAGEMENT ---
-    "stop_loss_points": 10000,
-    "take_profit_points": 20000,
-    "max_spread_points": 5000,
-    "max_drawdown_pct": 50.0,
-    "magic_number": 234000,
-    "sleep_interval": 0.5,
-    "max_exposure": 10,
-    "dry_run": False,  # Set to False to trade with real money
-}
-
-# --- LOGGING SETUP ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("trading_bot.log"), logging.StreamHandler()],
+from PyQt5.QtWidgets import (
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QLineEdit,
+    QTableWidget,
+    QTableWidgetItem,
+    QGroupBox,
+    QFormLayout,
 )
-logger = logging.getLogger(__name__)
+from PyQt5.QtCore import QTimer
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from sklearn.ensemble import RandomForestClassifier
+import requests
 
 
-# --- NOTIFICATION MODULE ---
-class NotificationHandler:
-    def __init__(self, config):
-        self.config = config
-
-    def send(self, message, type="INFO"):
-        # --- 1. SOUND ALERT (Windows Only) ---
-        if self.config.get("enable_sound", True):
-            try:
-                if type == "TRADE":
-                    winsound.Beep(1000, 200)
-                elif type == "CLOSE":
-                    winsound.Beep(800, 400)
-                elif type == "ERROR":
-                    winsound.Beep(400, 1000)
-            except Exception:
-                pass
-
-        # --- 2. TELEGRAM MESSAGE ---
-        token = self.config.get("telegram_token")
-        chat_id = self.config.get("telegram_chat_id")
-
-        if token and chat_id:
-            try:
-                url = f"https://api.telegram.org/bot{token}/sendMessage"
-                data = {"chat_id": chat_id, "text": message}
-
-                response = requests.post(url, data=data, timeout=10)
-
-                if response.status_code != 200:
-                    logger.error(f"TELEGRAM ERROR: {response.status_code}")
-
-            except requests.exceptions.ConnectionError:
-                logger.error("TELEGRAM CONNECT FAIL: Check Internet or DNS.")
-            except Exception as e:
-                logger.error(f"TELEGRAM FAILED: {e}")
-
-
-# --- REAL AI PREDICTION MODULE ---
+# ---------------- AI MODEL -----------------
 class AIModel:
     def __init__(self):
-        # Initialize a Random Forest Classifier
-        self.model = RandomForestClassifier(
-            n_estimators=100, min_samples_split=10, random_state=42
-        )
-        self.is_trained = False
-        logger.info("Real AI Model (Random Forest) initialized.")
+        self.model = RandomForestClassifier(n_estimators=200, max_depth=10)
+        self.trained = False
 
-    def preprocess_data(self, df):
-        # 1. Feature Engineering
+    def preprocess(self, df):
         df = df.copy()
-
-        # Technical Indicators
-        df["SMA_50"] = df["close"].rolling(window=50).mean()
-        df["SMA_20"] = df["close"].rolling(window=20).mean()
-
-        # RSI
+        if "close" not in df.columns or len(df) < 200:
+            return pd.DataFrame()
         delta = df["close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = -delta.where(delta < 0, 0).rolling(14).mean()
         rs = gain / loss
         df["RSI"] = 100 - (100 / (1 + rs))
-
-        # ATR (Volatility)
-        df["h-l"] = df["high"] - df["low"]
-        df["h-pc"] = abs(df["high"] - df["close"].shift(1))
-        df["l-pc"] = abs(df["low"] - df["close"].shift(1))
-        df["tr"] = df[["h-l", "h-pc", "l-pc"]].max(axis=1)
-        df["ATR"] = df["tr"].rolling(window=14).mean()
-
-        # Derived Features
-        df["Dist_SMA50"] = df["close"] - df["SMA_50"]
-        df["Candle_Size"] = df["close"] - df["open"]
-
-        # TARGET (What we want the AI to predict)
-        # 1 if Next Candle Close > Current Close (Price went Up)
-        df["Target"] = (df["close"].shift(-1) > df["close"]).astype(int)
-
+        df["H-L"] = df["high"] - df["low"]
+        df["H-C"] = abs(df["high"] - df["close"].shift())
+        df["L-C"] = abs(df["low"] - df["close"].shift())
+        df["TR"] = df[["H-L", "H-C", "L-C"]].max(axis=1)
+        df["ATR"] = df["TR"].rolling(14).mean()
+        df["SMA50"] = df["close"].rolling(50).mean()
+        df["SMA200"] = df["close"].rolling(200).mean()
+        df["Momentum"] = df["close"] - df["close"].shift(10)
+        df["Target"] = (df["close"].shift(-3) > df["close"]).astype(int)
         df.dropna(inplace=True)
         return df
 
     def train(self, df):
-        """Trains the model on historical data."""
-        logger.info(f"Training AI on {len(df)} historical candles...")
-
-        # Features columns
-        features = ["RSI", "Dist_SMA50", "Candle_Size", "ATR", "SMA_20"]
-        X = df[features]
+        X = df[["RSI", "ATR", "SMA50", "SMA200", "Momentum"]]
         y = df["Target"]
-
-        # Train the model
         self.model.fit(X, y)
-        self.is_trained = True
-        logger.info("AI Training Complete. Model is ready to predict.")
+        self.trained = True
 
     def predict(self, df):
-        # We need enough data to train + predict
-        if len(df) < 100:
-            logger.warning("Not enough data to train AI.")
-            return 0
-
-        # Train on the first run
-        if not self.is_trained:
-            training_data = df.iloc[:-1]
-            self.train(training_data)
-
-        # Prepare current data for prediction
-        last_candle = df.iloc[[-1]]
-        features = ["RSI", "Dist_SMA50", "Candle_Size", "ATR", "SMA_20"]
-        X_new = last_candle[features]
-
-        # Ask AI for Probability
-        probs = self.model.predict_proba(X_new)[0]
-        prob_up = probs[1]
-
-        current_price = last_candle["close"].values[0]
-        logger.info(
-            f"AI Prediction: Probability UP = {prob_up:.2f} (Price: {current_price})"
-        )
-
-        # --- AI DECISION LOGIC ---
-        if prob_up > 0.60:  # 60% Confidence it goes UP
-            logger.info(f"AI Signals BUY (Confidence: {prob_up:.2f})")
-            return 1
-        elif prob_up < 0.40:  # <40% Confidence UP (means >60% Down)
-            logger.info(f"AI Signals SELL (Confidence: {1-prob_up:.2f})")
-            return -1
-        else:
-            logger.info("AI is uncertain. No trade.")
-            return 0
+        if df.empty or len(df) < 200:
+            return 0, 0.5
+        if not self.trained:
+            self.train(df.iloc[:-1])
+        last = df.iloc[[-1]]
+        prob = self.model.predict_proba(
+            last[["RSI", "ATR", "SMA50", "SMA200", "Momentum"]]
+        )[0][1]
+        signal = 1 if prob > 0.7 else -1 if prob < 0.3 else 0
+        return signal, prob
 
 
-# --- MAIN TRADING BOT ---
-class MT5TradingBot:
+# ---------------- MT5 BOT -----------------
+class MT5Bot:
     def __init__(self, config):
         self.config = config
-        self.ai_model = AIModel()
-        self.notifier = NotificationHandler(config)
+        self.ai = AIModel()
         self.running = False
-        self.last_bar_time = None
+        self.trade_history = []
+        self.stats = {"total": 0, "success": 0, "fail": 0}
 
-        # Anti-Spam: Track failed close attempts
-        self.failed_tickets = {}
-        # Anti-Spam: Track simulated dry run closes
-        self.dry_run_tickets = set()
-
-    def connect(self):
         if not mt5.initialize():
-            logger.error(f"MT5 Init Failed: {mt5.last_error()}")
-            self.notifier.send("MT5 Init Failed!", type="ERROR")
-            return False
-
-        authorized = mt5.login(
-            self.config["account"],
-            password=self.config["password"],
-            server=self.config["server"],
-        )
-
-        if authorized:
-            account_info = mt5.account_info()
-            logger.info(f"Connected. Balance: {account_info.balance}")
-
-            symbol = self.config["symbol"]
-            if not mt5.symbol_select(symbol, True):
-                msg = f"ERROR: Failed to select symbol '{symbol}'."
-                logger.error(msg)
-                self.notifier.send(msg, type="ERROR")
-                return False
-
-            self.notifier.send(
-                f"Real AI Bot ON. Balance: {account_info.balance}", type="INFO"
-            )
+            print("❌ MT5 Init Failed")
         else:
-            logger.error(f"Login Failed: {mt5.last_error()}")
-            self.notifier.send("Login Failed!", type="ERROR")
+            if self.config["account"]:
+                mt5.login(
+                    self.config["account"],
+                    password=self.config["password"],
+                    server=self.config["server"],
+                )
+            mt5.symbol_select(self.config["symbol"], True)
 
-        return authorized
-
-    def check_trading_allowed(self):
-        if not mt5.terminal_info().trade_allowed:
-            msg = "CRITICAL: 'Algo Trading' button in MT5 is OFF!"
-            logger.warning(msg)
-            self.notifier.send(msg, type="ERROR")
-            return False
-        return True
-
-    def check_safety_shields(self):
-        account = mt5.account_info()
-        if account is None:
-            return True
-
-        drawdown_threshold = account.balance * (
-            1 - (self.config["max_drawdown_pct"] / 100)
-        )
-        if account.equity < drawdown_threshold:
-            msg = f"STOP: Equity dropped below 50%! Emergency Halt."
-            logger.critical(msg)
-            self.notifier.send(msg, type="ERROR")
-            self.panic_close_all()
-            return False
-        return True
-
-    def panic_close_all(self):
-        positions = mt5.positions_get()
-        if positions:
-            count = 0
-            for pos in positions:
-                if count > 5:
-                    break
-                success = self.close_position(pos, reason="EMERGENCY STOP")
-                count += 1
-                if not success:
-                    break
-
-        self.running = False
-
-    def get_market_data(self, n_candles=1000):
-        rates = mt5.copy_rates_from_pos(
-            self.config["symbol"], self.config["timeframe"], 0, n_candles
-        )
-        if rates is None or len(rates) == 0:
-            logger.warning(
-                f"Data fetch failed for {self.config['symbol']}! Check symbol name."
+    # ---------- TELEGRAM ----------
+    def send_telegram(self, msg):
+        if not self.config["telegram_token"]:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{self.config['telegram_token']}/sendMessage"
+            requests.post(
+                url, data={"chat_id": self.config["telegram_chat_id"], "text": msg}
             )
-            return pd.DataFrame()
+        except Exception as e:
+            print("Telegram error:", e)
 
+    # ---------- DATA ----------
+    def get_data(self):
+        rates = mt5.copy_rates_from_pos(
+            self.config["symbol"], self.config["timeframe"], 0, 500
+        )
         df = pd.DataFrame(rates)
-        df["time"] = pd.to_datetime(df["time"], unit="s")
+        if "time" in df.columns:
+            df["time"] = pd.to_datetime(df["time"], unit="s")
         return df
 
-    def execute_trade(self, signal, atr_value=0):
-        if not self.running:
+    # ---------- LOT SIZE ----------
+    def lot_size(self, sl_points):
+        balance = mt5.account_info().balance
+        risk_money = balance * self.config["risk_pct"]
+        point = mt5.symbol_info(self.config["symbol"]).point
+        lot = risk_money / (sl_points * point * 100)
+        return round(max(0.01, lot), 2)
+
+    # ---------- CHECK CAN TRADE ----------
+    def can_trade(self):
+        positions = mt5.positions_get(symbol=self.config["symbol"])
+        bot_positions = (
+            [p for p in positions if p.magic == self.config["magic_number"]]
+            if positions
+            else []
+        )
+        return len(bot_positions) < self.config["max_exposure"]
+
+    # ---------- EXECUTE TRADE ----------
+    def execute_trade(self, signal, df):
+        tick = mt5.symbol_info_tick(self.config["symbol"])
+        info = mt5.symbol_info(self.config["symbol"])
+        if not tick or not info:
             return
 
-        symbol = self.config["symbol"]
-        lot = self.config["lot_size"]
-
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            return
-
-        # --- FIX: SAFE SYMBOL INFO FETCH (PREVENTS CRASH) ---
-        s_info = mt5.symbol_info(symbol)
-        if s_info is None:
-            logger.error(f"Cannot get symbol info for {symbol}. Connection lost?")
-            return
-
-        spread_points = (tick.ask - tick.bid) / s_info.point
-        if spread_points > self.config["max_spread_points"]:
-            logger.warning(f"Spread {spread_points} too high. Waiting.")
-            return
-
+        atr = df["ATR"].iloc[-1]
+        sl_points = int(atr * 2 / info.point)
+        tp_points = sl_points * 2
+        lot = self.lot_size(sl_points)
         price = tick.ask if signal == 1 else tick.bid
-        action = mt5.TRADE_ACTION_DEAL
-        type_order = mt5.ORDER_TYPE_BUY if signal == 1 else mt5.ORDER_TYPE_SELL
-
-        point = s_info.point
-        digits = s_info.digits
-
-        if self.config["use_atr_stops"] and atr_value > 0:
-            sl_distance = atr_value * self.config["atr_multiplier"]
-            sl = price - sl_distance if signal == 1 else price + sl_distance
-            tp_dist = self.config["take_profit_points"] * point
-            tp = price + tp_dist if signal == 1 else price - tp_dist
-        else:
-            sl_dist = self.config["stop_loss_points"] * point
-            tp_dist = self.config["take_profit_points"] * point
-            sl = price - sl_dist if signal == 1 else price + sl_dist
-            tp = price + tp_dist if signal == 1 else price - tp_dist
-
-        sl = round(sl, digits)
-        tp = round(tp, digits)
-
-        if self.config.get("dry_run", False):
-            side = "BUY" if signal == 1 else "SELL"
-            logger.info(
-                f"DRY RUN: Would have opened {side} @ {price} | SL: {sl} | TP: {tp}"
-            )
-            return
-
-        request = {
-            "action": action,
-            "symbol": symbol,
-            "volume": lot,
-            "type": type_order,
-            "price": price,
-            "sl": 0.0,
-            "tp": 0.0,
-            "magic": self.config["magic_number"],
-            "comment": "RealAI",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-
-        result = mt5.order_send(request)
-
-        if result is None:
-            logger.error("Order Send failed. Result is None.")
-            return
-
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            if result.retcode == mt5.TRADE_RETCODE_INVALID_FILL:
-                request["type_filling"] = mt5.ORDER_FILLING_FOK
-                mt5.order_send(request)
-            elif result.retcode == 10026:
-                msg = "CRITICAL: AutoTrading Blocked (10026). Check Account!"
-                logger.critical(msg)
-                self.notifier.send(msg, type="ERROR")
-                self.running = False
-        else:
-            side = "BUY" if signal == 1 else "SELL"
-            msg = f"OPENED {side} @ {price}"
-            logger.info(msg)
-            self.notifier.send(msg, type="TRADE")
-
-            time.sleep(0.5)
-            modify_request = {
-                "action": mt5.TRADE_ACTION_SLTP,
-                "position": result.order,
-                "symbol": symbol,
-                "sl": sl,
-                "tp": tp,
-                "magic": self.config["magic_number"],
-            }
-            mt5.order_send(modify_request)
-
-    def close_position(self, position, reason="Signal"):
-        if not self.running:
-            return False
-
-        if self.config.get("dry_run", False):
-            if position.ticket not in self.dry_run_tickets:
-                logger.info(
-                    f"DRY RUN: Would have closed position {position.ticket} ({reason})"
-                )
-                self.dry_run_tickets.add(position.ticket)
-            return True
-
-        # Anti-Spam: Don't retry failed closes endlessly
-        if position.ticket in self.failed_tickets:
-            if self.failed_tickets[position.ticket] >= 3:
-                return False
-
-        tick = mt5.symbol_info_tick(position.symbol)
-        if tick is None:
-            return False
-
-        safe_comment = f"Close-{reason}"[:31]
+        sl = (
+            price - sl_points * info.point
+            if signal == 1
+            else price + sl_points * info.point
+        )
+        tp = (
+            price + tp_points * info.point
+            if signal == 1
+            else price - tp_points * info.point
+        )
+        order_type = mt5.ORDER_TYPE_BUY if signal == 1 else mt5.ORDER_TYPE_SELL
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": position.symbol,
-            "volume": position.volume,
-            "type": (
-                mt5.ORDER_TYPE_SELL
-                if position.type == mt5.ORDER_TYPE_BUY
-                else mt5.ORDER_TYPE_BUY
-            ),
-            "position": position.ticket,
-            "price": tick.bid if position.type == mt5.ORDER_TYPE_BUY else tick.ask,
+            "symbol": self.config["symbol"],
+            "volume": lot,
+            "type": order_type,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
             "magic": self.config["magic_number"],
-            "comment": safe_comment,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
-
         result = mt5.order_send(request)
-
-        if result is None:
-            self.failed_tickets[position.ticket] = (
-                self.failed_tickets.get(position.ticket, 0) + 1
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            self.stats["total"] += 1
+            self.send_telegram(
+                f"✅ Trade executed: {'BUY' if signal==1 else 'SELL'} Price: {price}"
             )
-            return False
+        else:
+            print("❌ Trade error:", result.retcode)
 
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            if result.retcode == mt5.TRADE_RETCODE_INVALID_FILL:
-                request["type_filling"] = mt5.ORDER_FILLING_FOK
-                result = mt5.order_send(request)
-
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                logger.error(
-                    f"FAILED to CLOSE {position.ticket}. Error: {result.comment} ({result.retcode})"
-                )
-                self.failed_tickets[position.ticket] = (
-                    self.failed_tickets.get(position.ticket, 0) + 1
-                )
-                return False
-
-        if position.ticket in self.failed_tickets:
-            del self.failed_tickets[position.ticket]
-
-        msg = f"CLOSED {position.ticket}. Profit: {position.profit}."
-        logger.info(msg)
-        self.notifier.send(msg, type="CLOSE")
-        return True
-
-    def modify_sl(self, position, new_sl):
-        if self.config.get("dry_run", False):
-            sl_key = f"{position.ticket}_sl"
-            if sl_key not in self.dry_run_tickets:
-                logger.info(
-                    f"DRY RUN: Would have moved SL for {position.ticket} to {new_sl}"
-                )
-                self.dry_run_tickets.add(sl_key)
-            return
-
-        request = {
-            "action": mt5.TRADE_ACTION_SLTP,
-            "position": position.ticket,
-            "symbol": position.symbol,
-            "sl": new_sl,
-            "tp": position.tp,
-            "magic": self.config["magic_number"],
-        }
-        res = mt5.order_send(request)
-        if res.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"SL Moved for {position.ticket} -> {new_sl}")
-
-    # --- IMPROVED TRAILING LOGIC ---
-    def manage_positions(self, df=None):
+    # ---------- MONITOR POSITIONS ----------
+    def monitor_positions(self):
         positions = mt5.positions_get(symbol=self.config["symbol"])
-        if positions is None:
-            return 0
-
-        symbol_info = mt5.symbol_info(self.config["symbol"])
-        if not symbol_info:
-            return 0
-
-        point = symbol_info.point
-
-        # Thresholds converting points to price differences
-        be_trigger = self.config["breakeven_trigger_points"] * point
-        be_cushion = self.config["breakeven_cushion_points"] * point
-        trail_dist = self.config["trailing_stop_points"] * point
-        min_step = self.config["min_sl_step_points"] * point
-
-        for pos in positions:
-            if not self.running:
-                break
-            if pos.magic != self.config["magic_number"] and pos.magic != 0:
-                continue
-
-            # 1. HARD PROFIT TARGET (Cash based)
-            if pos.profit >= self.config["target_profit_money"]:
-                self.close_position(pos, reason="Profit Target Hit")
-                continue
-
-            # 2. CALCULATE CURRENT PRICE
-            current_tick = mt5.symbol_info_tick(self.config["symbol"])
-            if not current_tick:
-                continue
-
-            bid = current_tick.bid
-            ask = current_tick.ask
-
-            # --- BUY POSITION MANAGEMENT ---
-            if pos.type == mt5.ORDER_TYPE_BUY:
-                current_price = bid
-                distance_moved = current_price - pos.price_open
-
-                # A. Breakeven Logic (First Line of Defense)
-                # If price moved X points up, move SL to Entry + Cushion
-                if distance_moved > be_trigger:
-                    new_sl = pos.price_open + be_cushion
-                    # Only move if current SL is below the new BreakEven level
-                    if pos.sl < new_sl:
-                        self.modify_sl(pos, new_sl)
-                        continue  # Done for this tick
-
-                # B. Trailing Stop Logic (Profit Protection)
-                # If we are well in profit, drag the SL up behind the price
-                if distance_moved > be_trigger:
-                    calculated_sl = current_price - trail_dist
-
-                    # LOGIC: Only move SL UP, never down.
-                    # And only move if the jump is bigger than 'min_step' (Anti-Spam)
-                    if calculated_sl > (pos.sl + min_step):
-                        self.modify_sl(pos, calculated_sl)
-
-            # --- SELL POSITION MANAGEMENT ---
-            elif pos.type == mt5.ORDER_TYPE_SELL:
-                current_price = ask
-                distance_moved = pos.price_open - current_price
-
-                # A. Breakeven Logic
-                if distance_moved > be_trigger:
-                    new_sl = pos.price_open - be_cushion
-                    # Only move if current SL is above the new BreakEven level (or 0)
-                    if pos.sl == 0.0 or pos.sl > new_sl:
-                        self.modify_sl(pos, new_sl)
-                        continue
-
-                # B. Trailing Stop Logic
-                if distance_moved > be_trigger:
-                    calculated_sl = current_price + trail_dist
-
-                    # LOGIC: Only move SL DOWN, never up.
-                    if pos.sl == 0.0 or calculated_sl < (pos.sl - min_step):
-                        self.modify_sl(pos, calculated_sl)
-
-        return len(positions)
-
-    def run(self):
-        self.running = True
-        if not self.connect():
+        if not positions:
             return
-        self.check_trading_allowed()
+        for pos in positions:
+            if pos.magic != self.config["magic_number"]:
+                continue
+            tick = mt5.symbol_info_tick(self.config["symbol"])
+            if not tick:
+                continue
 
-        logger.info("REAL AI Bot STARTED.")
+            # Trailing
+            if self.config["trailing"]:
+                if pos.type == mt5.ORDER_TYPE_BUY:
+                    new_sl = max(pos.sl, tick.bid - (pos.tp - pos.sl) / 2)
+                    if new_sl > pos.sl:
+                        mt5.order_send(
+                            {
+                                "action": mt5.TRADE_ACTION_SLTP,
+                                "position": pos.ticket,
+                                "sl": new_sl,
+                                "tp": pos.tp,
+                            }
+                        )
+                elif pos.type == mt5.ORDER_TYPE_SELL:
+                    new_sl = min(pos.sl, tick.ask + (pos.sl - pos.tp) / 2)
+                    if new_sl < pos.sl:
+                        mt5.order_send(
+                            {
+                                "action": mt5.TRADE_ACTION_SLTP,
+                                "position": pos.ticket,
+                                "sl": new_sl,
+                                "tp": pos.tp,
+                            }
+                        )
 
-        try:
-            while self.running:
-                if not self.check_safety_shields():
-                    break
-
-                if len(self.failed_tickets) > 50:
-                    self.failed_tickets.clear()
-
-                df = self.get_market_data(n_candles=1000)
-                open_positions_count = self.manage_positions(df=df)
-
+            # Auto-close
+            try:
                 if (
-                    self.running
-                    and open_positions_count < self.config["max_exposure"]
-                    and not df.empty
+                    pos.profit >= self.config["profit_target"]
+                    or pos.profit <= self.config["loss_limit"]
                 ):
-                    current_bar_time = df.iloc[-1]["time"]
-                    if self.last_bar_time != current_bar_time:
-                        self.last_bar_time = current_bar_time
+                    close_type = (
+                        mt5.ORDER_TYPE_SELL
+                        if pos.type == mt5.ORDER_TYPE_BUY
+                        else mt5.ORDER_TYPE_BUY
+                    )
+                    result = mt5.order_send(
+                        {
+                            "action": mt5.TRADE_ACTION_DEAL,
+                            "symbol": self.config["symbol"],
+                            "volume": pos.volume,
+                            "type": close_type,
+                            "position": pos.ticket,
+                            "magic": pos.magic,
+                            "type_time": mt5.ORDER_TIME_GTC,
+                            "type_filling": mt5.ORDER_FILLING_IOC,
+                        }
+                    )
+                    if result.retcode == mt5.TRADE_RETCODE_DONE:
+                        self.stats["success"] += 1 if pos.profit > 0 else 0
+                        self.stats["fail"] += 1 if pos.profit < 0 else 0
+                        self.trade_history.append(pos.profit)
+                        self.send_telegram(
+                            f"💰 Position closed. Profit: {pos.profit:.2f}$"
+                        )
+                    else:
+                        print("❌ Close failed:", result.retcode)
+            except Exception as e:
+                print("Error closing position:", e)
 
-                        df_processed = self.ai_model.preprocess_data(df)
-                        signal = self.ai_model.predict(df_processed)
-
-                        last_atr = df_processed.iloc[-1]["ATR"]
-                        if signal != 0:
-                            self.execute_trade(signal, atr_value=last_atr)
-
-                time.sleep(self.config["sleep_interval"])
-
-        except KeyboardInterrupt:
-            logger.info("Bot stopping...")
-        finally:
-            mt5.shutdown()
-            logger.info("MT5 Closed.")
+    def run_step(self):
+        if not self.running:
+            return 0, 0.5, self.stats
+        df = self.get_data()
+        if df.empty:
+            return 0, 0.5, self.stats
+        df = self.ai.preprocess(df)
+        signal, confidence = self.ai.predict(df)
+        if signal != 0 and self.can_trade():
+            self.execute_trade(signal, df)
+        self.monitor_positions()
+        return signal, confidence, self.stats
 
 
+# ---------------- GUI -----------------
+class BotGUI(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Pro Gold AI Bot")
+        # Default config
+        self.config = {
+            "account": 261009880,
+            "password": "Amine2002@",
+            "server": "Exness-MT5Trial16",
+            "symbol": "XAUUSDm",
+            "timeframe": mt5.TIMEFRAME_M5,
+            "risk_pct": 0.01,
+            "max_exposure": 20,
+            "profit_target": 3.0,
+            "loss_limit": -5.0,
+            "trailing": True,
+            "magic_number": 123456,
+            "telegram_token": "8423946950:AAF0Ja88p_52coyDsh48nQD1yNZW7NwAgck",
+            "telegram_chat_id": "6476316022",
+        }
+        self.bot = MT5Bot(self.config)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_bot)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        config_group = QGroupBox("Configuration")
+        form = QFormLayout()
+
+        self.account_input = QLineEdit(str(self.config["account"]))
+        self.password_input = QLineEdit(str(self.config["password"]))
+        self.server_input = QLineEdit(str(self.config["server"]))
+        self.symbol_input = QLineEdit(self.config["symbol"])
+        self.risk_input = QLineEdit(str(self.config["risk_pct"]))
+        self.max_exposure_input = QLineEdit(str(self.config["max_exposure"]))
+        self.profit_input = QLineEdit(str(self.config["profit_target"]))
+        self.loss_input = QLineEdit(str(self.config["loss_limit"]))
+        self.trailing_input = QLineEdit(str(self.config["trailing"]))
+        self.telegram_token_input = QLineEdit(str(self.config["telegram_token"]))
+        self.telegram_chat_input = QLineEdit(str(self.config["telegram_chat_id"]))
+
+        form.addRow("MT5 Account:", self.account_input)
+        form.addRow("Password:", self.password_input)
+        form.addRow("Server:", self.server_input)
+        form.addRow("Symbol:", self.symbol_input)
+        form.addRow("Risk %:", self.risk_input)
+        form.addRow("Max Exposure:", self.max_exposure_input)
+        form.addRow("Profit Target $:", self.profit_input)
+        form.addRow("Loss Limit $:", self.loss_input)
+        form.addRow("Trailing:", self.trailing_input)
+        form.addRow("Telegram Token:", self.telegram_token_input)
+        form.addRow("Telegram Chat ID:", self.telegram_chat_input)
+
+        config_group.setLayout(form)
+        layout.addWidget(config_group)
+
+        btn_layout = QHBoxLayout()
+        self.start_btn = QPushButton("Start Bot")
+        self.start_btn.clicked.connect(self.start_bot)
+        self.stop_btn = QPushButton("Stop Bot")
+        self.stop_btn.clicked.connect(self.stop_bot)
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.stop_btn)
+        layout.addLayout(btn_layout)
+
+        self.conf_label = QLabel("AI Confidence: 0.0")
+        self.stats_label = QLabel("Total Trades: 0 | Success: 0 | Fail: 0")
+        layout.addWidget(self.conf_label)
+        layout.addWidget(self.stats_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(
+            ["Ticket", "Type", "Volume", "Profit", "SL/TP"]
+        )
+        layout.addWidget(self.table)
+
+        self.figure = Figure(figsize=(8, 4))
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas)
+
+        self.setLayout(layout)
+
+    def start_bot(self):
+        self.config["account"] = int(self.account_input.text())
+        self.config["password"] = self.password_input.text()
+        self.config["server"] = self.server_input.text()
+        self.config["symbol"] = self.symbol_input.text()
+        self.config["risk_pct"] = float(self.risk_input.text())
+        self.config["max_exposure"] = int(self.max_exposure_input.text())
+        self.config["profit_target"] = float(self.profit_input.text())
+        self.config["loss_limit"] = float(self.loss_input.text())
+        self.config["trailing"] = self.trailing_input.text().lower() in [
+            "true",
+            "1",
+            "yes",
+        ]
+        self.config["telegram_token"] = self.telegram_token_input.text()
+        self.config["telegram_chat_id"] = self.telegram_chat_input.text()
+        self.bot.running = True
+        self.timer.start(2000)
+
+    def stop_bot(self):
+        self.bot.running = False
+        self.timer.stop()
+
+    def update_bot(self):
+        signal, confidence, stats = self.bot.run_step()
+        self.conf_label.setText(f"AI Confidence: {confidence:.2f}")
+        self.stats_label.setText(
+            f"Total Trades: {stats['total']} | Success: {stats['success']} | Fail: {stats['fail']}"
+        )
+
+        positions = mt5.positions_get(symbol=self.config["symbol"])
+        self.table.setRowCount(len(positions) if positions else 0)
+        if positions:
+            for i, pos in enumerate(positions):
+                self.table.setItem(i, 0, QTableWidgetItem(str(pos.ticket)))
+                self.table.setItem(
+                    i,
+                    1,
+                    QTableWidgetItem(
+                        "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
+                    ),
+                )
+                self.table.setItem(i, 2, QTableWidgetItem(str(pos.volume)))
+                self.table.setItem(i, 3, QTableWidgetItem(f"{pos.profit:.2f}"))
+                self.table.setItem(i, 4, QTableWidgetItem(f"{pos.sl:.2f}/{pos.tp:.2f}"))
+
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        if self.bot.trade_history:
+            cumulative = np.cumsum(self.bot.trade_history)
+            ax.plot(cumulative, label="Cumulative Profit $", color="blue")
+            ax.set_ylabel("Cumulative Profit $")
+            ax.set_xlabel("Closed Trades")
+            ax.set_title("Bot Performance")
+            ax.legend()
+        self.canvas.draw()
+
+
+# ---------------- RUN -----------------
 if __name__ == "__main__":
-    bot = MT5TradingBot(CONFIG)
-    bot.run()
+    app = QApplication(sys.argv)
+    gui = BotGUI()
+    gui.resize(1200, 800)
+    gui.show()
+    sys.exit(app.exec_())

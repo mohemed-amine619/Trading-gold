@@ -1,0 +1,8 @@
+MetaTrader5
+pandas
+numpy
+PyQt5
+matplotlib
+xgboost
+requests
+scikit-learn

@@ -93,10 +93,10 @@ class AIModel:
         self.logger.info(f"AI Prediction: Prob UP = {prob_up:.2f} (Price: {current_price})")
 
         # --- EXPLICIT BUY/SELL LOGIC ---
-        if prob_up > 0.60:
+        if prob_up > 0.55:
             self.logger.info(f"AI Signals BUY (Confidence: {prob_up:.2f})")
             return 1
-        elif prob_up < 0.40:
+        elif prob_up < 0.45:
             self.logger.info(f"AI Signals SELL (Confidence: {1-prob_up:.2f})")
             return -1
         else:
