@@ -146,16 +146,25 @@ class MT5TradingBot:
         # Use the exact path where your MT5 is actually installed
         mt5_path = r"C:\Users\mohamed.bougrioua\Trading\terminal64.exe" 
         
+        logger.info(f"Attempting to initialize MT5 from {mt5_path} (this may take up to 60 seconds)...")
         # Pass the specific path so Python doesn't get lost
-        if not mt5.initialize(path=mt5_path):
+        # timeout is in milliseconds, default is 60000 (60s), increasing to 120000 (120s)
+        if not mt5.initialize(path=mt5_path, timeout=120000):
             logger.error(f"MT5 Init Failed: {mt5.last_error()}")
             return False
             
+        logger.info("MT5 initialized successfully. Attempting to log in...")
         authorized = mt5.login(
             self.config["account"],
             password=self.config["password"],
             server=self.config["server"],
         )
+        
+        if authorized:
+            logger.info("MT5 login successful.")
+        else:
+            logger.error(f"MT5 Login Failed: {mt5.last_error()}")
+            
         return authorized
 
     def get_market_data(self, n_candles=500):
