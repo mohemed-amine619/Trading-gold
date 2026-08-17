@@ -1,5 +1,6 @@
 MetaTrader5
 pandas
+pandas_ta
 numpy
 PyQt5
 matplotlib
