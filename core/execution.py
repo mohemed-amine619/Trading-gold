@@ -284,3 +284,53 @@ class SymbolInfoLike:
         self.volume_step = info.volume_step
         self.stops_level = info.trade_stops_level
         self.filling_mode = info.filling_mode
+
+    async def partial_close_position(self, position, volume: float) -> OrderResult:
+        """
+        Close `volume` lots of an existing position (partial close).
+
+        MT5 supports partial closes by sending a TRADE_ACTION_DEAL order in the
+        opposite direction with the position ticket and a volume < position.volume.
+        The remaining lots stay open, and the SL/TP are inherited automatically
+        on most brokers.
+
+        Parameters
+        ----------
+        position : position object with .symbol, .direction, .ticket attributes
+        volume   : number of lots to close (must be < position.volume and >= volume_min)
+        """
+        if getattr(self.config, "DRY_RUN", False):
+            logger.info(
+                "[DRY-RUN] simulated partial close: %s ticket=%s vol=%.2f",
+                position.symbol, position.ticket, volume)
+            return OrderResult(True, DONE, "done (dry-run)", ticket=position.ticket,
+                               volume=volume, message="simulated partial close")
+
+        info = await self.engine.call(mt5.symbol_info, position.symbol)
+        if info is None:
+            return OrderResult(False, -1, "no symbol info",
+                               message=f"symbol_info({position.symbol}) failed")
+        is_buy = position.direction == 1
+        price  = await self._live_price(position.symbol, -1 if is_buy else 1)
+        if price is None:
+            return OrderResult(False, -1, "no tick", message="no live price for partial close")
+
+        request = {
+            "action":       mt5.TRADE_ACTION_DEAL,
+            "symbol":       position.symbol,
+            "volume":       float(volume),
+            "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+            "position":     position.ticket,
+            "price":        float(price),
+            "deviation":    self.config.DEVIATION_POINTS,
+            "magic":        self.config.MAGIC_NUMBER,
+            "comment":      "bot partial",
+            "type_time":    mt5.ORDER_TIME_GTC,
+            "type_filling": self._filling_mode(SymbolInfoLike(info)),
+        }
+        result = await self._submit(request, SymbolInfoLike(info),
+                                    -1 if is_buy else 1)
+        if result.success:
+            logger.info("PARTIAL CLOSE %s ticket=%s vol=%.2f @ %.5f",
+                        position.symbol, position.ticket, volume, price)
+        return result
