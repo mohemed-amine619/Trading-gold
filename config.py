@@ -36,7 +36,7 @@ SERVER_UTC_OFFSET_HOURS = 2
 # --------------------------------------------------------------------------
 # Instruments & timeframes
 # --------------------------------------------------------------------------
-SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD"]  # must be quoted exactly as on the broker
+SYMBOLS = ["XAUUSDm", "EURUSDm", "GBPUSDm"]  # must be quoted exactly as on the broker
 
 ENTRY_TIMEFRAME = "M15"   # timeframe on which entry signals are generated
 FILTER_TIMEFRAME = "H1"   # higher timeframe used as the trend filter

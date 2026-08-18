@@ -46,7 +46,7 @@ build_exe.bat
 3. In the **MT5 connection** panel enter: terminal path (optional, empty =
    auto-detect), login, password, server. Click **Save credentials** (stored
    in `credentials.json` next to the app - plain text, keep it safe).
-4. Tick the symbols to trade (e.g. XAUUSD, EURUSD).
+4. Tick the symbols to trade (e.g. XAUUSDm, EURUSDm).
 5. Keep **Dry-run** checked and press **Start Bot** - watch the Signals tab.
 6. When you are confident, uncheck Dry-run and restart the bot for live
    trading.
