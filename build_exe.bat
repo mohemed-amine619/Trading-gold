@@ -50,7 +50,7 @@ REM --------------------------------------------------------------------------
 REM Step 2 – Upgrade pip and install all dependencies
 REM --------------------------------------------------------------------------
 echo [2/5] Upgrading pip...
-py -3 -m pip install --upgrade pip --quiet
+py -3.12 -m pip install --upgrade pip --quiet
 if errorlevel 1 goto :error
 
 echo [3/5] Installing dependencies (this may take a few minutes)...
