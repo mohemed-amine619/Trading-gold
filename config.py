@@ -16,9 +16,9 @@ MT5_PATH = None  # e.g. r"C:\Program Files\MetaTrader 5\terminal64.exe"
 
 # Credentials. Leave None/empty to use the account currently logged into the
 # terminal (recommended: log in manually so no password sits on disk).
-MT5_LOGIN = None            # int, e.g. 12345678
-MT5_PASSWORD = None         # str
-MT5_SERVER = None           # str, e.g. "Exness-MT5Trial16"
+MT5_LOGIN = None  # int, e.g. 12345678
+MT5_PASSWORD = None        # str
+MT5_SERVER = None  # str, e.g. "Exness-MT5Trial16"
 
 # --------------------------------------------------------------------------
 # Server timezone normalization
@@ -41,7 +41,7 @@ SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD"]  # must be quoted exactly as on the bro
 ENTRY_TIMEFRAME = "M15"   # timeframe on which entry signals are generated
 FILTER_TIMEFRAME = "H1"   # higher timeframe used as the trend filter
 HISTORY_BARS = 350        # bars fetched per symbol/timeframe (must cover the
-                          # EMA-200 warm-up: 200 + safety margin)
+# EMA-200 warm-up: 200 + safety margin)
 
 # --------------------------------------------------------------------------
 # Strategy parameters (placeholder default strategy: EMA cross + RSI filter)
@@ -63,11 +63,17 @@ SL_ATR_MULT = 2.0              # initial SL distance = ATR * SL_ATR_MULT
 TP_RR_RATIO = 2.0              # take-profit placed at this R:R (2 = 2R)
 TRAIL_ATR_MULT = 3.0           # trailing stop distance = ATR * TRAIL_ATR_MULT
 TRAIL_ACTIVATE_ATR = 1.0       # start trailing only after price moved >= this
-                               # many ATRs in our favour
+# many ATRs in our favour
 
 # --------------------------------------------------------------------------
 # Execution engine
 # --------------------------------------------------------------------------
+# DRY_RUN = True simulates every fill (entry, SL/TP modify, close) without
+# sending a single real order. Perfect for testing the GUI, the strategy and
+# the risk engine against live data with zero money at stake.
+# DRY_RUN = False sends real orders - use at your own risk!
+DRY_RUN = True
+
 # Unique fingerprint of this bot instance. Every order we place carries this
 # magic number and we ONLY touch positions with it, so manual trades and other
 # bots are left alone. Change it per instance (e.g. YYYYMMDD + seq).

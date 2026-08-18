@@ -41,6 +41,7 @@ DEAL ticket. Position tickets may differ on some brokers, so the caller should
 reconcile via positions_get() filtered by magic number (StateManager does it).
 """
 import asyncio
+import itertools
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -94,6 +95,8 @@ class ExecutionEngine:
         self.engine = engine
         self.config = config
         self.risk = risk_manager
+        # Negative fake tickets identify dry-run fills unambiguously.
+        self._dry_tickets = itertools.count(start=-1, step=-1)
 
     # ------------------------------------------------------------------
     # helpers
@@ -117,6 +120,15 @@ class ExecutionEngine:
     async def _submit(self, request: dict, symbol_info, direction: int) -> OrderResult:
         """Dispatch an order_send request with retcode-aware retry logic."""
         c = self.config
+        if getattr(c, "DRY_RUN", False):
+            # Paper trading: simulate a fill, never touch the broker.
+            ticket = next(self._dry_tickets)
+            logger.info("[DRY-RUN] simulated order: %s %s vol=%s -> ticket %s",
+                        request.get("symbol"),
+                        RETCODE_NAMES.get(DONE), request.get("volume"), ticket)
+            return OrderResult(True, DONE, "done (dry-run)", ticket=ticket,
+                               volume=request.get("volume", 0.0),
+                               message="simulated fill")
         for attempt in range(1, c.MAX_REQUOTE_RETRIES + 1):
             result = await self.engine.call(mt5.order_send, request)
             if result is None:
@@ -207,6 +219,10 @@ class ExecutionEngine:
     async def modify_sl_tp(self, symbol: str, ticket: int, sl: float,
                            tp: float) -> OrderResult:
         """Update the SL/TP of an existing position (used by trailing stops)."""
+        if getattr(self.config, "DRY_RUN", False):
+            logger.info("[DRY-RUN] simulated SL/TP modify: %s ticket=%s sl=%.5f tp=%.5f",
+                        symbol, ticket, sl, tp)
+            return OrderResult(True, DONE, "done (dry-run)", ticket=ticket)
         request = {
             "action": mt5.TRADE_ACTION_SLTP,   # modify stops of a position
             "symbol": symbol,

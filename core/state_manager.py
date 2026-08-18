@@ -72,6 +72,9 @@ class StateManager:
     def has_position(self, symbol: str) -> bool:
         return symbol in self._positions
 
+    def symbols(self) -> List[str]:
+        return list(self._positions)
+
     def open_positions(self) -> List[Position]:
         return list(self._positions.values())
 
