@@ -18,6 +18,7 @@ Run with:  python run.py
 
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -133,19 +134,27 @@ class Notifier:
         self.cfg = cfg
 
     def send(self, msg: str) -> None:
-        token   = self.cfg.get("telegram_token", "")
-        chat_id = self.cfg.get("telegram_chat_id", "")
-        if token and chat_id:
-            try:
-                url  = f"https://api.telegram.org/bot{token}/sendMessage"
-                requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
-            except Exception as exc:
-                logger.warning("Telegram send failed: %s", exc)
+        """Non-blocking send – a network hang must never kill the bot."""
+        threading.Thread(target=self._send, args=(msg,), daemon=True).start()
+
+    def _send(self, msg: str) -> None:
         try:
-            import winsound
-            if self.cfg.get("enable_sound"):
-                winsound.Beep(1000, 200)
-        except Exception:
+            token   = self.cfg.get("telegram_token", "")
+            chat_id = self.cfg.get("telegram_chat_id", "")
+            if token and chat_id:
+                try:
+                    url  = f"https://api.telegram.org/bot{token}/sendMessage"
+                    requests.post(url, data={"chat_id": chat_id, "text": msg},
+                                  timeout=(3, 5))
+                except Exception as exc:
+                    logger.warning("Telegram send failed: %s", exc)
+            try:
+                import winsound
+                if self.cfg.get("enable_sound"):
+                    winsound.Beep(1000, 200)
+            except Exception:
+                pass
+        except BaseException:
             pass
 
 
@@ -655,21 +664,20 @@ class StandaloneAIBot:
 
     # --------------------------------------------------------------
     def _get_signal(self, m15, h1, h4) -> tuple:
-        """Return (direction, score, ai_conf).  direction 0 = no trade."""
+        """Return (direction, score, ai_conf, reason).  direction 0 = no trade.
+
+        The AI model is always updated/predicted (even off-session or in a
+        low-ADX regime) so it keeps learning; the ADX/session gates only
+        block *entries*, never training.
+        """
         if m15.empty or len(m15) < 50:
-            return 0, 0.0, 0.5
+            return 0, 0.0, 0.5, "no data"
 
         m15p = _prepare(m15, self.cfg)
         h1p  = _prepare(h1, self.cfg) if not h1.empty else None
         h4p  = _prepare(h4, self.cfg) if not h4.empty else None
 
-        adx_val = float(m15p.iloc[-1].get("adx", 0.0))
-        if adx_val < self.cfg.get("adx_min", 20):
-            return 0, 0.0, 0.5
-
-        if not _session_ok(self.cfg):
-            return 0, 0.0, 0.5
-
+        # AI signal – trained & predicted every new bar
         if self.ai is None:
             self.ai = AIEnsemble(self.cfg["symbol"], type("C", (), {
                 "AI_CONFIDENCE_THRESHOLD": self.cfg["ai_confidence_threshold"],
@@ -681,6 +689,7 @@ class StandaloneAIBot:
         ai_direction = ai_sig.direction
         ai_conf      = ai_sig.confidence
 
+        # Score both directions (confluence, independent of gates)
         best_dir, best_score = 0, 0.0
         for d in [1, -1]:
             score = _score_direction(ai_direction, ai_conf, m15p, h1p, h4p,
@@ -688,9 +697,18 @@ class StandaloneAIBot:
             if score > best_score:
                 best_score, best_dir = score, d
 
+        # Entry gates (training already done above)
+        adx_val = float(m15p.iloc[-1].get("adx", 0.0))
+        if adx_val < self.cfg.get("adx_min", 20):
+            return 0, best_score, ai_conf, f"low ADX ({adx_val:.1f})"
+
+        if not _session_ok(self.cfg):
+            return 0, best_score, ai_conf, "off-session"
+
         if best_score < self.cfg.get("min_signal_score", 55):
-            return 0, best_score, ai_conf
-        return best_dir, best_score, ai_conf
+            return 0, best_score, ai_conf, f"score {best_score:.0f} < threshold"
+
+        return best_dir, best_score, ai_conf, "signal"
 
     # --------------------------------------------------------------
     def _open_positions(self):
@@ -1052,9 +1070,9 @@ class StandaloneAIBot:
                 # Entries / reversal closes only on new closed bar
                 if current_bar != self.last_bar_time:
                     self.last_bar_time = current_bar
-                    direction, score, ai_conf = self._get_signal(m15, h1, h4)
-                    logger.info("Bar %s | direction=%+d score=%.1f ai_conf=%.3f",
-                                current_bar, direction, score, ai_conf)
+                    direction, score, ai_conf, reason = self._get_signal(m15, h1, h4)
+                    logger.info("Bar %s | direction=%+d score=%.1f ai_conf=%.3f (%s)",
+                                current_bar, direction, score, ai_conf, reason)
 
                     if direction != 0:
                         self._close_opposite_positions(direction, score)
