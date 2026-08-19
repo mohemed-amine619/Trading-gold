@@ -48,7 +48,7 @@ CONFIG = {
     "account":  261009880,
     "password": "Amine2002@",
     "server":   "Exness-MT5Trial16",
-    "mt5_path": r"C:\Users\mohamed.bougrioua\Trading\terminal64.exe",
+    "mt5_path": r"C:\Program Files\MetaTrader 5\terminal64.exe",
     # --- instrument ---
     "symbol":    "XAUUSDm",
     "timeframe": mt5.TIMEFRAME_M15,
