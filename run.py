@@ -64,6 +64,9 @@ CONFIG = {
     "adx_min": 20,
     "adx_strong": 30,
     "use_session_filter": True,
+    # trade window (UTC) – London + New York overlap by default
+    "london_start_utc": 7, "london_end_utc": 16,
+    "ny_start_utc":     12, "ny_end_utc":     21,
     # --- risk ---
     "risk_per_trade":   0.01,
     "sl_atr_mult":      2.0,
@@ -132,6 +135,7 @@ logger = logging.getLogger(__name__)
 class Notifier:
     def __init__(self, cfg: dict):
         self.cfg = cfg
+        self._telegram_dead = False   # set after first connect failure
 
     def send(self, msg: str) -> None:
         """Non-blocking send – a network hang must never kill the bot."""
@@ -141,13 +145,16 @@ class Notifier:
         try:
             token   = self.cfg.get("telegram_token", "")
             chat_id = self.cfg.get("telegram_chat_id", "")
-            if token and chat_id:
+            if token and chat_id and not self._telegram_dead:
                 try:
                     url  = f"https://api.telegram.org/bot{token}/sendMessage"
                     requests.post(url, data={"chat_id": chat_id, "text": msg},
                                   timeout=(3, 5))
                 except Exception as exc:
-                    logger.warning("Telegram send failed: %s", exc)
+                    self._telegram_dead = True
+                    logger.warning(
+                        "Telegram unreachable (%s) – notifications disabled "
+                        "for this session (sounds still active).", exc)
             try:
                 import winsound
                 if self.cfg.get("enable_sound"):
@@ -469,7 +476,8 @@ def _session_ok(cfg: dict) -> bool:
     if not cfg.get("use_session_filter", True):
         return True
     h = datetime.now(timezone.utc).hour
-    return (7 <= h < 16) or (12 <= h < 21)
+    return ((cfg.get("london_start_utc", 7)  <= h < cfg.get("london_end_utc", 16)) or
+            (cfg.get("ny_start_utc", 12)     <= h < cfg.get("ny_end_utc", 21)))
 
 
 def _trend_score(df, direction: int) -> float:
