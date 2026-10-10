@@ -1,0 +1,43 @@
+# requirements-core.txt — Linux / Docker dependencies for the Ubuntu core.
+#
+# This file is the ONLY pip target used by the Docker image. It deliberately
+# EXCLUDES MetaTrader5, which is a Windows-only package with no Linux wheel —
+# including it here makes `pip install -r` fail outright on Ubuntu.
+#
+#   Ubuntu core (this file)          Windows MT5 bridge (requirements-mt5.txt)
+#   ------------------------         ---------------------------------------
+#   core/, api/, alembic/            bridge/ (FastAPI + MetaTrader5)
+#
+# Verified against Python 3.12. Pin exact versions for reproducible builds.
+
+# ── Web / API ────────────────────────────────────────────────────────────────
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+
+# ── Settings & validation ────────────────────────────────────────────────────
+pydantic==2.14.0
+pydantic-settings==2.15.0
+python-dotenv==1.2.4
+
+# ── Database ─────────────────────────────────────────────────────────────────
+# NOTE: SQLAlchemy's asyncio layer requires greenlet at import time. It is a
+# transitive dependency that pip may or may not resolve depending on the
+# resolver, so it is pinned explicitly — a missing greenlet produces a
+# confusing ImportError at `import sqlalchemy.ext.asyncio`, not at pip time.
+SQLAlchemy[asyncio]==2.1.4
+greenlet==3.5.6            # required by SQLAlchemy's asyncio layer
+alembic==1.20.0
+asyncpg==0.32.0            # async driver, used by the FastAPI layer
+psycopg[binary]==3.3.6     # sync driver, used by Alembic and the trading loop
+aiosqlite==0.21.0          # local/dev SQLite fallback
+
+# ── Market data & analysis ───────────────────────────────────────────────────
+pandas==3.0.6
+pandas-ta==0.4.71b0
+numpy==2.2.6
+scikit-learn==1.9.1
+scipy==1.18.1
+
+# ── HTTP client (used to talk to the Windows MT5 bridge) ──────────────────────
+httpx==0.28.1
+requests==2.34.2

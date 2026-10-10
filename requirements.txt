@@ -2,9 +2,9 @@ MetaTrader5
 pandas
 pandas_ta
 numpy
-PyQt5
-matplotlib
-xgboost
-requests
 scikit-learn
 scipy
+fastapi
+uvicorn
+python-dotenv
+requests

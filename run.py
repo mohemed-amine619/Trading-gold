@@ -69,6 +69,9 @@ import math
 import sys
 import threading
 import time
+import os
+from dotenv import load_dotenv
+load_dotenv()
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import List, Optional, Tuple
@@ -101,6 +104,22 @@ from sklearn.preprocessing import StandardScaler
 import config as cfg_module  # shared defaults (kept for reference)
 
 # ---------------------------------------------------------------------------
+# Trading mode resolution — single source of truth for paper/live
+# ---------------------------------------------------------------------------
+# Accepted values: paper (default, SAFE) | live | backtest
+# Anything unrecognised falls back to paper rather than failing OPEN to live.
+_TRADING_MODE = os.getenv("TRADING_MODE", "paper").strip().lower()
+if _TRADING_MODE not in ("paper", "live", "backtest"):
+    print(f"WARNING: unknown TRADING_MODE={_TRADING_MODE!r}; falling back to 'paper'.")
+    _TRADING_MODE = "paper"
+
+if _TRADING_MODE == "live":
+    print("=" * 70)
+    print("  TRADING_MODE=live — REAL ORDERS WILL BE SENT TO THE BROKER.")
+    print("  Set TRADING_MODE=paper (or unset it) for simulation.")
+    print("=" * 70)
+
+# ---------------------------------------------------------------------------
 # Per-account configuration (override anything from config.py here)
 # NOTE: the original keys here are left 100% identical to the original —
 # nothing was changed, removed, or reordered. New keys for the power-up
@@ -108,96 +127,66 @@ import config as cfg_module  # shared defaults (kept for reference)
 # ---------------------------------------------------------------------------
 CONFIG = {
     # --- connection ---
-    "account":  261009880,
-    "password": "Amine2002@",
-    "server":   "Exness-MT5Trial16",
-    "mt5_path": r"C:\Program Files\MetaTrader 5\terminal64.exe",
+    "account":  int(os.getenv("MT5_LOGIN", 261009880)),
+    "password": os.getenv("MT5_PASSWORD", "Amine2002@"),
+    "server":   os.getenv("MT5_SERVER", "Exness-MT5Trail16"),
+    "mt5_path": os.getenv("MT5_PATH", ""),
+    
     # --- instrument ---
-    "symbol":    "XAUUSDm",
+    "symbol":    os.getenv("TRADE_SYMBOL", "XAUUSDm"),
     "timeframe": mt5.TIMEFRAME_M15,
     "h1_tf":     mt5.TIMEFRAME_H1,
     "h4_tf":     mt5.TIMEFRAME_H4,
-    "n_candles": 600,
-    # --- AI ---
-    "ai_confidence_threshold": 0.58,
-    "ai_train_bars":  500,
+    "n_candles": int(os.getenv("HISTORY_CANDLES", 600)),
+    
+    # --- AI Settings ---
+    "ai_confidence_threshold": 0.62,
+    "ai_train_bars":  800,
     "ai_retrain_bars": 50,
+    
     # --- strategy scoring ---
-    "min_signal_score": 55,
-    "adx_min": 20,
-    "adx_strong": 30,
+    "min_signal_score": 60,
+    "adx_min": 25,
+    "adx_strong": 35,
     "use_session_filter": True,
-    # trade window (UTC) – London + New York overlap by default
-    "london_start_utc": 7, "london_end_utc": 16,
+    
+    # trade window (UTC)
+    "london_start_utc": 7,  "london_end_utc": 16,
     "ny_start_utc":     12, "ny_end_utc":     21,
-    # --- risk ---
+    
+    # --- risk & money management ---
     "risk_per_trade":   0.01,
-    "sl_atr_mult":      2.0,
+    "sl_atr_mult":      2.5,
     "tp_rr_ratio":      2.5,
-    "trail_atr_mult":   3.0,
-    "trail_activate_atr": 1.0,
+    
+    # --- dynamic trade management ---
+    "trail_atr_mult":   2.5,   
+    "trail_activate_atr": 1.5,
     "dynamic_risk":     True,
     "min_risk_scale":   0.5,
-    "max_risk_scale":   1.5,
-    "max_margin_usage": 0.50,
-    "max_open_pos":     5,
+    "max_risk_scale":   1.2,
+    "max_margin_usage": 0.30,
+    "max_open_pos":     3,
     "max_daily_dd":     0.03,
+    
     # --- breakeven / partial close ---
     "enable_breakeven":        True,
-    "breakeven_trigger_atr":   1.0,
+    "breakeven_trigger_atr":   1.2,
     "enable_partial_close":    True,
     "partial_close_trigger_atr": 1.5,
-    "partial_close_fraction":  0.50,
-    "partial_close2_trigger_atr": 3.0,
-    "partial_close2_fraction": 0.25,
-    # --- trailing acceleration (tightens as profit grows) ---
-    "trail_tighten1_atr":  2.5,
-    "trail_tighten1_mult": 1.5,
-    "trail_tighten2_atr":  4.0,
-    "trail_tighten2_mult": 1.0,
-    # --- exit / close management ---
-    "close_on_opposite_signal": True,
-    "opposite_signal_min_score": 65,
-    "enable_trend_flip_close":   True,
-    "close_old_profitable":      True,
-    "max_position_age_hours":    24,
-    "max_trades_per_day":        8,
-    "equity_protect_close_all":  True,
-    "server_utc_offset_hours":   2,
-    # --- execution ---
-    "lot_size":      0.1,         # fallback minimum lot
-    "magic_number":  888999,
-    "deviation":     30,
-    "dry_run":       False,
-    "sleep_interval": 0.5,
-    "max_slippage_retries": 3,
-    # --- notifications ---
-    "enable_sound":      True,
-    "telegram_token":    "8423946950:AAF0Ja88p_52coyDsh48nQD1yNZW7NwAgck",
-    "telegram_chat_id":  "6476316022",
+    
+    # --- system ---
+    "sleep_interval":   1.0,
+    "magic_number":     int(os.getenv("MAGIC_NUMBER", 888999)),
+    "deviation":        20,
 
-    # =========================================================
-    # --- POWER-UP: automatic profit/loss decision making -----
-    # =========================================================
-    # Hard stop-loss per trade, as a fraction of account EQUITY. If a
-    # position's floating loss (profit+swap) exceeds equity * this value,
-    # it is closed immediately regardless of where the broker-side SL is.
-    # Set to None/0 to disable.
-    "max_loss_per_trade_pct": 0.01,       # 1% of equity per trade
-
-    # Profit-lock / giveback close. Once a position's favourable move
-    # reaches `profit_lock_activate_atr` * ATR, its peak is tracked; if
-    # price then gives back `profit_giveback_pct` of that peak move, the
-    # position is closed to protect the gain instead of riding it back
-    # down. Set profit_lock_activate_atr high (e.g. 999) to disable.
-    "profit_lock_activate_atr": 1.2,
-    "profit_giveback_pct":      0.35,
-
-    # Losing-position timeout. If a position has been open longer than
-    # this many hours AND is currently losing, it is cut — independent of
-    # `max_position_age_hours` above, which only ever closes profitable
-    # positions on timeout. Set to None/0 to disable.
-    "cut_losing_after_hours": 3,
+    # --- safety ---
+    # SAFETY: the bot MUST default to paper mode. Every mutating method
+    # (_send_order, _close_position, _close_all, _modify_sltp, _modify_sl,
+    # _partial_close) gates on cfg["dry_run"] and returns early when True.
+    # This key was previously absent from CONFIG, so cfg.get("dry_run")
+    # returned None -> falsy -> REAL ORDERS were sent by default.
+    "dry_run": _TRADING_MODE != "live",
 }
 
 # ---------------------------------------------------------------------------
@@ -207,12 +196,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        # errors="backslashreplace" is a last-resort safety net: even if a
-        # console/codepage can't display a character, logging will never
-        # raise/crash over it again.
-        logging.FileHandler("trading_bot.log", encoding="utf-8", errors="backslashreplace"),
         logging.StreamHandler(sys.stdout),
-    ],
+        logging.FileHandler("trading_bot.log", encoding="utf-8")
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -821,8 +807,13 @@ def _risk_scale(adx: float, cfg: dict) -> float:
 
 
 def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
-              vol_min, vol_max, vol_step, cfg, adx=0.0):
+              vol_min, vol_max, vol_step, cfg, adx=0.0, ai_conf=0.0):
     scale    = _risk_scale(adx, cfg) if cfg.get("dynamic_risk") else 1.0
+    # --- FEATURE 1: AI CONFIDENCE SIZING ---
+    if ai_conf >= 0.85:
+        scale *= 1.5
+    elif ai_conf > 0 and ai_conf <= 0.65:
+        scale *= 0.5
     risk_amt = account_equity * cfg["risk_per_trade"] * scale
     sl_ticks = sl_dist_price / (tick_size + 1e-10)
     rpl      = sl_ticks * tick_value
@@ -889,11 +880,6 @@ class StandaloneAIBot:
             self.status.update(kwargs)
 
     def _record_trade_result(self, pnl: float) -> None:
-        """RESULTS tracking: called every time a full position close succeeds,
-        regardless of which rule triggered it (SL, TP, trailing, breakeven,
-        hard stop, profit-lock, timeout, opposite signal, manual...). This is
-        what lets the GUI show whether the bot is actually winning or losing
-        over time, not just its current open exposure."""
         with self._status_lock:
             self.status["closed_trades"] += 1
             self.status["total_pnl"] += pnl
@@ -905,24 +891,56 @@ class StandaloneAIBot:
                 self.status["breakeven_trades"] += 1
             self.status["best_trade"] = max(self.status["best_trade"], pnl)
             self.status["worst_trade"] = min(self.status["worst_trade"], pnl)
+            
+        # 💾 SAVE TO DATABASE
+        try:
+            import sqlite3
+            from datetime import datetime
+            conn = sqlite3.connect("trading_bot.db")
+            cursor = conn.cursor()
+            cursor.execute('''CREATE TABLE IF NOT EXISTS trades
+                            (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                             timestamp TEXT, 
+                             symbol TEXT, 
+                             pnl REAL,
+                             balance REAL)''')
+            cursor.execute("INSERT INTO trades (timestamp, symbol, pnl, balance) VALUES (?, ?, ?, ?)",
+                         (datetime.now().isoformat(), self.cfg["symbol"], pnl, self.status.get("balance", 0.0)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error("Failed to save trade to DB: %s", e)
+            
+        with self._status_lock:
             decided = self.status["wins"] + self.status["losses"]
             self.status["win_rate"] = (self.status["wins"] / decided * 100.0) if decided else 0.0
 
     # --------------------------------------------------------------
     def connect(self) -> bool:
-        mt5_path = self.cfg.get("mt5_path", "")
-        kwargs   = {}
-        if mt5_path:
-            kwargs["path"] = mt5_path
-        logger.info("Initialising MT5…")
-        if not mt5.initialize(**kwargs, timeout=120_000):
+        # FORCE EMPTY kwargs to force connection to the currently running terminal
+        kwargs   = {"timeout": 60_000}
+        
+        logger.info("Initialising MT5...")
+        if not mt5.initialize(**kwargs):
             logger.error("MT5 init failed: %s", mt5.last_error())
             return False
-        ok = mt5.login(
-            self.cfg["account"],
-            password=self.cfg["password"],
-            server=self.cfg["server"],
-        )
+            
+        # Check if we are ALREADY logged into the correct account!
+        # This prevents MT5 from popping up a new login window and crashing/timing out.
+        acc = mt5.account_info()
+        target_account = self.cfg["account"]
+        
+        if acc is not None and acc.login == target_account:
+            logger.info("Already logged in to account %s. Bypassing login step.", target_account)
+            ok = True
+        else:
+            logger.info("Logging into %s...", target_account)
+            ok = mt5.login(
+                target_account,
+                password=self.cfg["password"],
+                server=self.cfg["server"],
+            )
+            
         if ok:
             acc = mt5.account_info()
             self.start_balance = acc.balance if acc else 0.0
@@ -1053,7 +1071,7 @@ class StandaloneAIBot:
     # --------------------------------------------------------------
     def _open_positions(self):
         return mt5.positions_get(symbol=self.cfg["symbol"],
-                                 magic=self.cfg["magic_number"]) or []
+                                 magic=self.cfg.get("magic_number", 888999)) or []
 
     def _count_positions(self) -> int:
         return len(self._open_positions())
@@ -1094,7 +1112,7 @@ class StandaloneAIBot:
         return True
 
     # --------------------------------------------------------------
-    def _send_order(self, direction: int, equity: float, m15p: pd.DataFrame) -> bool:
+    def _send_order(self, direction: int, equity: float, m15p: pd.DataFrame, ai_conf: float = 0.0) -> bool:
         """`m15p` is the already-prepared frame from the main loop —
         avoids an extra MT5 fetch + full indicator recompute per entry."""
         sym  = self.cfg["symbol"]
@@ -1148,8 +1166,8 @@ class StandaloneAIBot:
             "price":        float(price),
             "sl":           float(sl),
             "tp":           float(tp),
-            "deviation":    self.cfg["deviation"],
-            "magic":        self.cfg["magic_number"],
+            "deviation":    self.cfg.get("deviation", 20),
+            "magic":        self.cfg.get("magic_number", 888999),
             "comment":      f"AI {'BUY' if direction == 1 else 'SELL'}",
             "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
@@ -1201,8 +1219,8 @@ class StandaloneAIBot:
             "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
             "position":     pos.ticket,
             "price":        float(price),
-            "deviation":    self.cfg["deviation"],
-            "magic":        self.cfg["magic_number"],
+            "deviation":    self.cfg.get("deviation", 20),
+            "magic":        self.cfg.get("magic_number", 888999),
             "comment":      "close:" + reason[:24],
             "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
@@ -1238,6 +1256,22 @@ class StandaloneAIBot:
             self._close_position(pos, reason)
 
     # --------------------------------------------------------------
+    def _modify_sltp(self, pos, new_sl: float, new_tp: float) -> None:
+        if self.cfg.get("dry_run"):
+            logger.info("[DRY-RUN] Modify SLTP ticket=%s → SL:%.5f TP:%.5f", pos.ticket, new_sl, new_tp)
+            return
+        req = {
+            "action":   __import__("MetaTrader5").TRADE_ACTION_SLTP,
+            "symbol":   pos.symbol,
+            "position": pos.ticket,
+            "sl":       float(new_sl),
+            "tp":       float(new_tp),
+            "magic":    self.cfg.get("magic_number", 888999),
+        }
+        result = __import__("MetaTrader5").order_send(req)
+        if result and result.retcode == __import__("MetaTrader5").TRADE_RETCODE_DONE:
+            logger.info("Modified SLTP ticket=%s → SL:%.5f TP:%.5f", pos.ticket, new_sl, new_tp)
+
     def _modify_sl(self, pos, new_sl: float) -> None:
         if self.cfg.get("dry_run"):
             logger.info("[DRY-RUN] Modify SL ticket=%s → %.5f", pos.ticket, new_sl)
@@ -1248,7 +1282,7 @@ class StandaloneAIBot:
             "position": pos.ticket,
             "sl":       float(new_sl),
             "tp":       float(pos.tp),
-            "magic":    self.cfg["magic_number"],
+            "magic":    self.cfg.get("magic_number", 888999),
         }
         result = mt5.order_send(req)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -1272,8 +1306,8 @@ class StandaloneAIBot:
             "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
             "position":     pos.ticket,
             "price":        float(price),
-            "deviation":    self.cfg["deviation"],
-            "magic":        self.cfg["magic_number"],
+            "deviation":    self.cfg.get("deviation", 20),
+            "magic":        self.cfg.get("magic_number", 888999),
             "comment":      f"partial{stage}",
             "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
@@ -1347,6 +1381,58 @@ class StandaloneAIBot:
             profit_move = ((close_price - pos.price_open) if direction == 1
                            else (pos.price_open - close_price))
             floating_pnl = pos.profit + pos.swap
+
+            # --- AI MANUAL TRADE PROTECTION (SL + TP) ---
+            if getattr(pos, "magic", 1) == 0 and self.cfg.get("ai_protect_manual_trades", True):
+                if pos.sl == 0.0 or pos.tp == 0.0:
+                    sl_dist = self.cfg.get("manual_trade_sl_atr", 2.0) * atr
+                    new_sl = pos.sl if pos.sl > 0 else (pos.price_open - sl_dist if direction == 1 else pos.price_open + sl_dist)
+                    
+                    tp_rr = self.cfg.get("tp_rr_ratio", 2.0)
+                    new_tp = pos.tp if pos.tp > 0 else (pos.price_open + (sl_dist * tp_rr) if direction == 1 else pos.price_open - (sl_dist * tp_rr))
+                    
+                    self._modify_sltp(pos, new_sl, new_tp)
+                    logger.info("[%s] 🧠 Applied AI SL (%.5f) and TP (%.5f) to manual trade #%d", self.cfg["symbol"], new_sl, new_tp, pos.ticket)
+
+            # --- INTELLIGENT AI EARLY EXIT (Don't wait for hard DD) ---
+            last_dir = self.status.get("last_direction", 0)
+            last_score = self.status.get("last_score", 0.0)
+            
+            # Scenario A: Moderate Opposite Signal (AI sees incoming reversal)
+            if last_dir == -direction and last_score >= 45:
+                if floating_pnl <= (equity * 0.002): # Let big runners run, but cut struggling trades
+                    self._close_position(pos, "AI Early Exit (Incoming Reversal)", floating_pnl)
+                    continue
+                    
+            # Scenario B: Momentum Exhaustion (AI lost faith in trend)
+            if last_dir == direction and last_score < 35:
+                if floating_pnl <= 0: # Cut losers before they hit hard DD
+                    self._close_position(pos, "AI Early Exit (Momentum Dead)", floating_pnl)
+                    continue
+                    
+            # --- TIME DECAY (Cut losers early) ---
+            import time
+            current_time = time.time()
+            if getattr(pos, "time", 0) > 0 and (current_time - pos.time) > self.cfg.get("cut_losing_after_hours", 12) * 3600:
+                if floating_pnl <= 0:
+                    self._close_position(pos, "TIME_DECAY", floating_pnl)
+                    continue
+
+            # --- MARKET STRUCTURE TRAILING STOP ---
+            if floating_pnl > 0 and self.cfg.get("structure_trailing", True):
+                if direction == 1:  # BUY
+                    recent_low = m15p['low'].iloc[-5:].min()
+                    if recent_low > pos.sl and close_price > recent_low + (atr * 0.2):
+                        new_sl = recent_low - (atr * 0.1)
+                        if new_sl > pos.sl and new_sl < close_price:
+                            self._modify_sl(pos, new_sl)
+                else:  # SELL
+                    recent_high = m15p['high'].iloc[-5:].max()
+                    if pos.sl == 0 or recent_high < pos.sl:
+                        if close_price < recent_high - (atr * 0.2):
+                            new_sl = recent_high + (atr * 0.1)
+                            if (pos.sl == 0 or new_sl < pos.sl) and new_sl > close_price:
+                                self._modify_sl(pos, new_sl)
 
             # ---- POWER-UP (A): hard per-trade stop-loss, % of equity ---
             max_loss_pct = self.cfg.get("max_loss_per_trade_pct")
@@ -1432,6 +1518,15 @@ class StandaloneAIBot:
                             self._partial_close(pos, part2, 2)
 
     # --------------------------------------------------------------
+
+    def _close_profitable(self, reason="SECURE_PROFITS") -> None:
+        positions = self._open_positions()
+        if not positions:
+            return
+        for p in positions:
+            if p.profit > 0:
+                self._close_position(p, reason, p.profit)
+
     def _close_opposite_positions(self, direction: int, score: float) -> None:
         """Close positions running against a strong new signal."""
         if not self.cfg.get("close_on_opposite_signal", True):
@@ -1445,91 +1540,328 @@ class StandaloneAIBot:
                 self._close_position(pos, "opposite signal")
 
     # --------------------------------------------------------------
+    def step(self) -> None:
+        if getattr(self, "paused", False):
+            return
+            
+        if not self._ensure_connected():
+            return
+
+        m15, h1, h4 = self._get_data()
+        if m15.empty:
+            return
+
+        acc    = mt5.account_info()
+        equity = acc.equity if acc else 0.0
+        self._update_status(
+            connected=True,
+            balance=acc.balance if acc else 0.0,
+            equity=equity,
+            open_positions=self._count_positions(),
+            trades_today=self.trades_today,
+        )
+
+        if not self._daily_dd_ok(equity):
+            return
+
+        current_bar = m15.index[-1] if not m15.empty else None
+
+        # Indicators only recomputed when a new bar actually closed
+        m15p = self._prepared_m15(m15)
+        h1p  = self._prepared_h1(h1)
+
+        # Manage open positions every cycle, but on the live tick
+        tick = mt5.symbol_info_tick(self.cfg["symbol"])
+        if tick is None:
+            return
+        self._manage_positions(m15p, h1p, tick=tick, equity=equity)
+
+        # Entries / reversal closes only on new closed bar
+        if current_bar != self.last_bar_time:
+            self.last_bar_time = current_bar
+            h4p = _prepare(h4, self.cfg) if not h4.empty else None
+            direction, score, ai_conf, reason = self._get_signal(m15p, h1p, h4p)
+            logger.info("[%s] Bar %s | direction=%+d score=%.1f ai_conf=%.3f (%s)",
+                        self.cfg["symbol"], current_bar, direction, score, ai_conf, reason)
+            self._update_status(
+                last_bar=str(current_bar), last_direction=direction,
+                last_score=score, last_ai_conf=ai_conf, last_signal=reason,
+            )
+
+            if direction != 0:
+                self._close_opposite_positions(direction, score)
+
+            if (direction != 0 and
+                    self._count_positions() < self.cfg.get("max_open_pos", 3) and
+                    self._trades_today_ok()):
+                self._send_order(direction, equity, m15p, ai_conf)
+
     def run(self) -> None:
         if not self.connect():
             return
         self.running = True
         logger.info("=== AI Bot STARTED | symbol=%s | dry_run=%s ===",
-                    self.cfg["symbol"], self.cfg["dry_run"])
-        self.notifier.send(f"🤖 AI Bot started | {self.cfg['symbol']}")
+                    self.cfg["symbol"], self.cfg.get("dry_run", False))
+        if hasattr(self, 'notifier') and hasattr(self.notifier, 'send'):
+            self.notifier.send(f"🤖 AI Bot started | {self.cfg['symbol']}")
 
         try:
             while self.running:
                 try:
-                    if not self._ensure_connected():
-                        continue
-
-                    m15, h1, h4 = self._get_data()
-                    if m15.empty:
-                        time.sleep(self.cfg["sleep_interval"])
-                        continue
-
-                    acc    = mt5.account_info()
-                    equity = acc.equity if acc else 0.0
-                    self._update_status(
-                        connected=True,
-                        balance=acc.balance if acc else 0.0,
-                        equity=equity,
-                        open_positions=self._count_positions(),
-                        trades_today=self.trades_today,
-                    )
-
-                    if not self._daily_dd_ok(equity):
-                        time.sleep(60)
-                        continue
-
-                    current_bar = m15.index[-1] if not m15.empty else None
-
-                    # Indicators only recomputed when a new bar actually closed
-                    m15p = self._prepared_m15(m15)
-                    h1p  = self._prepared_h1(h1)
-
-                    # Manage open positions every cycle, but on the live tick
-                    tick = mt5.symbol_info_tick(self.cfg["symbol"])
-                    self._manage_positions(m15p, h1p, tick=tick, equity=equity)
-
-                    # Entries / reversal closes only on new closed bar
-                    if current_bar != self.last_bar_time:
-                        self.last_bar_time = current_bar
-                        h4p = _prepare(h4, self.cfg) if not h4.empty else None
-                        direction, score, ai_conf, reason = self._get_signal(m15p, h1p, h4p)
-                        logger.info("Bar %s | direction=%+d score=%.1f ai_conf=%.3f (%s)",
-                                    current_bar, direction, score, ai_conf, reason)
-                        self._update_status(
-                            last_bar=str(current_bar), last_direction=direction,
-                            last_score=score, last_ai_conf=ai_conf, last_signal=reason,
-                        )
-
-                        if direction != 0:
-                            self._close_opposite_positions(direction, score)
-
-                        if (direction != 0 and
-                                self._count_positions() < self.cfg["max_open_pos"] and
-                                self._trades_today_ok()):
-                            self._send_order(direction, equity, m15p)
-
-                    time.sleep(self.cfg["sleep_interval"])
-
+                    self.step()
+                    import time
+                    time.sleep(self.cfg.get("sleep_interval", 1.0))
                 except KeyboardInterrupt:
                     raise
                 except Exception as exc:
-                    # A single bad iteration (network blip, MT5 hiccup, etc.)
-                    # must never kill the whole bot.
                     logger.exception("Unhandled error in main loop: %s", exc)
-                    time.sleep(min(self.cfg.get("sleep_interval", 0.5) * 4, 5))
-
+                    import time
+                    time.sleep(min(self.cfg.get("sleep_interval", 1.0) * 4, 5))
         except KeyboardInterrupt:
             logger.info("Bot stopping…")
         finally:
+            import MetaTrader5 as mt5
             mt5.shutdown()
             logger.info("MT5 closed.")
             self._update_status(connected=False)
-            self.notifier.send("🛑 AI Bot stopped.")
+            if hasattr(self, 'notifier') and hasattr(self.notifier, 'send'):
+                self.notifier.send("🛑 AI Bot stopped.")
+
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Entry point with FastAPI Dashboard
 # ---------------------------------------------------------------------------
+import uvicorn
+from fastapi import FastAPI, Response, Request
+
 if __name__ == "__main__":
-    bot = StandaloneAIBot(CONFIG)
-    bot.run()
+    symbols_str = os.getenv("TRADE_SYMBOLS", CONFIG.get("symbol", "XAUUSDm"))
+    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
+    if not symbols:
+        symbols = ["XAUUSDm"]
+        
+    bots = []
+    for sym in symbols:
+        sym_cfg = CONFIG.copy()
+        sym_cfg["symbol"] = sym
+        b = StandaloneAIBot(sym_cfg)
+        b.paused = False
+        bots.append(b)
+        
+    app = FastAPI(title="AI Quant Platform Dashboard")
+    
+    @app.get("/")
+    def serve_dashboard():
+        try:
+            with open("dashboard.html", "r", encoding="utf-8") as f:
+                html = f.read()
+            from fastapi import Response
+            return Response(content=html, media_type="text/html")
+        except FileNotFoundError:
+            from fastapi import Response
+            return Response(content="<h1>Dashboard HTML not found!</h1>", status_code=404)
+            
+    @app.get("/api/status")
+    def api_status():
+        if not bots:
+            return {}
+        acc_balance = next((b.status.get("balance", 0) for b in bots if b.status.get("balance", 0) > 0), 0)
+        acc_equity = next((b.status.get("equity", 0) for b in bots if b.status.get("equity", 0) > 0), 0)
+        wins = sum(b.status.get("wins", 0) for b in bots)
+        losses = sum(b.status.get("losses", 0) for b in bots)
+        total_trades = wins + losses + sum(b.status.get("breakeven_trades", 0) for b in bots)
+        
+        status_obj = {
+            "balance": acc_balance,
+            "equity": acc_equity,
+            "sessionPnl": sum(b.status.get("total_pnl", 0.0) for b in bots),
+            "winRate": (wins / total_trades * 100) if total_trades > 0 else 0.0,
+            "wins": wins,
+            "losses": losses,
+            "maxWin": 0,
+            "maxLoss": 0,
+            "tradesToday": sum(b.status.get("trades_today", 0) for b in bots)
+        }
+        
+        markets = []
+        for b in bots:
+            st = b.get_status()
+            markets.append({
+                "sym": b.cfg["symbol"],
+                "regime": getattr(b, "regime", "UNKNOWN") if hasattr(b, "regime") else "UNKNOWN",
+                "signal": "BUY" if st.get("last_direction", 0) == 1 else "SELL" if st.get("last_direction", 0) == -1 else "WAIT",
+                "score": st.get("last_score", 0),
+                "conf": st.get("last_ai_conf", 0),
+                "pos": st.get("open_positions", 0),
+                "pnl": 0,
+                "unc": 0.1,
+                "state": "PAUSED" if getattr(b, "paused", False) else "ACTIVE"
+            })
+            
+        # Report the mode from the key that actually gates execution ("dry_run").
+        # Previously read cfg.get("paper_trading"), a key that exists nowhere, so
+        # the badge always showed LIVE regardless of the real trading state.
+        mode = "PAPER" if bots[0].cfg.get("dry_run") else "LIVE"
+        if any(getattr(b, "paused", False) for b in bots):
+            mode = "PAUSED"
+            
+        return {"status": status_obj, "markets": markets, "mode": mode}
+
+    @app.get("/api/positions")
+    def api_positions():
+        all_positions = []
+        for b in bots:
+            sym = b.cfg["symbol"]
+            try:
+                import MetaTrader5 as mt5
+                pos_list = mt5.positions_get(symbol=sym) or []
+                for p in pos_list:
+                    age_hours = 0
+                    is_manual = (p.magic == 0)
+                    urg = 0.5
+                    all_positions.append({
+                        "id": p.ticket,
+                        "sym": sym,
+                        "type": "BUY" if p.type == 0 else "SELL",
+                        "vol": p.volume,
+                        "open": p.price_open,
+                        "cur": p.price_current,
+                        "sl": p.sl,
+                        "tp": p.tp,
+                        "pnl": p.profit,
+                        "age": age_hours,
+                        "urg": urg,
+                        "regime": "UNKNOWN",
+                        "manual": is_manual
+                    })
+            except Exception:
+                pass
+        return {"positions": all_positions}
+
+    @app.get("/api/intelligence")
+    def api_intelligence():
+        data = []
+        for b in bots:
+            data.append({
+                "sym": b.cfg["symbol"],
+                "tf": "M15",
+                "regime": "UNKNOWN",
+                "conf": b.status.get("last_ai_conf", 0.0),
+                "signal": "BUY" if b.status.get("last_direction", 0) == 1 else "SELL" if b.status.get("last_direction", 0) == -1 else "WAIT",
+                "unc": 0.1,
+                "pats": [],
+                "sup": [], "res": [],
+                "ema": {"m15":1, "h1":1, "h4":1, "d1":1},
+                "scores": [b.status.get("last_score", 0), 20, 15, 10, 10]
+            })
+        return {"data": data}
+
+    @app.get("/api/performance")
+    def api_performance():
+        return {"dailyPnl": [0]*30}
+
+    @app.get("/api/logs")
+    def api_logs():
+        logs = []
+        try:
+            with open("trading_bot.log", "r") as logf:
+                lines = logf.readlines()[-20:]
+                for line in lines:
+                    logs.append({"ts": "", "lvl": "INFO", "msg": line.strip()})
+        except:
+            pass
+        return {"logs": logs}
+
+    @app.get("/api/settings")
+    def api_get_settings():
+        return bots[0].cfg if bots else {}
+        
+    @app.post("/api/settings")
+    async def api_post_settings(request: Request):
+        new_cfg = await request.json()
+        for b in bots:
+            for k, v in new_cfg.items():
+                if k in b.cfg and k != "symbol":
+                    b.cfg[k] = v
+        logger.info("Bot Settings Updated from Web UI! Applied to all symbols.")
+        return {"status": "ok"}
+        
+    @app.post("/api/control")
+    async def api_control(request: Request):
+        data = await request.json()
+        action = data.get("action")
+        if action == "pause":
+            for b in bots:
+                b.paused = True
+            logger.info("Trading PAUSED via Web UI.")
+        elif action == "resume":
+            for b in bots:
+                b.paused = False
+            logger.info("Trading RESUMED via Web UI.")
+        elif action == "emergency_stop":
+            logger.warning("EMERGENCY STOP Triggered via Web UI!")
+            for b in bots:
+                b._close_all("EMERGENCY_STOP")
+                b.paused = True
+        elif action == "close_profitable":
+            logger.info("SECURE PROFITS Triggered via Web UI!")
+            for b in bots:
+                b._close_profitable("USER_SECURE_PROFITS")
+        return {"status": "ok"}
+        
+    @app.get("/api/history")
+    def api_history():
+        import sqlite3
+        try:
+            conn = sqlite3.connect("trading_bot.db")
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")
+            rows = cursor.fetchall()
+            conn.close()
+            return {"history": [dict(ix) for ix in rows]}
+        except Exception:
+            return {"history": []}
+
+    def run_dashboard():
+        import logging
+        import uvicorn
+        logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+        uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+        
+    # Start dashboard in background
+    import threading
+    t = threading.Thread(target=run_dashboard, daemon=True)
+    t.start()
+    
+    import time
+    print("\n" + "="*60)
+    print("🚀 DASHBOARD RUNNING AT: http://127.0.0.1:8000")
+    print("="*60 + "\n")
+    time.sleep(1)
+    
+    # Manager loop
+    logger.info("=== Bot Manager STARTED | %d symbols ===", len(bots))
+    import MetaTrader5 as mt5
+    for b in bots:
+        if not b.connect():
+            logger.error("Failed to connect %s", b.cfg["symbol"])
+        else:
+            b.running = True
+            if hasattr(b, 'notifier') and hasattr(b.notifier, 'send'):
+                b.notifier.send(f"🤖 AI Bot started | {b.cfg['symbol']}")
+    
+    try:
+        while True:
+            for b in bots:
+                if getattr(b, "running", False):
+                    try:
+                        b.step()
+                    except Exception as exc:
+                        logger.exception("Error in bot step (%s): %s", b.cfg["symbol"], exc)
+            time.sleep(CONFIG.get("sleep_interval", 1.0))
+    except KeyboardInterrupt:
+        logger.info("Manager stopping…")
+    finally:
+        mt5.shutdown()

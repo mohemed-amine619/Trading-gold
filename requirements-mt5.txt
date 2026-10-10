@@ -1,0 +1,22 @@
+# requirements-mt5.txt — Windows-only dependencies for the MT5 bridge.
+#
+# DO NOT INSTALL THIS ON UBUNTU / LINUX / INSIDE DOCKER.
+# MetaTrader5 is a Windows-only package (no Linux wheel exists); attempting
+# `pip install -r requirements-mt5.txt` on Linux fails with
+# "No matching distribution found for MetaTrader5".
+#
+# This file is for the Windows 11 VM that runs the MT5 terminal.
+# See docs/MT5_WINDOWS_BRIDGE.md.
+
+# ── Broker terminal bridge ───────────────────────────────────────────────────
+MetaTrader5            # unpinned: Windows-only, published per broker build
+
+# ── API surface for the bridge service ───────────────────────────────────────
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.0
+
+# ── Market data & analysis (shared with the core) ────────────────────────────
+pandas==3.0.6
+pandas-ta==0.4.71b0
+numpy==2.2.6

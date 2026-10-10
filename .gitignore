@@ -132,3 +132,54 @@ dmypy.json
 tmp/
 temp/
 scratch/
+
+# -----------------------------------------------------------------------------
+# Local databases (contains live account and trade data — never commit)
+# The Docker stack uses PostgreSQL; these are the SQLite dev copies only.
+# -----------------------------------------------------------------------------
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# -----------------------------------------------------------------------------
+# One-shot source patchers — DO NOT COMMIT, DO NOT RUN
+# -----------------------------------------------------------------------------
+# These are already-applied, non-idempotent scripts that rewrite source files
+# in place. Re-running them corrupts the tree (update_manager.py truncates
+# core/position/manager.py; patch_position_manager.py duplicates lines).
+# They are kept locally for reference only. See AGENTS.md "Dead code".
+modify_html.py
+update_dashboard_settings.py
+update_manager.py
+update_status.py
+patch_dashboard_controls.py
+patch_dashboard_controls_2.py
+patch_position_manager.py
+manual_protect.py
+
+# Stale fork of run.py (untracked; run.py is the live bot and a strict
+# superset). Local reference only.
+run_pro.py
+
+# -----------------------------------------------------------------------------
+# Vendored installers / OS junk
+# -----------------------------------------------------------------------------
+get-pip.py
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# -----------------------------------------------------------------------------
+# Runtime logs (may contain account details)
+# -----------------------------------------------------------------------------
+*.log
+logs/
+
+# -----------------------------------------------------------------------------
+# NOTE ON PyInstaller .spec files
+# -----------------------------------------------------------------------------
+# AI_Trading_Bot.spec and PositionDashboard.spec are hand-written build
+# configuration, NOT generated output, so they are intentionally tracked.
+# Only generated artefacts (build/, dist/) are ignored above.
