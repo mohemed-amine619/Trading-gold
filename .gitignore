@@ -183,3 +183,11 @@ logs/
 # AI_Trading_Bot.spec and PositionDashboard.spec are hand-written build
 # configuration, NOT generated output, so they are intentionally tracked.
 # Only generated artefacts (build/, dist/) are ignored above.
+
+# -----------------------------------------------------------------------------
+# Windows runtime artifacts
+# -----------------------------------------------------------------------------
+# PID tracking for scripts/windows/*.ps1
+run/
+# Backups produced by scripts/windows/backup.ps1
+backups/

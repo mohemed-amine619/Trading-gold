@@ -1,21 +1,138 @@
 # PROJECT STATUS
 
-## 1. IMPLEMENTED
-- **Position Monitoring & Reconciliation**
-  - Developed full state reconciliation engine for `PositionManager`.
-  - Enforces three operational policies for manual positions.
-- **SL/TP and Trailing-stop Management**
-  - Extracted pure trailing calculations into `core/position/trailing.py`.
-  - Implemented Fixed-distance, ATR-based, Break-even, and Profit-locking trailing.
-- **Fully Configurable Trading Dashboard**
-  - Introduced `SystemConfig` and `ConfigAudit` SQLAlchemy models.
-  - Rebuilt `dashboard.html` with configuration tabs and Live Controls.
-- **Market Intelligence & Real-Time Decision Engine (New!)**
-  - Implemented `MarketIntelligenceEngine` (`core/market/intelligence.py`) to classify market regimes (Uptrend, Downtrend, Correction, Ranging).
-  - Implemented `PNLDecisionEngine` (`core/position/decision.py`) to output management recommendations (HOLD, TRAIL_STOP, MOVE_TO_BREAKEVEN).
-  - Integrated `MarketIntelligenceEngine` and `PNLDecisionEngine` into `PositionManager` to compute real-time trailing stops and regime evaluations.
-  - Fixed `test_position.py` tests by correctly asserting normalized MT5 tick values (floating point precision).
-  - Modified `RiskEngine` to natively ingest floating real-time PNL instead of relying exclusively on basic account balance.
+> **Target platform: native Windows 11.** No Docker, WSL, Linux host or VM is
+> required. Last updated: 2026-10-11.
+
+## 0. TEST BASELINE
+
+**217 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
+
+| Area | Tests | Status |
+|---|---|---|
+| Trading safety (paper default) | 18 | Implemented and tested |
+| Execution safety (idempotency) | 31 | Implemented and tested |
+| Bridge contract and auth | 31 | Implemented, tested against a mock |
+| Instrument registry | 55 | Implemented and tested |
+| Windows compatibility | 18 | Implemented and tested |
+| Risk, position, strategy, market, backtest, API | 64 | Implemented and tested |
+
+**No automated test submits a real order.** All broker interaction uses
+`MockMT5Adapter`.
+
+---
+
+## 1. IMPLEMENTED — NATIVE WINDOWS 11
+
+### Tooling (`scripts/windows/`, 15 PowerShell scripts)
+
+All parse-checked and several executed end-to-end during development.
+
+| Script | Status |
+|---|---|
+| `doctor.ps1` | **Implemented and executed.** PASS/WARN/FAIL per check; exit 1 on failure |
+| `install.ps1` | Implemented — full chain, stops at first hard failure |
+| `setup-venv.ps1` | Implemented — Python 3.12 venv with MT5 compatibility warning |
+| `install-dependencies.ps1` | Implemented — `-SkipMetaTrader5`, verifies imports after install |
+| `setup-database.ps1` | Implemented — never creates/drops; prints SQL if missing |
+| `migrate-database.ps1` | **Implemented and executed.** `-Stamp`, `-ShowCurrent`, `-Autogenerate`, guarded `-DowngradeTo` |
+| `start.ps1` | **Implemented and executed.** Validates config → DB → deps → starts → verifies readiness |
+| `stop.ps1` | **Implemented and executed.** Graceful then forced; `-WhatIf` |
+| `status.ps1` | **Implemented and executed.** Live checks only |
+| `test.ps1` | **Implemented and executed.** 217 pass |
+| `backup.ps1` | **Implemented and executed.** pg_dump / SQLite, retention limited to `trading-*` |
+| `restore.ps1` | **Implemented and executed.** Requires typed `RESTORE`, safety backup first |
+| `update.ps1` | Implemented — backup → pull → deps → migrate → restart |
+| `uninstall.ps1` | Implemented — preserves source, `.env` and backups |
+| `common.ps1` | Shared helpers: paths, `.env` parsing, config validation, PG detection, process control |
+
+### Cross-platform code fixes
+
+- **`core/logging_setup.py` (new).** Central logging with UTC timestamps
+  (`UTCFormatter`), rotating file handler, and credential redaction. Previously
+  nothing configured logging and nothing created `logs/`, which is a hard
+  failure on Windows.
+- **SQLite journal mode.** WAL on POSIX, DELETE on Windows — WAL sidecar files
+  lock aggressively on Windows. `busy_timeout=5000` added.
+  `set_sqlite_journal_mode()` allows an override.
+- **`api/main.py`.** Configures logging at startup; logging failure never
+  prevents the API from serving.
+
+### Safety (from earlier phases, retained)
+
+- `TRADING_MODE` defaults to `paper`; unrecognised values fail closed.
+- Idempotency ledger: one decision, at most one order.
+- `ExecutionState.UNKNOWN` — uncertain outcomes are never auto-retried.
+- Instrument registry refuses to trade missing/stale metadata.
+
+---
+
+## 2. NOT VERIFIED ON WINDOWS
+
+I developed on Linux. PowerShell 7.4.6 was installed on the build host so the
+scripts could be **executed**, not just written — `doctor`, `start`, `stop`,
+`status`, `migrate`, `backup`, `test` were all run. That validates logic and
+syntax, but **not Windows-specific behaviour**.
+
+Must be verified on Windows 11:
+
+- [ ] `Get-NetTCPConnection`, `Get-CimInstance`, `Get-Service` behaviour
+- [ ] `Start-Process -RedirectStandardOutput` stream handling
+- [ ] Windows firewall / Defender interaction
+- [ ] NTFS file locking for SQLite under concurrency
+- [ ] MetaTrader5 installation and terminal connectivity
+- [ ] PostgreSQL service install and `pg_dump` availability
+- [ ] Execution-policy behaviour on a default Windows image
+
+A precise checklist is in `docs/TROUBLESHOOTING.md`.
+
+---
+
+## 3. KNOWN GAPS (honest)
+
+| Gap | Impact |
+|---|---|
+| **API has no authentication** | Loopback binding is a mitigation, not security |
+| **`/api/emergency-stop` is a stub** | Returns success, stops nothing; not wired to `RiskEngine` |
+| **Money stored as `Float`** | Not accounting-grade precision |
+| **Bridge modify/close return 501** | Live position management impossible over HTTP |
+| **No broker connection ever tested end-to-end** | All broker testing is against a mock |
+| **No trading loop in the modular core** | `core/` engines exist but are not wired to a scheduler |
+| **Backtesting minimal** | Look-ahead bias not systematically prevented |
+| **`run.py` still holds credential fallbacks** | Lines 130–132; needs rotation at the broker |
+| **Index/energy asset classes unverified** | No broker adapter exercised |
+| **`/api/status` returns hardcoded values** | `is_connected`, `open_positions`, `daily_pnl` are stubs |
+
+---
+
+## 4. PHASES
+
+| Phase | Status |
+|---|---|
+| Audit | ✅ Complete |
+| Windows compatibility | ✅ Code complete; Windows execution unverified |
+| Database and configuration | ✅ Complete (SQLite + PostgreSQL paths) |
+| MT5 integration | ⏳ Adapter exists; **never run against a real terminal** |
+| Runtime orchestration | ✅ Scripts complete; executed on Linux only |
+| Trading and risk integrity | ✅ Paper default, idempotency, unknown outcomes |
+| Verification | ⚠️ 217 tests pass on Linux; Windows run outstanding |
+| Documentation | ✅ README + 9 documents |
+
+---
+
+## 5. NEXT TASK
+
+**Run `doctor.ps1` and `start.ps1` on the actual Windows 11 machine** and report
+the output. That is the single highest-value action: it converts the
+unverified Windows claims in §2 into facts, and will surface real
+platform-specific failures that no amount of Linux testing can find.
+
+After that, in order:
+
+1. Wire `/api/emergency-stop` to `RiskEngine.trigger_emergency_stop()`.
+2. Connect a live MT5 terminal and verify `RealMT5Adapter` end-to-end.
+3. Add API authentication before any non-loopback binding.
+4. Convert monetary columns to `Numeric`.
+5. Implement bridge `position/modify` and `position/close`.
 
 ## 2. FILES CHANGED
 - `core/market/intelligence.py` (New: Market Regime Classifier)

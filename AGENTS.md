@@ -2,6 +2,11 @@
 
 Python trading platform (MT5 broker adapter + modular `core/` + FastAPI). Read this before editing anything.
 
+**Target platform is native Windows 11** — no Docker, WSL, Linux host or VM.
+Use `.venv\Scripts\python.exe` there, or `.venv/bin/python` on Linux.
+PowerShell tooling lives in `scripts/windows/`; see `README.md` and
+`docs/WINDOWS_ARCHITECTURE.md`.
+
 ## Repo state — read this first
 
 **This repo is mid-migration and only 9 files are git-tracked.** `git ls-files` returns only:
@@ -27,7 +32,7 @@ Everything else — `core/`, `api/`, `tests/`, `alembic/`, `docs/`, `dashboard.h
 Run everything with `.venv/bin/python` — the repo has two virtualenvs and only `.venv` has pytest.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 199 passed
+.venv/bin/python -m pytest tests/ -q          # 217 passed
 .venv/bin/python -m pytest tests/unit/test_risk_engine.py -q   # single file
 .venv/bin/python -m pytest tests/unit -k approve -q            # single test by name
 ```
@@ -196,5 +201,5 @@ Notable: `core/position/trailing.py` holds **pure functions** with no broker dep
 
 - One coherent, testable phase at a time; run `.venv/bin/python -m pytest tests/ -q` after each change.
 - Never report a test as passing unless you actually ran it. Never let tests touch a live account.
-- Update `docs/PROJECT_STATUS.md` when behavior changes. It currently claims 63/63 passing; the real count is now 199. Keep that number honest.
+- Update `docs/PROJECT_STATUS.md` when behavior changes. The real count is now 217; keep that number honest.
 - `docs/ROADMAP.md` and `docs/ARCHITECTURE.md` are **aspirational** — they describe the intended 12-phase platform, not current state. `docs/ARCHITECTURE.md:9` is already stale (claims `run.py` is 1,535 lines; it is 1840). Don't treat any of it as implemented without checking the code.

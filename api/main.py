@@ -10,6 +10,7 @@ import logging
 import threading
 from contextlib import asynccontextmanager
 
+from core.logging_setup import configure_logging
 from core.settings import get_settings, Settings
 from core.database.engine import init_async_db
 from api.config_router import router as config_router
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Initialise the async database engine.
+    Configure logging and initialise the async database engine.
 
     Failure is logged and swallowed rather than raised: the process must stay
     up so that /api/health (liveness) and /api/ready (readiness) can answer.
@@ -28,6 +29,17 @@ async def lifespan(app: FastAPI):
     Schema is owned by Alembic, so no tables are created here.
     """
     settings = get_settings()
+    try:
+        configure_logging(
+            level=settings.log_level.value,
+            log_dir=settings.log_dir,
+            log_filename="api.log",
+        )
+        logger.info("Logging initialised (level=%s)", settings.log_level.value)
+    except Exception as exc:
+        # Logging must never prevent the API from serving.
+        logger.error("Logging configuration failed: %s: %s", type(exc).__name__, exc)
+
     try:
         await init_async_db(settings.database_url, create_tables=False)
         logger.info("Database engine initialised (url=%s)", _redact_url(settings.database_url))

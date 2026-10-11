@@ -6,6 +6,7 @@ Supports both sync (for the trading loop) and async (for the API).
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager, asynccontextmanager
 from typing import Generator
 
@@ -14,6 +15,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import Session, sessionmaker
 
 from core.database.models import Base
+
+# SQLite journal mode override. ``None`` = platform default (WAL on POSIX,
+# DELETE on Windows). Set ``enabled=True``/``False`` to force either mode.
+_SQLITE_WAL: dict[str, bool] = {"enabled": None}
+
+
+def set_sqlite_journal_mode(use_wal: bool) -> None:
+    """
+    Force SQLite WAL on or off.
+
+    WAL improves concurrency but creates ``-wal``/``-shm`` sidecar files that
+    Windows locks aggressively. The Windows default is therefore the DELETE
+    journal; call this with ``False`` there if you see "database is locked".
+
+    Must be called before :func:`init_db`.
+    """
+    _SQLITE_WAL["enabled"] = bool(use_wal)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,9 +68,23 @@ def init_db(database_url: str, create_tables: bool = True) -> None:
         @event.listens_for(_sync_engine, "connect")
         def _set_sqlite_pragma(dbapi_connection, _connection_record):
             cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
+            # WAL gives better concurrency but keeps -wal/-shm sidecar files
+            # that Windows locks harder than POSIX. Use WAL only on POSIX, or
+            # when the caller opts in for SQLite.
+            #
+            # On Windows the default DELETE journal avoids "database is locked"
+            # failures when a second process (e.g. the GUI) opens the same file.
+            use_wal = _SQLITE_WAL.get("enabled")
+            if use_wal is None:
+                use_wal = os.name != "nt"
+            cursor.execute(f"PRAGMA journal_mode={'WAL' if use_wal else 'DELETE'}")
             cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA synchronous=NORMAL")
+            # NORMAL is safe with WAL; with the DELETE journal FULL is the
+            # durable choice, since there is no WAL to recover from.
+            cursor.execute(f"PRAGMA synchronous={'NORMAL' if use_wal else 'FULL'}")
+            # Wait rather than immediately raising SQLITE_BUSY. Matters when a
+            # backup or the GUI holds a write lock.
+            cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
 
     if create_tables:
