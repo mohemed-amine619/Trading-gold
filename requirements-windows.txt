@@ -1,0 +1,54 @@
+# requirements-windows.txt — Full platform install for WINDOWS.
+#
+# Use this when running EVERYTHING on one Windows machine (no Ubuntu, no
+# Docker): the trading bot, the API, the database layer, and the MT5 bridge.
+#
+#   py -3.12 -m venv .venv
+#   .venv\Scripts\Activate.ps1
+#   pip install -r requirements-windows.txt
+#
+# This is the ONLY requirements file you need on Windows. It includes
+# MetaTrader5, which is Windows-only — that is why it is not in
+# requirements-core.txt.
+#
+# Verified against Python 3.12.
+
+# ── MetaTrader 5 (Windows-only) ─────────────────────────────────────────────
+# Unpinned: the package is published per broker build and has no Linux wheel.
+# If installation fails, download the "MetaTrader5" wheel for Python 3.12 from
+# PyPI and install it first, then re-run this file.
+MetaTrader5
+
+# ── Web / API / bridge server ────────────────────────────────────────────────
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+
+# ── Configuration & validation ──────────────────────────────────────────────
+pydantic==2.14.0
+pydantic-settings==2.15.0
+python-dotenv==1.2.4
+
+# ── Database ─────────────────────────────────────────────────────────────────
+# greenlet is required by SQLAlchemy's asyncio layer at import time; without
+# it you get a confusing ImportError, not a pip error.
+SQLAlchemy[asyncio]==2.1.4
+greenlet==3.5.6
+alembic==1.20.0
+asyncpg==0.32.0
+psycopg[binary]==3.3.6
+aiosqlite==0.21.0
+
+# ── Market data & analysis ───────────────────────────────────────────────────
+pandas==3.0.6
+pandas-ta==0.4.71b0
+numpy==2.2.6
+scikit-learn==1.9.1
+scipy==1.18.1
+
+# ── Networking ───────────────────────────────────────────────────────────────
+requests==2.34.2
+httpx==0.28.1
+
+# ── Testing (optional but recommended) ───────────────────────────────────────
+pytest==9.1.1
+pytest-asyncio==1.4.0
