@@ -27,7 +27,7 @@ Everything else — `core/`, `api/`, `tests/`, `alembic/`, `docs/`, `dashboard.h
 Run everything with `.venv/bin/python` — the repo has two virtualenvs and only `.venv` has pytest.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 81 passed (63 pre-existing + 18 safety)
+.venv/bin/python -m pytest tests/ -q          # 135 passed
 .venv/bin/python -m pytest tests/unit/test_risk_engine.py -q   # single file
 .venv/bin/python -m pytest tests/unit -k approve -q            # single test by name
 ```
@@ -62,7 +62,7 @@ Do not hardcode gold assumptions. This is an explicit project mandate.
 - `SYMBOLS` (env, comma-separated) drives the list — `core/settings.py:88-96`. **Watch out: `.env.example:24` documents `TRADE_SYMBOLS`, but `settings.py:90` uses `validation_alias="SYMBOLS"` — `TRADE_SYMBOLS` is silently ignored.** Verified: setting `TRADE_SYMBOLS` yields `['XAUUSDm']`; setting `SYMBOLS` yields the real value.
 - `run.py` uses a *different* key: `TRADE_SYMBOL` (singular) for its `CONFIG["symbol"]` default (`run.py:120`) and `TRADE_SYMBOLS` for the manager loop (`run.py:1615`).
 - `MockMT5Adapter` defaults to `symbol="XAUUSDm"`, `base_price=2000.0` — **pass these explicitly** for non-gold tests or P&L assertions will be nonsense.
-- `core/database/models.py:173` `Symbol` model exists (tick size, contract size, volume limits) but **nothing populates it**; there is no instrument registry or asset-class field yet. `MockMT5Adapter.get_symbol_info` returns the same gold-shaped defaults for every symbol (`adapter.py:412-427`). Treat instrument-spec normalization as unbuilt.
+- The legacy `core/database/models.py` `Symbol` table is still unpopulated — the new `core/instruments/` registry is the source of truth going forward. No consumer is wired into `run.py` yet.
 - Never claim an instrument is supported until a test demonstrates it.
 
 ## Dead code — do not run these
@@ -126,6 +126,19 @@ docker compose down -v        # DESTROYS the database volume
 - VM is at **192.168.122.212** on libvirt **NAT** (`virbr0`), *not* a bridged LAN network. Re-discover with `virsh domifaddr win11` — the address is DHCP and may change. Do not hardcode it.
 - Docker containers use a different network namespace than the host; verify container→VM reachability with `docker compose exec app curl ...` rather than assuming a host ping implies it.
 
+## Instrument registry (P5 — the multi-asset foundation)
+
+**Rule 10 of the mandate: never substitute a default for missing broker metadata.** This is enforced in code, not by convention.
+
+- `core/instruments/model.py` — `InstrumentSpec`, `InstrumentRegistry`, `AssetClass`, `TradingStatus`. Critical fields default to **`None`**, never to plausible constants.
+- `core/instruments/adapter.py` — maps broker `SymbolInfo` → `InstrumentSpec`. Imports no broker SDK.
+- `InstrumentRegistry.require()` raises `ResolutionError` for: unknown symbol, missing critical fields, stale metadata, non-tradable status.
+- `InstrumentRegistry.size_position()` refuses rather than exceeding the risk budget. `None` from a calc means "cannot size" — **never treat it as 0**.
+- `core/mt5/types.py SymbolInfo` contract fields are `Optional[...] = None`. A broker value of `0` is genuine data, distinct from absence — do not collapse them.
+- **Never reintroduce gold-shaped defaults.** `MockMT5Adapter` returns per-asset specs (gold 100oz/0.01, forex 100000/1e-5, crypto 1.0, index, energy). Returning one global spec set made position sizing inert — every size floored to `volume_min`. `tests/unit/test_instruments.py::test_size_position_is_proportional_to_risk_budget` guards this.
+- `AssetClass.UNKNOWN` is a valid, honest answer. Never guess an asset class.
+- No instrument registry consumer exists in `run.py` yet; it is not wired into any entrypoint.
+
 ## Architecture reference
 
 ```
@@ -135,6 +148,7 @@ core/
   mt5/                 adapter.py (MT5Adapter ABC, RealMT5Adapter, MockMT5Adapter)
                        types.py (dataclasses), connection.py (reconnect/backoff)
   market/              engine.py, pipeline.py, intelligence.py (regime classifier)
+  instruments/         model.py (InstrumentSpec/Registry), adapter.py (broker mapping)
   strategy/            base.py, ensemble.py, strategies.py
   ai/                  decision.py (LLM), provider.py
   risk/engine.py       approve() gate, lot sizing, emergency stop, loss-streak
@@ -182,5 +196,5 @@ Notable: `core/position/trailing.py` holds **pure functions** with no broker dep
 
 - One coherent, testable phase at a time; run `.venv/bin/python -m pytest tests/ -q` after each change.
 - Never report a test as passing unless you actually ran it. Never let tests touch a live account.
-- Update `docs/PROJECT_STATUS.md` when behavior changes. It currently claims 63/63 passing; the real count is now 81 (63 + 18 safety tests). Keep that number honest.
+- Update `docs/PROJECT_STATUS.md` when behavior changes. It currently claims 63/63 passing; the real count is now 135. Keep that number honest.
 - `docs/ROADMAP.md` and `docs/ARCHITECTURE.md` are **aspirational** — they describe the intended 12-phase platform, not current state. `docs/ARCHITECTURE.md:9` is already stale (claims `run.py` is 1,535 lines; it is 1840). Don't treat any of it as implemented without checking the code.

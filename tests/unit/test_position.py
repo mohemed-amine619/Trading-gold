@@ -74,6 +74,7 @@ def test_position_breakeven(manager, mock_adapter):
     
     manager.manage_positions(signal, pd.DataFrame())
     
-    # New SL should be entry price + offset (0.00002)
-    # SL = 2000.00002
-    assert mock_adapter._positions[0].sl == pytest.approx(2000.00002)
+    # New SL should be entry price + breakeven offset.
+    # The offset is 2 ticks; gold's tick size is 0.01, so offset = 0.02.
+    # (Previously the mock reported tick_size=0.00001, giving 2000.00002.)
+    assert mock_adapter._positions[0].sl == pytest.approx(2000.02)

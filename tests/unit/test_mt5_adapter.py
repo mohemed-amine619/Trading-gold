@@ -24,7 +24,23 @@ def test_mock_symbol_info(mock_adapter):
     info = mock_adapter.get_symbol_info("XAUUSDm")
     assert info is not None
     assert info.name == "XAUUSDm"
-    assert info.digits == 5
+    # XAUUSD is quoted to 2 decimals around $2000, with 100oz per lot.
+    # These used to be digits=5 / contract_size=100000 — the gold-default
+    # values that were wrongly returned for *every* symbol.
+    assert info.digits == 2
+    assert info.point == 0.01
+    assert info.contract_size == 100.0
+
+
+def test_mock_symbol_info_is_asset_specific(mock_adapter):
+    """Specs must vary by asset class, not repeat one global default."""
+    gold = mock_adapter.get_symbol_info("XAUUSDm")
+    fx = mock_adapter.get_symbol_info("EURUSD")
+    btc = mock_adapter.get_symbol_info("BTCUSD")
+
+    assert gold.digits != fx.digits, "gold and forex must differ in precision"
+    assert gold.contract_size != btc.contract_size, "gold and crypto must differ in contract size"
+    assert fx.point == 0.00001, "EURUSD needs 5-decimal precision"
     
 def test_mock_get_tick(mock_adapter):
     tick = mock_adapter.get_tick("XAUUSDm")
@@ -73,5 +89,5 @@ def test_mock_send_order(mock_adapter):
 def test_mock_calc_margin(mock_adapter):
     # order_type, symbol, volume, price
     margin = mock_adapter.calc_margin(0, "XAUUSDm", 1.0, 2000.0)
-    # 1.0 volume * 100000 contract_size * 2000.0 / 100 leverage = 2,000,000
-    assert margin == 2000000.0
+    # 1.0 volume * 100 contract_size * 2000.0 / 100 leverage = 2,000
+    assert margin == 2000.0

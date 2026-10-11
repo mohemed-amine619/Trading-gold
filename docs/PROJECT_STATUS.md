@@ -105,10 +105,57 @@ declared in any requirements file — the image crash-looped with a confusing
 - PostgreSQL stores money as `Float`; decimal-safe accounting is not done.
 - The Windows bridge does not exist. No broker connectivity has been verified.
 
+## 3.1.1 MULTI-ASSET INSTRUMENT ENGINE
+**Status: implemented and tested (135 tests).**
+
+New `core/instruments/` provides a broker-neutral instrument model and
+registry, and fixes a **financial-safety defect** found this cycle.
+
+**Defect fixed — position sizing was inert.** `MockMT5Adapter.get_symbol_info`
+returned gold-shaped constants (`contract_size=100000`, `tick_size=0.00001`,
+`volume_min=0.01`) for *every* symbol. Because sizing floors to the broker
+minimum, every instrument resolved to 0.01 lots regardless of risk budget or
+stop distance. Verified before the fix: equity $10k at 1% risk returned
+**0.01 lots for a $0.50 stop and for a $50 stop alike** — position sizing
+could not express any risk difference. `calculate_lot_size` had **no direct
+test coverage**.
+
+After the fix (same $100 risk budget):
+
+| Instrument | Stop distance | Size |
+|---|---|---|
+| XAUUSDm | $2.00 | 0.500 lots |
+| EURUSD | $0.0020 | 0.500 lots |
+| BTCUSD | $50.00 | 0.020 lots |
+| US30.cash | $5.00 | 2.000 lots |
+
+Changes:
+- `core/instruments/model.py` — `InstrumentSpec`, `AssetClass`,
+  `InstrumentType`, `TradingStatus`, `OrderTypeSupport`, `InstrumentRegistry`,
+  canonical-symbol normalisation. Critical fields default to `None`, never to
+  plausible constants.
+- `core/instruments/adapter.py` — maps broker `SymbolInfo` to the neutral
+  model without inventing values.
+- `core/mt5/types.py` — `SymbolInfo` contract fields changed from
+  `= 100000.0` style defaults to `Optional[...] = None`, so missing broker
+  metadata is representable.
+- `core/mt5/adapter.py` — mock now returns per-asset specs (gold 100oz/0.01,
+  forex 100000/1e-5, crypto 1.0, index, energy).
+
+Fail-safe behaviour verified: an instrument missing a critical field is
+registered but refused for trading with an explicit reason rather than sized
+on invented data.
+
+**Test honesty note:** three pre-existing tests asserted the *buggy* values
+(`digits == 5` for gold, `margin == 2000000`, breakeven `2000.00002`). These
+encoded the defect, so they were corrected to the real values rather than
+weakened. Three of my own new test premises were also wrong on first run and
+were corrected against verified behaviour.
+
 ## 5. NEXT TASKS (prioritized)
-1. **Rotate the exposed broker password**, then remove the credential fallbacks from `run.py` / `run_pro.py`. (Blocked on broker access — needs confirmation.)
-2. **Build the Windows MT5 bridge** per `docs/MT5_WINDOWS_BRIDGE.md`, starting read-only (endpoints 1–11), defaulting to no order submission.
-3. **Implement the instrument registry** so multi-asset support is real rather than nominal; populate the existing `Symbol` model from bridge metadata.
-4. **Wire the real kill switch**: `api/main.py` `/api/emergency-stop` currently stops nothing; connect it to `core/risk/engine.py:218`.
-5. **Decimal-safe monetary columns** and a migration for existing data.
-6. **Authentication** on the API before exposing it beyond loopback.
+1. **Build the Windows MT5 bridge** per `docs/MT5_WINDOWS_BRIDGE.md`, starting read-only (endpoints 1–11), defaulting to no order submission. **Blocked on VM console access.**
+2. **Execution safety (P6):** idempotency keys, explicit execution states incl. *unknown*, and reconciliation on timeout instead of blind retry.
+3. **Wire the real kill switch**: `api/main.py` `/api/emergency-stop` currently stops nothing; connect it to `core/risk/engine.py:218` and persist the state.
+4. **Decimal-safe monetary columns** and a migration for existing data.
+5. **Authentication** on the API before exposing it beyond loopback.
+6. **Rotate the exposed broker password** at Exness, then remove the credential fallbacks. Requires user action — it is already in git history.

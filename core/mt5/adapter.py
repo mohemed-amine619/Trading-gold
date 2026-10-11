@@ -359,7 +359,55 @@ class MockMT5Adapter(MT5Adapter):
 
     Generates synthetic OHLCV data from a configurable seed.
     Accepts orders and maintains an in-memory position list.
+
+    Instrument specifications are modelled per asset class rather than
+    returning one gold-shaped set of constants for every symbol. Returning
+    identical contract_size/tick_value for all symbols silently disabled
+    position sizing (every instrument floored to volume_min), so the mock now
+    carries realistic values and a realistic reference price per asset.
     """
+
+    # Per-asset contract specifications used by get_symbol_info(). These are
+    # representative of typical broker values for a retail CFD/MT5 account.
+    _SPEC_TABLE: dict[str, dict] = {
+        "metal": {
+            "digits": 2, "point": 0.01, "contract_size": 100.0,
+            "tick_value": 1.0, "volume_min": 0.01, "volume_max": 50.0,
+            "spread": 20,
+        },
+        "forex": {
+            "digits": 5, "point": 0.00001, "contract_size": 100_000.0,
+            "tick_value": 1.0, "volume_min": 0.01, "volume_max": 100.0,
+            "spread": 10,
+        },
+        "crypto": {
+            "digits": 2, "point": 0.01, "contract_size": 1.0,
+            "tick_value": 1.0, "volume_min": 0.01, "volume_max": 10.0,
+            "spread": 500,
+        },
+        "index": {
+            "digits": 2, "point": 0.1, "contract_size": 1.0,
+            "tick_value": 1.0, "volume_min": 0.1, "volume_max": 100.0,
+            "spread": 30,
+        },
+        "energy": {
+            "digits": 2, "point": 0.01, "contract_size": 1000.0,
+            "tick_value": 1.0, "volume_min": 0.01, "volume_max": 50.0,
+            "spread": 25,
+        },
+    }
+
+    _DEFAULT_SPEC = _SPEC_TABLE["forex"]
+
+    # Reference price per asset class, so candle/tick generation is sane for
+    # non-gold instruments.
+    _BASE_PRICE: dict[str, float] = {
+        "metal": 2000.0,
+        "forex": 1.1000,
+        "crypto": 40000.0,
+        "index": 40000.0,
+        "energy": 80.0,
+    }
 
     def __init__(
         self,
@@ -367,18 +415,44 @@ class MockMT5Adapter(MT5Adapter):
         balance: float = 10_000.0,
         seed: int = 42,
         symbol: str = "XAUUSDm",
-        base_price: float = 2000.0,
+        base_price: Optional[float] = None,
     ) -> None:
         self._login = login
         self._balance = balance
         self._equity = balance
         self._seed = seed
         self._symbol = symbol
-        self._base_price = base_price
+        self._base_price_override = base_price
+        # Per-symbol reference prices so a multi-symbol mock stays coherent.
+        self._base_prices: dict[str, float] = {}
+        self._asset_of: dict[str, str] = {}
         self._connected = False
         self._positions: list[MT5Position] = []
         self._next_ticket = 10000
         self._rng = random.Random(seed)
+        self._classify_known_symbols()
+
+    # ── Asset classification ────────────────────────────────────────────────
+
+    def _classify(self, symbol: str) -> str:
+        """Best-effort asset class for a symbol, used to select mock specs."""
+        from core.instruments import canonical_symbol, infer_asset_class
+
+        if symbol not in self._asset_of:
+            asset, _ = infer_asset_class(canonical_symbol(symbol))
+            self._asset_of[symbol] = asset.value
+        return self._asset_of[symbol]
+
+    def _classify_known_symbols(self) -> None:
+        """Seed classification for the default symbol."""
+        if self._symbol:
+            self._classify(self._symbol)
+
+    def base_price_for(self, symbol: str) -> float:
+        """Reference price for a symbol, honouring any explicit override."""
+        if self._base_price_override is not None:
+            return self._base_price_override
+        return self._BASE_PRICE.get(self._classify(symbol), self._BASE_PRICE["forex"])
 
     def connect(self) -> bool:
         self._connected = True
@@ -410,27 +484,33 @@ class MockMT5Adapter(MT5Adapter):
         )
 
     def get_symbol_info(self, symbol: str) -> Optional[SymbolInfo]:
-        # Generic defaults — enough for position sizing
+        """Per-asset contract specification for this symbol."""
+        spec = self._SPEC_TABLE.get(self._classify(symbol), self._DEFAULT_SPEC)
         return SymbolInfo(
             name=symbol,
-            description=f"Mock {symbol}",
-            digits=5,
-            point=0.00001,
-            trade_tick_size=0.00001,
-            trade_tick_value=1.0,
+            description=f"Mock {symbol} ({self._classify(symbol)})",
+            digits=spec["digits"],
+            point=spec["point"],
+            trade_tick_size=spec["point"],
+            trade_tick_value=spec["tick_value"],
             trade_stops_level=0,
-            volume_min=0.01,
-            volume_max=100.0,
+            trade_freeze_level=0,
+            volume_min=spec["volume_min"],
+            volume_max=spec["volume_max"],
             volume_step=0.01,
-            contract_size=100000.0,
-            spread=20,
+            contract_size=spec["contract_size"],
+            spread=spec["spread"],
+            trade_mode=4,  # SYMBOL_TRADE_MODE_FULL
         )
 
     def get_tick(self, symbol: str) -> Optional[Tick]:
         if not self._connected:
             return None
-        mid = self._base_price + self._rng.gauss(0, 0.5)
-        spread = 0.30
+        base = self.base_price_for(symbol)
+        # Spread expressed in the instrument's own price units.
+        point = self.get_symbol_info(symbol).point or 0.01
+        spread = (self.get_symbol_info(symbol).spread or 20) * point
+        mid = base + self._rng.gauss(0, base * 0.0002)
         return Tick(
             symbol=symbol,
             time=datetime.now(timezone.utc),
@@ -447,9 +527,10 @@ class MockMT5Adapter(MT5Adapter):
     ) -> pd.DataFrame:
         """Generate synthetic OHLCV using a random walk."""
         rng = random.Random(self._seed)
-        prices = [self._base_price]
+        base = self.base_price_for(symbol)
+        prices = [base]
         for _ in range(count * 4 + 10):
-            prices.append(prices[-1] + rng.gauss(0, self._base_price * 0.0005))
+            prices.append(prices[-1] + rng.gauss(0, base * 0.0005))
 
         rows = []
         now = int(datetime.now(timezone.utc).timestamp())
@@ -464,8 +545,8 @@ class MockMT5Adapter(MT5Adapter):
             segment = prices[base_i: base_i + 5]
             o = segment[0]
             c = segment[-1]
-            h = max(segment) + abs(rng.gauss(0, self._base_price * 0.0002))
-            lo = min(segment) - abs(rng.gauss(0, self._base_price * 0.0002))
+            h = max(segment) + abs(rng.gauss(0, base * 0.0002))
+            lo = min(segment) - abs(rng.gauss(0, base * 0.0002))
             rows.append({
                 "time": pd.Timestamp(
                     (now - (count - i) * tf_seconds) * 10**9, tz="UTC"

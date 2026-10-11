@@ -122,22 +122,33 @@ class AccountInfo(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SymbolInfo(BaseModel):
+    """
+    Raw broker symbol metadata.
+
+    Contract fields are ``Optional[...] = None`` rather than carrying defaults.
+    A default here would silently invent broker values for any instrument the
+    broker did not describe, which turns a risk limit into a guess — the exact
+    defect that made the mock return gold-shaped constants for every symbol.
+    ``None`` means "broker did not supply this"; ``0`` is a genuine value.
+    Callers must check for absence (see ``core.instruments.InstrumentSpec``).
+    """
+
     name: str
     description: str = ""
-    digits: int = 5
-    point: float = 0.00001
-    trade_tick_size: float = 0.00001
-    trade_tick_value: float = 1.0
-    trade_stops_level: int = 0
-    trade_freeze_level: int = 0
-    volume_min: float = 0.01
-    volume_max: float = 100.0
-    volume_step: float = 0.01
-    contract_size: float = 100000.0
-    spread: int = 0
+    digits: Optional[int] = None
+    point: Optional[float] = None
+    trade_tick_size: Optional[float] = None
+    trade_tick_value: Optional[float] = None
+    trade_stops_level: Optional[int] = None
+    trade_freeze_level: Optional[int] = None
+    volume_min: Optional[float] = None
+    volume_max: Optional[float] = None
+    volume_step: Optional[float] = None
+    contract_size: Optional[float] = None
+    spread: Optional[float] = None
     spread_float: bool = True
-    trade_mode: int = 4   # TRADE_MODE_FULL
-    session_deals: int = 0
+    trade_mode: Optional[int] = None   # SYMBOL_TRADE_MODE_*; None = unknown
+    session_deals: Optional[int] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
