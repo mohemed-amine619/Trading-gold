@@ -52,3 +52,6 @@ AGENTS.md
 Dockerfile
 .dockerignore
 compose.yaml
+# Windows-only MT5 bridge service (see docs/MT5_WINDOWS_BRIDGE.md).
+# The Ubuntu image must never contain it.
+bridge/

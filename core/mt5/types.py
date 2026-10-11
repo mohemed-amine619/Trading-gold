@@ -84,6 +84,7 @@ class TradeAction(IntEnum):
 
 class RetCode(IntEnum):
     DONE               = 10009
+    PARTIAL_FILL       = 10010
     REQUOTE            = 10004
     PRICE_CHANGED      = 10015
     PRICE_OFF          = 10016
@@ -94,6 +95,11 @@ class RetCode(IntEnum):
     TRADE_DISABLED     = 10017
     INVALID_STOPS      = 10022
     INVALID_VOLUME     = 10014
+    INVALID_PRICE      = 10013
+    # Outcome UNKNOWN: the request may or may not have reached the broker.
+    # These must never be treated as a clean failure, and must never be
+    # blindly retried — reconcile first.
+    TIMEOUT            = 10012
     CONNECTION         = 10035
 
 

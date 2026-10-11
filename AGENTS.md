@@ -27,7 +27,7 @@ Everything else — `core/`, `api/`, `tests/`, `alembic/`, `docs/`, `dashboard.h
 Run everything with `.venv/bin/python` — the repo has two virtualenvs and only `.venv` has pytest.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 135 passed
+.venv/bin/python -m pytest tests/ -q          # 199 passed
 .venv/bin/python -m pytest tests/unit/test_risk_engine.py -q   # single file
 .venv/bin/python -m pytest tests/unit -k approve -q            # single test by name
 ```
@@ -196,5 +196,5 @@ Notable: `core/position/trailing.py` holds **pure functions** with no broker dep
 
 - One coherent, testable phase at a time; run `.venv/bin/python -m pytest tests/ -q` after each change.
 - Never report a test as passing unless you actually ran it. Never let tests touch a live account.
-- Update `docs/PROJECT_STATUS.md` when behavior changes. It currently claims 63/63 passing; the real count is now 135. Keep that number honest.
+- Update `docs/PROJECT_STATUS.md` when behavior changes. It currently claims 63/63 passing; the real count is now 199. Keep that number honest.
 - `docs/ROADMAP.md` and `docs/ARCHITECTURE.md` are **aspirational** — they describe the intended 12-phase platform, not current state. `docs/ARCHITECTURE.md:9` is already stale (claims `run.py` is 1,535 lines; it is 1840). Don't treat any of it as implemented without checking the code.

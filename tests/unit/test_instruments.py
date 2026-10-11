@@ -310,12 +310,26 @@ def test_adapter_does_not_fill_absent_fields():
 def test_build_registry_from_mock_adapter():
     adapter = MockMT5Adapter()
     adapter.connect()
+    # The mock describes only registered symbols, as a real broker would.
+    for symbol in ("EURUSD", "BTCUSD", "US30.cash"):
+        adapter.add_symbol(symbol)
+
     reg = build_registry(adapter, ["XAUUSDm", "EURUSD", "BTCUSD", "US30.cash"])
 
     assert len(reg) == 4
     assert reg.get("XAUUSDm").contract_size == 100.0
     assert reg.get("EURUSD").digits == 5
     assert reg.get("BTCUSD").contract_size == 1.0
+
+
+def test_build_registry_skips_instruments_without_metadata():
+    """An unreadable instrument must be skipped, never entered with defaults."""
+    adapter = MockMT5Adapter()
+    adapter.connect()
+    reg = build_registry(adapter, ["XAUUSDm", "NEVER_REGISTERED"])
+
+    assert len(reg) == 1
+    assert reg.get("NEVER_REGISTERED") is None
 
 
 def test_capability_matrix_is_honest():

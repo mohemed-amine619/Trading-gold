@@ -13,6 +13,13 @@ from typing import Optional
 
 from core.mt5.adapter import MT5Adapter
 from core.mt5.types import OrderRequest, OrderResult, RetCode, TradeAction, OrderType
+from core.execution.idempotency import IdempotencyLedger
+from core.execution.states import (
+    FILLED_STATES,
+    ExecutionReport,
+    ExecutionState,
+    state_from_retcode,
+)
 from core.risk.engine import TradeProposal
 
 logger = logging.getLogger(__name__)
@@ -22,6 +29,8 @@ class ExecutionEngine:
         self.adapter = adapter
         self.max_retries = max_retries
         self.retry_delay_ms = retry_delay_ms
+        # Duplicate-order protection. Shared across calls on this engine.
+        self.ledger = IdempotencyLedger()
 
     def execute_proposal(self, proposal: TradeProposal, lot_size: float, magic: int = 888999) -> Optional[OrderResult]:
         """
@@ -90,27 +99,122 @@ class ExecutionEngine:
 
     def _send_with_retry(self, request: OrderRequest) -> OrderResult:
         """
-        Internal method to send order with retry logic for transient errors.
+        Legacy raw-result submission. Retries only on explicit requote.
+
+        Retries are attempted ONLY when the broker definitively refused the
+        attempt (requote / price changed). An indeterminate outcome
+        (timeout, connection loss) is returned as-is: the order may have been
+        accepted, so the caller must reconcile before doing anything else.
         """
         retries = 0
         last_result = None
-        
+
         while retries <= self.max_retries:
             result = self.adapter.send_order(request)
             last_result = result
-            
+
             if result.success:
                 logger.info(f"Order executed successfully: deal={result.deal} retcode={result.retcode}")
                 return result
-                
+
             if result.is_requote:
                 retries += 1
                 logger.warning(f"Order requote/price changed (retcode={result.retcode}). Retry {retries}/{self.max_retries}")
                 time.sleep(self.retry_delay_ms / 1000.0)
                 continue
-                
-            # If we reach here, it's a hard error
-            logger.error(f"Order failed (retcode={result.retcode}): {result.comment}")
+
+            if result.retcode in (RetCode.TIMEOUT, RetCode.CONNECTION):
+                # Outcome unknown: the broker may have acted. Never retry.
+                logger.error(
+                    "Order outcome UNKNOWN (retcode=%s). Not retrying — "
+                    "reconcile broker state before resubmitting.",
+                    result.retcode,
+                )
+                return result
+
+            # A definite rejection: the broker did not accept the order.
+            logger.error(f"Order rejected (retcode={result.retcode}): {result.comment}")
             break
-            
+
         return last_result
+
+    # ── Safe path: idempotent submission with explicit execution states ──────
+
+    def submit(
+        self,
+        request: OrderRequest,
+        idempotency_key: str,
+    ) -> ExecutionReport:
+        """
+        Submit an order at most once, returning an explicit execution state.
+
+        Guarantees:
+
+        * A repeated ``idempotency_key`` is never sent again; the original
+          report is returned instead.
+        * An indeterminate broker outcome (timeout / connection loss) is
+          reported as ``UNKNOWN`` and is **never** retried automatically.
+          A timeout does not prove the order failed.
+        * Only explicit requotes are retried, bounded by ``max_retries``.
+        """
+        if not self.ledger.begin(idempotency_key):
+            existing = self.ledger.get(idempotency_key)
+            assert existing is not None  # begin() returned False only if present
+            if existing.is_indeterminate:
+                logger.error(
+                    "Duplicate suppressed for key=%s and prior outcome is UNKNOWN; "
+                    "reconcile with the broker.",
+                    idempotency_key,
+                )
+            return existing
+
+        attempts = 0
+        report: Optional[ExecutionReport] = None
+
+        while attempts <= self.max_retries:
+            attempts += 1
+            result = self.adapter.send_order(request)
+
+            state = state_from_retcode(
+                result.retcode,
+                volume_filled=result.volume,
+                volume_requested=request.volume,
+            )
+            report = ExecutionReport(
+                state=state,
+                idempotency_key=idempotency_key,
+                deal=result.deal,
+                order=result.order,
+                volume=result.volume,
+                price=result.price,
+                retcode=result.retcode,
+                comment=result.comment,
+                attempts=attempts,
+            )
+
+            if state in FILLED_STATES or state in (ExecutionState.REJECTED, ExecutionState.CANCELLED):
+                break
+
+            if state is ExecutionState.UNKNOWN:
+                # Ambiguous. Stop immediately — resubmitting risks a duplicate.
+                logger.error(
+                    "Submission %s returned UNKNOWN (retcode=%s) after %d attempt(s); "
+                    "not retrying.",
+                    idempotency_key, result.retcode, attempts,
+                )
+                break
+
+            # NOT_SENT (requote family): the broker refused this attempt, so a
+            # bounded retry with the same key is safe.
+            if attempts <= self.max_retries:
+                logger.warning(
+                    "Submission %s not accepted (retcode=%s); retry %d/%d",
+                    idempotency_key, result.retcode, attempts, self.max_retries,
+                )
+                time.sleep(self.retry_delay_ms / 1000.0)
+                continue
+            break
+
+        assert report is not None
+        self.ledger.complete(report)
+        return report

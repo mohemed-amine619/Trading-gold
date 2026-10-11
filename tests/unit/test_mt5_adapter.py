@@ -34,6 +34,9 @@ def test_mock_symbol_info(mock_adapter):
 
 def test_mock_symbol_info_is_asset_specific(mock_adapter):
     """Specs must vary by asset class, not repeat one global default."""
+    for symbol in ("EURUSD", "BTCUSD"):
+        mock_adapter.add_symbol(symbol)
+
     gold = mock_adapter.get_symbol_info("XAUUSDm")
     fx = mock_adapter.get_symbol_info("EURUSD")
     btc = mock_adapter.get_symbol_info("BTCUSD")
@@ -41,6 +44,16 @@ def test_mock_symbol_info_is_asset_specific(mock_adapter):
     assert gold.digits != fx.digits, "gold and forex must differ in precision"
     assert gold.contract_size != btc.contract_size, "gold and crypto must differ in contract size"
     assert fx.point == 0.00001, "EURUSD needs 5-decimal precision"
+
+
+def test_mock_returns_none_for_unknown_symbol(mock_adapter):
+    """
+    An unlisted symbol has no specification, mirroring a real broker.
+
+    Returning a fabricated default here is what previously made position
+    sizing meaningless for every instrument.
+    """
+    assert mock_adapter.get_symbol_info("NOT_A_SYMBOL") is None
     
 def test_mock_get_tick(mock_adapter):
     tick = mock_adapter.get_tick("XAUUSDm")

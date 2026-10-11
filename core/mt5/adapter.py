@@ -426,6 +426,9 @@ class MockMT5Adapter(MT5Adapter):
         # Per-symbol reference prices so a multi-symbol mock stays coherent.
         self._base_prices: dict[str, float] = {}
         self._asset_of: dict[str, str] = {}
+        # Symbols this mock is willing to describe. An unlisted symbol returns
+        # None from get_symbol_info(), as a real broker would for an unknown one.
+        self._known: set[str] = {symbol} if symbol else set()
         self._connected = False
         self._positions: list[MT5Position] = []
         self._next_ticket = 10000
@@ -447,6 +450,15 @@ class MockMT5Adapter(MT5Adapter):
         """Seed classification for the default symbol."""
         if self._symbol:
             self._classify(self._symbol)
+
+    def add_symbol(self, symbol: str) -> None:
+        """Register a symbol this mock should describe."""
+        self._known.add(symbol)
+        self._classify(symbol)
+
+    def get_symbols(self) -> list[str]:
+        """Dynamically discoverable symbol list, as a real adapter would."""
+        return sorted(self._known)
 
     def base_price_for(self, symbol: str) -> float:
         """Reference price for a symbol, honouring any explicit override."""
@@ -484,7 +496,19 @@ class MockMT5Adapter(MT5Adapter):
         )
 
     def get_symbol_info(self, symbol: str) -> Optional[SymbolInfo]:
-        """Per-asset contract specification for this symbol."""
+        """
+        Per-asset contract specification for this symbol.
+
+        Returns None for a symbol the mock has not been told about, mirroring
+        a real broker: an unrecognised symbol has no specification. Callers
+        (registry, bridge validation) depend on this being None rather than a
+        fabricated default.
+
+        Recognised symbols are those passed to ``known_symbols`` or inferred
+        from the default symbol; use :meth:`add_symbol` to register more.
+        """
+        if symbol not in self._known:
+            return None
         spec = self._SPEC_TABLE.get(self._classify(symbol), self._DEFAULT_SPEC)
         return SymbolInfo(
             name=symbol,
