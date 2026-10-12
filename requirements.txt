@@ -1,10 +1,2 @@
-MetaTrader5
-pandas
-pandas_ta
-numpy
-scikit-learn
-scipy
-fastapi
-uvicorn
-python-dotenv
-requests
+# Full Windows deployment requirements
+-r requirements-windows.txt
