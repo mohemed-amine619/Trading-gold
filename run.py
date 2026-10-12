@@ -127,10 +127,10 @@ if _TRADING_MODE == "live":
 # ---------------------------------------------------------------------------
 CONFIG = {
     # --- connection ---
-    "account":  int(os.getenv("MT5_LOGIN", 261009880)),
-    "password": os.getenv("MT5_PASSWORD", "Amine2002@"),
-    "server":   os.getenv("MT5_SERVER", "Exness-MT5Trail16"),
-    "mt5_path": os.getenv("MT5_PATH", ""),
+    "account":  int(os.getenv("MT5_LOGIN").strip()) if os.getenv("MT5_LOGIN") and os.getenv("MT5_LOGIN").strip() not in ("0", "") else 261009880,
+    "password": os.getenv("MT5_PASSWORD") or "Amine2002@",
+    "server":   os.getenv("MT5_SERVER") or "Exness-MT5Trail16",
+    "mt5_path": os.getenv("MT5_PATH") or "",
     
     # --- instrument ---
     "symbol":    os.getenv("TRADE_SYMBOL", "XAUUSDm"),
@@ -925,14 +925,19 @@ class StandaloneAIBot:
             logger.error("MT5 init failed: %s", mt5.last_error())
             return False
             
-        # Check if we are ALREADY logged into the correct account!
-        # This prevents MT5 from popping up a new login window and crashing/timing out.
         acc = mt5.account_info()
-        target_account = self.cfg["account"]
+        target_account = self.cfg.get("account", 0)
         
-        if acc is not None and acc.login == target_account:
-            logger.info("Already logged in to account %s. Bypassing login step.", target_account)
+        if acc is not None and (target_account <= 0 or acc.login == target_account):
+            logger.info("Already logged in to terminal account %s. Bypassing login step.", acc.login)
+            self.cfg["account"] = acc.login
             ok = True
+        elif target_account <= 0:
+            logger.error(
+                "MT5 login failed: no MT5_LOGIN configured and terminal is not logged into an active account. "
+                "Please configure MT5_LOGIN/MT5_PASSWORD/MT5_SERVER in .env or log into MetaTrader 5 manually."
+            )
+            ok = False
         else:
             logger.info("Logging into %s...", target_account)
             ok = mt5.login(
