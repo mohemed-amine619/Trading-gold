@@ -159,21 +159,28 @@ CONFIG = {
     "sl_atr_mult":      2.5,
     "tp_rr_ratio":      2.5,
     
-    # --- dynamic trade management ---
-    "trail_atr_mult":   2.5,   
-    "trail_activate_atr": 1.5,
-    "dynamic_risk":     True,
-    "min_risk_scale":   0.5,
-    "max_risk_scale":   1.2,
-    "max_margin_usage": 0.30,
-    "max_open_pos":     3,
-    "max_daily_dd":     0.03,
+    # --- dynamic trade management ("never lose" once in profit) ---
+    "trail_atr_mult":          1.5,    # Trailing distance in ATR (tighter to protect gains)
+    "trail_activate_atr":      1.0,    # Activate trailing stop when profit >= 1.0x ATR
+    "trail_tighten1_atr":      2.0,    # Tighter trail at 2.0x ATR profit
+    "trail_tighten1_mult":     1.0,
+    "trail_tighten2_atr":      3.0,    # Ultra-tight trail at 3.0x ATR profit
+    "trail_tighten2_mult":     0.6,
+    "dynamic_risk":            True,
+    "min_risk_scale":          0.5,
+    "max_risk_scale":          1.2,
+    "max_margin_usage":        0.30,
+    "max_open_pos":            3,
+    "max_daily_dd":            0.03,
     
-    # --- breakeven / partial close ---
+    # --- breakeven / profit lock ---
     "enable_breakeven":        True,
-    "breakeven_trigger_atr":   1.2,
+    "breakeven_trigger_atr":   0.8,    # Move to breakeven early at +0.8x ATR profit (was 1.2)
+    "breakeven_buffer_atr":    0.15,   # +0.15x ATR profit buffer beyond entry (covers spread, commission & swap)
     "enable_partial_close":    True,
-    "partial_close_trigger_atr": 1.5,
+    "partial_close_trigger_atr": 1.2,  # Lock in 50% partial profit early at +1.2x ATR
+    "profit_lock_activate_atr": 1.0,   # Activate giveback protect at +1.0x ATR
+    "profit_giveback_pct":     0.30,   # If peak profit gives back 30%, close immediately to secure 70%
     
     # --- system ---
     "sleep_interval":   1.0,
@@ -1475,27 +1482,36 @@ class StandaloneAIBot:
                 self._close_position(pos, "profit lock giveback")
                 continue
 
-            # ---- trailing stop (accelerating) ------------------------
-            trail_atr  = self.cfg["trail_atr_mult"] * atr
-            activate   = self.cfg["trail_activate_atr"] * atr
+            # ---- breakeven (locks entry + buffer to guarantee 0 loss) -
+            be_buffer = self.cfg.get("breakeven_buffer_atr", 0.15) * atr
+            be_sl = (pos.price_open + be_buffer) if direction == 1 else (pos.price_open - be_buffer)
+            if self.cfg.get("enable_breakeven", True):
+                be_trigger = self.cfg.get("breakeven_trigger_atr", 0.8) * atr
+                if profit_move >= be_trigger:
+                    if ((direction == 1 and pos.sl < be_sl) or
+                            (direction == -1 and (pos.sl == 0 or pos.sl > be_sl))):
+                        self._modify_sl(pos, be_sl)
+
+            # ---- trailing stop (accelerating, never falls below breakeven)
+            trail_atr  = self.cfg.get("trail_atr_mult", 1.5) * atr
+            activate   = self.cfg.get("trail_activate_atr", 1.0) * atr
             if profit_move >= activate:
-                if profit_move >= self.cfg.get("trail_tighten2_atr", 4.0) * atr:
-                    trail_atr = self.cfg.get("trail_tighten2_mult", 1.0) * atr
-                elif profit_move >= self.cfg.get("trail_tighten1_atr", 2.5) * atr:
-                    trail_atr = self.cfg.get("trail_tighten1_mult", 1.5) * atr
+                if profit_move >= self.cfg.get("trail_tighten2_atr", 3.0) * atr:
+                    trail_atr = self.cfg.get("trail_tighten2_mult", 0.6) * atr
+                elif profit_move >= self.cfg.get("trail_tighten1_atr", 2.0) * atr:
+                    trail_atr = self.cfg.get("trail_tighten1_mult", 1.0) * atr
                 new_sl = (close_price - trail_atr if direction == 1
                           else close_price + trail_atr)
-                if ((direction == 1  and new_sl > pos.sl + 1e-9) or
-                        (direction == -1 and new_sl < pos.sl - 1e-9)):
-                    self._modify_sl(pos, new_sl)
 
-            # ---- breakeven --------------------------------------------
-            if self.cfg.get("enable_breakeven", True):
-                be_trigger = self.cfg.get("breakeven_trigger_atr", 1.0) * atr
-                if profit_move >= be_trigger:
-                    if ((direction == 1  and pos.sl < pos.price_open) or
-                            (direction == -1 and pos.sl > pos.price_open)):
-                        self._modify_sl(pos, pos.price_open)
+                # Floor at breakeven + buffer: once trailing activates, trade can NEVER turn into a loss
+                if direction == 1:
+                    new_sl = max(new_sl, be_sl)
+                else:
+                    new_sl = min(new_sl, be_sl)
+
+                if ((direction == 1  and new_sl > pos.sl + 1e-9) or
+                        (direction == -1 and (pos.sl == 0 or new_sl < pos.sl - 1e-9))):
+                    self._modify_sl(pos, new_sl)
 
             # ---- multi-stage partial close ---------------------------
             if self.cfg.get("enable_partial_close", True):
