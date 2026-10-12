@@ -323,3 +323,38 @@ def test_submit_proposal_blocks_duplicate():
     rep2 = engine.submit_proposal(proposal, lot_size=0.2, idempotency_key="prop-2")
     assert rep2.is_filled is True
     assert len(adapter.sent) == 1
+
+
+def test_reconcile_unresolved_keys_recovers_timeout_order():
+    from core.mt5.types import MT5Position
+    adapter = ScriptedAdapter([OrderResult(retcode=RetCode.TIMEOUT)])
+    engine = ExecutionEngine(adapter, retry_delay_ms=0)
+
+    # Order timed out -> state is UNKNOWN
+    rep = engine.submit(_request(), "timeout-order-1")
+    assert rep.is_indeterminate is True
+    assert engine.ledger.unresolved_keys() == ["timeout-order-1"]
+
+    # Mock adapter positions return a position filled with comment containing key
+    pos = MT5Position(
+        ticket=123456,
+        symbol="EURUSD",
+        type=0,
+        volume=0.1,
+        price_open=1.1000,
+        price_current=1.1010,
+        magic=888999,
+        comment="timeout-order-1",
+        time=int(__import__("time").time()),
+    )
+    adapter.get_positions = lambda symbol=None, magic=None: [pos]
+
+    remaining = engine.reconcile_unresolved_keys(magic=888999)
+    assert remaining == []
+    assert engine.ledger.unresolved_keys() == []
+
+    # Final report should be FILLED
+    final_report = engine.ledger.get("timeout-order-1")
+    assert final_report is not None
+    assert final_report.is_filled is True
+    assert final_report.deal == 123456

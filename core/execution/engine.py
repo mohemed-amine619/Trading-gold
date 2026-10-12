@@ -292,3 +292,57 @@ class ExecutionEngine:
         assert report is not None
         self.ledger.complete(report)
         return report
+
+    def reconcile_unresolved_keys(self, magic: int = 888999) -> list[str]:
+        """
+        Reconcile indeterminate orders (TIMEOUT, CONNECTION) with the broker's actual open positions.
+        If a position matching the magic number and ticket/comment is found, updates ledger report.
+        Returns the list of remaining unresolved keys.
+        """
+        unresolved = self.ledger.unresolved_keys()
+        if not unresolved:
+            return []
+
+        try:
+            positions = self.adapter.get_positions(magic=magic)
+        except Exception as exc:
+            logger.error("Failed to fetch positions during reconciliation: %s", exc)
+            return unresolved
+
+        resolved_keys = []
+        for key in unresolved:
+            record = self.ledger.get(key)
+            if not record:
+                continue
+
+            # Look for matching position by ticket or comment
+            matching_pos = None
+            for pos in positions:
+                if record.deal and pos.ticket == record.deal:
+                    matching_pos = pos
+                    break
+                if record.order and pos.ticket == record.order:
+                    matching_pos = pos
+                    break
+                if key in pos.comment:
+                    matching_pos = pos
+                    break
+
+            if matching_pos:
+                logger.info("Reconciliation resolved key=%s -> FILLED (ticket=%d)", key, matching_pos.ticket)
+                updated_report = ExecutionReport(
+                    state=ExecutionState.FILLED,
+                    idempotency_key=key,
+                    deal=matching_pos.ticket,
+                    order=matching_pos.ticket,
+                    volume=matching_pos.volume,
+                    price=matching_pos.price_open,
+                    retcode=RetCode.DONE,
+                    comment="Reconciled from broker",
+                    attempts=record.attempts,
+                )
+                self.ledger.complete(updated_report)
+                resolved_keys.append(key)
+
+        return [k for k in unresolved if k not in resolved_keys]
+

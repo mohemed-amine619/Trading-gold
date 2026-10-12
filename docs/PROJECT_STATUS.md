@@ -5,12 +5,12 @@
 
 ## 0. TEST BASELINE
 
-**225 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
+**226 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
 
 | Area | Tests | Status |
 |---|---|---|
 | Trading safety (paper default) | 18 | Implemented and tested |
-| Execution safety & idempotency | 33 | Implemented and tested |
+| Execution safety & idempotency | 34 | Implemented and tested |
 | Bridge contract and auth | 31 | Implemented, tested against a mock |
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 22 | Implemented and tested |
