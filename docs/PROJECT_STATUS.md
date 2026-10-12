@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**224 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
+**225 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -13,7 +13,7 @@
 | Execution safety & idempotency | 33 | Implemented and tested |
 | Bridge contract and auth | 31 | Implemented, tested against a mock |
 | Instrument registry | 55 | Implemented and tested |
-| Windows compatibility & SQLite persistence | 21 | Implemented and tested |
+| Windows compatibility & SQLite persistence | 22 | Implemented and tested |
 | Risk, position, strategy, market, backtest, API | 66 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses

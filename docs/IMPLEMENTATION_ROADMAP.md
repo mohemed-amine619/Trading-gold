@@ -15,8 +15,8 @@
 | **Phase 0** | Baseline & Audit | Repository audit, test baseline, defect mapping | ✅ Complete |
 | **Phase 1** | Safety & Purge | Remove PostgreSQL dependencies, enforce SQLite-only, verify paper defaults | ✅ Complete |
 | **Phase 2** | Correctness & Risk Gate | Idempotency integration, central risk engine wiring, stop widening prevention | ✅ Complete |
-| **Phase 3** | SQLite Architecture | Unified schema (`data/trading.db`), WAL/busy_timeout, backup & restore scripts | 🔄 In Progress |
-| **Phase 4** | MT5 Broker Resilience | Session discovery, disconnect recovery, order timeout reconciliation | ⏳ Queued |
+| **Phase 3** | SQLite Architecture | Unified schema (`data/trading.db`), WAL/busy_timeout, backup & restore scripts | ✅ Complete |
+| **Phase 4** | MT5 Broker Resilience | Session discovery, disconnect recovery, order timeout reconciliation | 🔄 In Progress |
 | **Phase 5** | Research & Validation | Backtesting integrity, walk-forward splits, look-ahead bias elimination | ⏳ Queued |
 | **Phase 6** | Portfolio Intelligence | Multi-asset exposure caps, correlation guard, strategy lifecycle | ⏳ Queued |
 | **Phase 7** | Windows 11 Operations | Pure-PowerShell toolchain (`doctor`, `install`, `start`, `backup`, `restore`) | ⏳ Queued |
@@ -41,12 +41,12 @@
 - [x] Wire real `RiskEngine` kill switch to API endpoints (`/api/emergency-stop`, `/api/resume`, `/api/control`).
 - [x] Unify trade recording in `run.py` to use `data/trading.db` via `_get_sqlite_db_path()`.
 
-### Phase 3 — SQLite-Only Architecture (In Progress)
+### Phase 3 — SQLite-Only Architecture (Completed)
 - [x] Standardize local SQLite storage to `data/trading.db` with auto-creation of `data/` directory.
 - [x] Align trade history persistence between `run.py` and the unified schema.
 - [x] Implement robust SQLite backup via Python `sqlite3.Connection.backup()` and PowerShell.
 - [x] Implement database integrity verification (`PRAGMA integrity_check`) before and after backups.
-- [ ] Add explicit stress unit tests for SQLite concurrency and busy timeout handling.
+- [x] Add explicit stress unit tests for SQLite concurrency and busy timeout handling (225 passing).
 
 ### Phase 4 — MetaTrader 5 Integration & Reconnection
 - [ ] Standardize terminal discovery and reuse of active Windows terminal session across all modules.

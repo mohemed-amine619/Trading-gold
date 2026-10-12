@@ -92,3 +92,53 @@ def test_sqlite_backup_api():
         cur.execute("SELECT val FROM test_data")
         assert cur.fetchone()[0] == "test_record"
         verify_conn.close()
+
+
+def test_sqlite_concurrent_access_with_busy_timeout():
+    """Verify concurrent worker threads do not crash with 'database is locked' when busy_timeout is set."""
+    import threading
+    import time
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_path = os.path.join(tmp_dir, "concurrent_test.db")
+        init_conn = sqlite3.connect(db_path)
+        init_conn.execute("PRAGMA journal_mode=WAL")
+        init_conn.execute("CREATE TABLE concurrent_records (thread_id INT, seq INT, payload TEXT)")
+        init_conn.commit()
+        init_conn.close()
+
+        num_threads = 6
+        writes_per_thread = 25
+        errors = []
+
+        def worker(tid: int):
+            try:
+                conn = sqlite3.connect(db_path, timeout=10.0)
+                conn.execute("PRAGMA busy_timeout=10000")
+                for i in range(writes_per_thread):
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO concurrent_records (thread_id, seq, payload) VALUES (?, ?, ?)",
+                            (tid, i, f"data-{tid}-{i}")
+                        )
+                    time.sleep(0.005)
+                conn.close()
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Concurrent workers encountered errors: {errors}"
+
+        verify_conn = sqlite3.connect(db_path)
+        cur = verify_conn.cursor()
+        cur.execute("PRAGMA integrity_check")
+        assert cur.fetchone()[0] == "ok"
+        cur.execute("SELECT count(*) FROM concurrent_records")
+        assert cur.fetchone()[0] == num_threads * writes_per_thread
+        verify_conn.close()
+
