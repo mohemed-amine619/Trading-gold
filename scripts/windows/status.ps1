@@ -53,15 +53,20 @@ if ($health) {
 
 # ── Database ──────────────────────────────────────────────────────────────────
 Write-Section "Database"
-$pg = Get-PostgresConnection -Url (Get-Setting "DATABASE_URL" "")
-if ($pg) {
-    $svc = Get-PostgresService
-    if ($svc) { Write-Ok "Service running: $($svc.Name)" } else { Write-Warn "Service not running" }
-    $reachable = Test-DatabaseReachable
-    if ($reachable -eq $true)  { Write-Ok "Connection OK ($($pg.Host):$($pg.Port)/$($pg.Database))" }
-    elseif ($reachable -eq $false) { Write-Fail "Cannot connect to $($pg.Host):$($pg.Port)" }
+$dbUrl = Get-Setting "DATABASE_URL" "sqlite:///./data/trading.db"
+if ($dbUrl -match "^sqlite") {
+    if (Test-Path $paths.Database) {
+        $reachable = Test-DatabaseReachable
+        if ($reachable -eq $true) {
+            Write-Ok "SQLite database OK: $($paths.Database) (PRAGMA integrity_check passed)"
+        } else {
+            Write-Fail "SQLite database failed integrity check: $($paths.Database)"
+        }
+    } else {
+        Write-Info "SQLite file does not exist yet: $($paths.Database)"
+    }
 } else {
-    Write-Ok "SQLite: $(Get-Setting 'DATABASE_URL' '')"
+    Write-Fail "DATABASE_URL is not SQLite ($dbUrl)"
 }
 
 # ── MT5 / broker ──────────────────────────────────────────────────────────────

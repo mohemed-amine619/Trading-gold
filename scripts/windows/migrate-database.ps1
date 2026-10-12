@@ -40,6 +40,7 @@ if (-not (Test-Path (Join-Path $paths.Root "alembic.ini"))) {
 }
 
 Set-Location $paths.Root
+Initialize-RuntimeDirectories
 
 # ── Informational ─────────────────────────────────────────────────────────────
 if ($ShowCurrent) {

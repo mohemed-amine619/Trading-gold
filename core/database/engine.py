@@ -57,6 +57,13 @@ def init_db(database_url: str, create_tables: bool = True) -> None:
 
     # SQLite: enable WAL mode + foreign keys
     sync_url = database_url.replace("+asyncpg", "").replace("+aiosqlite", "")
+    if "sqlite:///" in sync_url:
+        db_path = sync_url.split("sqlite:///", 1)[1]
+        if db_path and db_path != ":memory:":
+            parent_dir = os.path.dirname(db_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+
     _sync_engine = create_engine(
         sync_url,
         connect_args={"check_same_thread": False} if "sqlite" in sync_url else {},
@@ -104,6 +111,12 @@ async def init_async_db(database_url: str, create_tables: bool = True) -> None:
     async_url = database_url
     if "sqlite:///" in async_url and "+aiosqlite" not in async_url:
         async_url = async_url.replace("sqlite:///", "sqlite+aiosqlite:///")
+    if "sqlite" in async_url and ":///" in async_url:
+        db_path = async_url.split(":///", 1)[1]
+        if db_path and db_path != ":memory:":
+            parent_dir = os.path.dirname(db_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
 
     _async_engine = create_async_engine(
         async_url,

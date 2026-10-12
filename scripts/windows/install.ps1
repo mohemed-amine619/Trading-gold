@@ -12,9 +12,9 @@
       4. database    - verify/create schema
       5. diagnostics - re-check everything
 
-    It does NOT install PostgreSQL or MetaTrader 5; those need manual,
-    official downloads. Where one is missing the script says so and tells you
-    the exact source.
+    It does NOT install MetaTrader 5; that needs manual,
+    official download from your broker or MetaQuotes.
+    SQLite is embedded and requires no server installation.
 
 .EXAMPLE
     .\scripts\windows\install.ps1
@@ -88,11 +88,7 @@ Initialize-RuntimeDirectories
 
 # ── 4. Database ───────────────────────────────────────────────────────────────
 if ((Invoke-Step "Database setup" "setup-database.ps1") -ne 0) {
-    Write-Warn "Database setup reported an issue."
-    Write-Host ""
-    Write-Info "PostgreSQL: https://www.postgresql.org/download/windows/"
-    Write-Info "MetaTrader 5: https://www.metatrader5.com/en/download"
-    Write-Info "Or switch to SQLite in .env (DATABASE_URL=sqlite:///./trading.db)"
+    Write-Warn "Database setup reported an issue. Ensure DATABASE_URL is SQLite in .env"
 }
 
 $stampCode = Invoke-Step "Applying migrations" "migrate-database.ps1"

@@ -99,9 +99,19 @@ class Settings(BaseSettings):
     # Database
     # ──────────────────────────────────────────────────────────
     database_url: str = Field(
-        default="sqlite:///./trading.db",
-        description="SQLAlchemy database URL",
+        default="sqlite:///./data/trading.db",
+        description="SQLAlchemy database URL (SQLite only)",
     )
+
+    @field_validator("database_url")
+    @classmethod
+    def validate_sqlite_only(cls, v: str) -> str:
+        if not v.startswith("sqlite"):
+            raise ValueError(
+                f"SQLite is the only permitted database. '{v}' is forbidden. "
+                "Use 'sqlite:///./data/trading.db' or similar."
+            )
+        return v
 
     # ──────────────────────────────────────────────────────────
     # MT5 bridge (Windows VM) — see docs/MT5_WINDOWS_BRIDGE.md

@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**217 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
+**220 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -13,7 +13,7 @@
 | Execution safety (idempotency) | 31 | Implemented and tested |
 | Bridge contract and auth | 31 | Implemented, tested against a mock |
 | Instrument registry | 55 | Implemented and tested |
-| Windows compatibility | 18 | Implemented and tested |
+| Windows compatibility & SQLite persistence | 21 | Implemented and tested |
 | Risk, position, strategy, market, backtest, API | 64 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
@@ -21,29 +21,30 @@
 
 ---
 
-## 1. IMPLEMENTED — NATIVE WINDOWS 11
+## 1. IMPLEMENTED — NATIVE WINDOWS 11 & SQLITE
 
 ### Tooling (`scripts/windows/`, 15 PowerShell scripts)
 
 All parse-checked and several executed end-to-end during development.
+PostgreSQL references purged; 100% pure SQLite architecture enforced.
 
 | Script | Status |
 |---|---|
-| `doctor.ps1` | **Implemented and executed.** PASS/WARN/FAIL per check; exit 1 on failure |
+| `doctor.ps1` | **Implemented and executed.** PASS/WARN/FAIL per check; exit 1 on failure; validates SQLite integrity |
 | `install.ps1` | Implemented — full chain, stops at first hard failure |
 | `setup-venv.ps1` | Implemented — Python 3.12 venv with MT5 compatibility warning |
 | `install-dependencies.ps1` | Implemented — `-SkipMetaTrader5`, verifies imports after install |
-| `setup-database.ps1` | Implemented — never creates/drops; prints SQL if missing |
+| `setup-database.ps1` | Implemented — verifies SQLite directory and database integrity |
 | `migrate-database.ps1` | **Implemented and executed.** `-Stamp`, `-ShowCurrent`, `-Autogenerate`, guarded `-DowngradeTo` |
 | `start.ps1` | **Implemented and executed.** Validates config → DB → deps → starts → verifies readiness |
 | `stop.ps1` | **Implemented and executed.** Graceful then forced; `-WhatIf` |
-| `status.ps1` | **Implemented and executed.** Live checks only |
-| `test.ps1` | **Implemented and executed.** 217 pass |
-| `backup.ps1` | **Implemented and executed.** pg_dump / SQLite, retention limited to `trading-*` |
-| `restore.ps1` | **Implemented and executed.** Requires typed `RESTORE`, safety backup first |
+| `status.ps1` | **Implemented and executed.** Live checks only (processes, ports, SQLite integrity) |
+| `test.ps1` | **Implemented and executed.** 220 pass |
+| `backup.ps1` | **Implemented and executed.** Atomic online SQLite backup (`sqlite3.backup`) with integrity check |
+| `restore.ps1` | **Implemented and executed.** Requires typed `RESTORE`, safety backup first, validates backup integrity |
 | `update.ps1` | Implemented — backup → pull → deps → migrate → restart |
 | `uninstall.ps1` | Implemented — preserves source, `.env` and backups |
-| `common.ps1` | Shared helpers: paths, `.env` parsing, config validation, PG detection, process control |
+| `common.ps1` | Shared helpers: paths, `.env` parsing, config validation, SQLite verification, process control |
 
 ### Cross-platform code fixes
 

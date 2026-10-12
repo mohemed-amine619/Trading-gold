@@ -52,20 +52,21 @@ if (-not (Test-Path $paths.Python)) {
 Write-Ok "Dependencies present"
 
 # ── 3. Database ───────────────────────────────────────────────────────────────
-$pg = Get-PostgresConnection -Url (Get-Setting "DATABASE_URL" "")
-if ($pg) {
-    $reachable = Test-DatabaseReachable
-    if ($reachable -ne $true) {
-        Write-Fail "PostgreSQL is not reachable at $($pg.Host):$($pg.Port)."
-        Write-Info "Start the service, then re-run. See docs/DATABASE.md"
+$dbUrl = Get-Setting "DATABASE_URL" "sqlite:///./data/trading.db"
+if (-not ($dbUrl -match "^sqlite")) {
+    Write-Fail "DATABASE_URL must be a SQLite URL (e.g. sqlite:///./data/trading.db). Found: $dbUrl"
+    exit 1
+}
+Initialize-RuntimeDirectories
+if (Test-Path $paths.Database) {
+    if (-not (Test-DatabaseReachable)) {
+        Write-Fail "SQLite database at $($paths.Database) failed integrity check."
         exit 1
     }
-    Write-Ok "Database reachable"
+    Write-Ok "SQLite database verified ($($paths.Database))"
 } else {
-    Write-Ok "SQLite database (no service required)"
+    Write-Ok "SQLite database will be created on first access ($($paths.Database))"
 }
-
-Initialize-RuntimeDirectories
 
 # ── 4. API ────────────────────────────────────────────────────────────────────
 if (Get-RunningProcess -Name "api") {

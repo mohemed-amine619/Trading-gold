@@ -39,6 +39,14 @@ function Get-Paths {
     $isWin  = $IsWindows -or $PSVersionTable.PSVersion.Major -lt 6
     $scripts = if ($isWin) { Join-Path $venv "Scripts" } else { Join-Path $venv "bin" }
     $exe     = if ($isWin) { ".exe" } else { "" }
+    $dataDir = Join-Path $root "data"
+    $dbPath  = if (Test-Path (Join-Path $dataDir "trading.db")) {
+        Join-Path $dataDir "trading.db"
+    } elseif (Test-Path (Join-Path $root "trading.db")) {
+        Join-Path $root "trading.db"
+    } else {
+        Join-Path $dataDir "trading.db"
+    }
     [pscustomobject]@{
         Root         = $root
         Venv         = $venv
@@ -50,7 +58,8 @@ function Get-Paths {
         Logs         = Join-Path $root "logs"
         Backups      = Join-Path $root "backups"
         Run          = Join-Path $root "run"
-        Database     = Join-Path $root "trading.db"
+        Data         = $dataDir
+        Database     = $dbPath
     }
 }
 
@@ -142,15 +151,12 @@ function Test-ConfigValid {
         [void]$warnings.Add("TRADING_MODE=live — this platform WILL place real orders")
     }
 
-    $dbUrl = Get-Setting "DATABASE_URL" ""
+    $dbUrl = Get-Setting "DATABASE_URL" "sqlite:///./data/trading.db"
     if (-not $dbUrl) {
         [void]$errors.Add("DATABASE_URL is not set")
     }
-    elseif ($dbUrl -match "@") {
-        # PostgreSQL: check credentials are present without revealing them.
-        if ($dbUrl -match "://([^:]+):([^@]+)@") {
-            Write-Info "PostgreSQL configured (user=$($Matches[1]))"
-        }
+    elseif ($dbUrl -notmatch "^sqlite") {
+        [void]$errors.Add("DATABASE_URL must be an SQLite URL ($dbUrl). External database servers (PostgreSQL, etc.) are forbidden.")
     }
 
     [pscustomobject]@{
@@ -186,77 +192,26 @@ function Test-VenvExists {
     return (Test-Path (Get-Paths).Python)
 }
 
-# ── PostgreSQL ───────────────────────────────────────────────────────────────
-
-function Get-PsqlCommand {
-    <#
-      Locates psql. Prefers the version on PATH, then the standard install
-      location used by the PostgreSQL Windows installer.
-    #>
-    $cmd = Get-Command "psql" -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-
-    foreach ($root in @("C:\Program Files\PostgreSQL", "C:\Program Files (x86)\PostgreSQL")) {
-        if (Test-Path $root) {
-            $candidate = Get-ChildItem -Path $root -Filter "psql.exe" -Recurse -ErrorAction SilentlyContinue |
-                         Select-Object -First 1
-            if ($candidate) { return $candidate.FullName }
-        }
-    }
-    return $null
-}
-
-function Get-PostgresService {
-    <#  Returns the running PostgreSQL service, or $null.  #>
-    $service = Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue |
-               Where-Object { $_.Status -eq "Running" } | Select-Object -First 1
-    return $service
-}
-
-function Get-PostgresConnection {
-    <#
-      Splits DATABASE_URL into discrete parts for psql.
-      Returns $null when the URL is not PostgreSQL.
-      Password is returned but MUST NOT be printed.
-    #>
-    param([string]$Url = (Get-Setting "DATABASE_URL" ""))
-
-    if ($Url -notmatch '^postgres(?:ql)?(?:\+[a-z]+)?://') { return $null }
-    if ($Url -notmatch '://(?:([^:]+):([^@]+)@)?([^:/]+)(?::(\d+))?/(.+)$') { return $null }
-
-    [pscustomobject]@{
-        User     = if ($Matches[1]) { $Matches[1] } else { "postgres" }
-        Password = $Matches[2]
-        Host     = if ($Matches[3]) { $Matches[3] } else { "localhost" }
-        Port     = if ($Matches[4]) { $Matches[4] } else { "5432" }
-        Database = $Matches[5]
-    }
-}
+# ── SQLite Database Integrity ─────────────────────────────────────────────────
 
 function Test-DatabaseReachable {
-    <#  Runs a trivial query. Never reports healthy without executing it.  #>
-    $conn = Get-PostgresConnection
-    if (-not $conn) { return $null }   # SQLite — nothing to probe here
-
-    $psql = Get-PsqlCommand
-    if (-not $psql) { return $false }
-
-    $env:PGPASSWORD = $conn.Password
+    <#  Verifies SQLite database access and integrity (PRAGMA integrity_check).  #>
+    $paths = Get-Paths
+    $python = Get-PythonCommand
+    if (-not $python -or -not (Test-Path $paths.Database)) { return $true }
     try {
-        & $psql -h $conn.Host -p $conn.Port -U $conn.User -d $conn.Database `
-                -tAc "SELECT 1" 2>$null | Out-Null
+        & $python -c "import sqlite3; conn = sqlite3.connect(r'$($paths.Database)'); res = conn.execute('PRAGMA integrity_check').fetchone(); conn.close(); exit(0 if res and res[0] == 'ok' else 1)" 2>$null | Out-Null
         return ($LASTEXITCODE -eq 0)
     } catch {
         return $false
-    } finally {
-        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
     }
 }
 
 # ── Runtime directories ──────────────────────────────────────────────────────
 
 function Initialize-RuntimeDirectories {
-    foreach ($dir in @((Get-Paths).Logs, (Get-Paths).Backups, (Get-Paths).Run)) {
+    $paths = Get-Paths
+    foreach ($dir in @($paths.Logs, $paths.Backups, $paths.Run, $paths.Data)) {
         if (-not (Test-Path $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }

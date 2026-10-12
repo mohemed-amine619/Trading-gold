@@ -46,7 +46,7 @@ if ($isWin) {
             Result-Warn "$caption (build $build) - Windows 10/11 expected"
         }
         if ($os.OSArchitecture -eq "64-bit") { Result-Pass "64-bit architecture" }
-        else { Result-Warn "32-bit OS - PostgreSQL 64-bit builds are recommended" }
+        else { Result-Warn "32-bit OS - 64-bit Windows is recommended for MetaTrader 5" }
     } else { Result-Warn "Could not read OS details" }
 } else {
     Result-Warn "Not running on Windows - Windows-specific checks are skipped"
@@ -74,7 +74,7 @@ Write-Section "Python packages"
 if (Test-Path $paths.Python) {
     $missing = & $paths.Python -c @"
 import importlib.util
-mods = ['fastapi','sqlalchemy','pydantic_settings','alembic','pandas','numpy','sklearn','uvicorn']
+mods = ['fastapi','sqlalchemy','pydantic_settings','alembic','pandas','numpy','sklearn','uvicorn','aiosqlite']
 print(' '.join(m for m in mods if importlib.util.find_spec(m) is None))
 "@ 2>&1
     $missingList = ($missing | Out-String).Trim()
@@ -108,26 +108,19 @@ if (Test-Path $paths.EnvFile) {
 
 # ── 5. Database ───────────────────────────────────────────────────────────────
 Write-Section "Database"
-$dbUrl = Get-Setting "DATABASE_URL" ""
-$pg = Get-PostgresConnection -Url $dbUrl
-if ($pg) {
-    Result-Info "PostgreSQL configured (host=$($pg.Host) port=$($pg.Port) db=$($pg.Database))"
-
-    $svc = Get-PostgresService
-    if ($svc) { Result-Pass "Service '$($svc.Name)' is running" }
-    else { Result-Fail "No running PostgreSQL service - start it from Services.msc" }
-
-    $psql = Get-PsqlCommand
-    if ($psql) { Result-Pass "psql found" }
-    else { Result-Warn "psql not on PATH - needed for migrations and backups" }
-
-    $reachable = Test-DatabaseReachable
-    if ($reachable -eq $true) { Result-Pass "Database accepts connections" }
-    elseif ($reachable -eq $false) { Result-Fail "Cannot connect to database - check credentials/service" }
-} elseif ($dbUrl -match 'sqlite') {
-    Result-Pass "SQLite configured (no service required)"
+$dbUrl = Get-Setting "DATABASE_URL" "sqlite:///./data/trading.db"
+if ($dbUrl -match '^sqlite') {
+    Result-Pass "SQLite configured: $dbUrl (no external database server required)"
+    
+    if (Test-Path $paths.Database) {
+        $reachable = Test-DatabaseReachable
+        if ($reachable -eq $true) { Result-Pass "SQLite database exists and integrity check passed" }
+        else { Result-Fail "SQLite database failed integrity check or is locked" }
+    } else {
+        Result-Pass "SQLite database will be created on first migration or run ($($paths.Database))"
+    }
 } else {
-    Result-Fail "DATABASE_URL not set or not understood"
+    Result-Fail "DATABASE_URL is not SQLite ($dbUrl). PostgreSQL and external database servers are forbidden."
 }
 
 # Schema state
@@ -143,7 +136,7 @@ if (Test-Path $paths.Python) {
 
 # ── 6. Directories ────────────────────────────────────────────────────────────
 Write-Section "Runtime directories"
-foreach ($dir in @(@{n="logs"; p=$paths.Logs}, @{n="backups"; p=$paths.Backups})) {
+foreach ($dir in @(@{n="data"; p=$paths.Data}, @{n="logs"; p=$paths.Logs}, @{n="backups"; p=$paths.Backups})) {
     if (Test-Path $dir.p) { Result-Pass "$($dir.n) directory exists" }
     else { Result-Warn "$($dir.n) directory missing - created automatically on start" }
 }

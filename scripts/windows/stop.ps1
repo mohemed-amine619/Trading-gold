@@ -5,9 +5,7 @@
 .DESCRIPTION
     Stops API, bot and bridge processes tracked in run\*.pid. Graceful first,
     forced only if a process refuses to exit.
-
-    This never touches PostgreSQL — the database is a Windows service and is
-    managed by Services.msc, not by this project.
+    SQLite is embedded and stops when the processes exit.
 
 .EXAMPLE
     .\scripts\windows\stop.ps1
@@ -47,6 +45,4 @@ foreach ($name in $targets) {
     else { Write-Fail "$name could not be stopped (PID $($proc.Id))" }
 }
 
-Write-Info "PostgreSQL is a Windows service and was not touched."
-Write-Info "To stop it: Get-Service postgresql* | Stop-Service"
 exit 0

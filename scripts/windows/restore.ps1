@@ -31,9 +31,35 @@ $pg    = Get-PostgresConnection -Url $dbUrl
 
 Write-Host ""
 Write-Host "  WARNING: this OVERWRITES the current database." -ForegroundColor Red
-Write-Host "  Target : $(if ($pg) { "$($pg.Host):$($pg.Port)/$($pg.Database)" } else { $dbUrl })" -ForegroundColor White
+Write-Host "  Target : $($paths.Database)" -ForegroundColor White
 Write-Host "  Backup : $File" -ForegroundColor White
 Write-Host ""
+
+if ($File -notmatch "\.db$") {
+    Write-Fail "SQLite restore expects a .db file (got: $File)."
+    exit 1
+}
+
+# Verify source backup file before doing anything
+$verifyScript = @"
+import sqlite3, sys
+try:
+    c = sqlite3.connect(r'''$File''')
+    cur = c.cursor()
+    cur.execute('PRAGMA integrity_check')
+    res = cur.fetchone()
+    c.close()
+    if not res or res[0] != 'ok':
+        sys.exit(1)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+"@
+$checkBackup = & $paths.Python -c $verifyScript 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "Source backup file failed integrity check. Aborting restore."
+    exit 1
+}
 
 if (-not $Force) {
     Write-Host "  A safety backup of the CURRENT database will be taken first." -ForegroundColor Yellow
@@ -42,11 +68,13 @@ if (-not $Force) {
     if ($answer -cne "RESTORE") { Write-Info "Aborted. Nothing changed."; exit 1 }
 }
 
-# ── Safety backup of current state ────────────────────────────────────────────
-Write-Step "Taking a safety backup of the current database ..."
-$safety = & "$PSScriptRoot\backup.ps1" -KeepDays 30
-if ($LASTEXITCODE -ne 0) { Write-Fail "Safety backup failed - refusing to restore."; exit 1 }
-Write-Ok "Safety backup complete"
+# ── Safety backup of current state if it exists ──────────────────────────────
+if (Test-Path $paths.Database) {
+    Write-Step "Taking a safety backup of the current database ..."
+    $safety = & "$PSScriptRoot\backup.ps1" -KeepDays 30
+    if ($LASTEXITCODE -ne 0) { Write-Fail "Safety backup failed - refusing to restore."; exit 1 }
+    Write-Ok "Safety backup complete"
+}
 
 # ── Stop the app so nothing writes during the restore ─────────────────────────
 $apiProc = Get-RunningProcess -Name "api"
@@ -56,40 +84,20 @@ if ($apiProc) {
     Clear-StoredPid -Name "api"
 }
 
-if ($pg) {
-    $psql = Get-PsqlCommand
-    $psqlRestore = $null
-    if (Get-Command "psql" -EA SilentlyContinue) { $psqlRestore = "psql" }
-    else {
-        foreach ($root in @("C:\Program Files\PostgreSQL", "C:\Program Files (x86)\PostgreSQL")) {
-            if (Test-Path $root) {
-                $c = Get-ChildItem $root -Filter "psql.exe" -Recurse -EA SilentlyContinue | Select-Object -First 1
-                if ($c) { $psqlRestore = $c.FullName; break }
-            }
-        }
-    }
-    if (-not $psqlRestore) { Write-Fail "psql not found."; exit 1 }
-
-    Write-Step "Restoring SQL dump ..."
-    $env:PGPASSWORD = $pg.Password
-    try {
-        # --clean --if-exists removes existing objects so the dump is authoritative.
-        & $psqlRestore -h $pg.Host -p $pg.Port -U $pg.User -d $pg.Database `
-                       --clean --if-exists -v ON_ERROR_STOP=1 -f $File
-        if ($LASTEXITCODE -ne 0) { Write-Fail "Restore failed (exit $LASTEXITCODE)."; exit 1 }
-    } finally {
-        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
-    }
-    Write-Ok "Database restored from $File"
+Write-Step "Restoring SQLite database ..."
+if (-not (Test-Path $paths.Data)) {
+    New-Item -ItemType Directory -Path $paths.Data -Force | Out-Null
 }
-else {
-    if ($File -notmatch "\.db$") { Write-Fail "SQLite restore expects a .db file."; exit 1 }
-    Write-Step "Restoring SQLite database ..."
-    foreach ($suffix in @("-wal", "-shm")) {
-        if (Test-Path "$($paths.Database)$suffix") { Remove-Item "$($paths.Database)$suffix" -Force -EA SilentlyContinue }
-    }
-    Copy-Item $File $paths.Database -Force
-    Write-Ok "Database restored from $File"
+foreach ($suffix in @("-wal", "-shm")) {
+    if (Test-Path "$($paths.Database)$suffix") { Remove-Item "$($paths.Database)$suffix" -Force -EA SilentlyContinue }
+}
+Copy-Item $File $paths.Database -Force
+
+if (Test-DatabaseReachable) {
+    Write-Ok "Database restored and integrity verified from $File"
+} else {
+    Write-Fail "Restored database failed integrity check!"
+    exit 1
 }
 
 Write-Info "Verify with: .\scripts\windows\migrate-database.ps1 -ShowCurrent"

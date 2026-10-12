@@ -32,54 +32,57 @@ if (-not (Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir
 
 $stamp   = Get-Date -Format "yyyyMMdd-HHmmss"
 $dbUrl   = Get-Setting "DATABASE_URL" ""
-$pg      = Get-PostgresConnection -Url $dbUrl
-
-if ($pg) {
-    $psql = Get-PsqlCommand
-    $pgDump = $null
-    if (Get-Command "pg_dump" -ErrorAction SilentlyContinue) { $pgDump = "pg_dump" }
-    else {
-        foreach ($root in @("C:\Program Files\PostgreSQL", "C:\Program Files (x86)\PostgreSQL")) {
-            if (Test-Path $root) {
-                $c = Get-ChildItem $root -Filter "pg_dump.exe" -Recurse -EA SilentlyContinue | Select-Object -First 1
-                if ($c) { $pgDump = $c.FullName; break }
-            }
-        }
-    }
-    if (-not $pgDump) { Write-Fail "pg_dump not found. Add PostgreSQL\bin to PATH."; exit 1 }
-
-    $target = Join-Path $OutputDir "trading-$stamp.sql"
-    Write-Step "Dumping PostgreSQL to $target ..."
-
-    $env:PGPASSWORD = $pg.Password
-    try {
-        & $pgDump -h $pg.Host -p $pg.Port -U $pg.User -d $pg.Database -F p -f $target
-        if ($LASTEXITCODE -ne 0) { Write-Fail "pg_dump failed (exit $LASTEXITCODE)"; exit 1 }
-    } finally {
-        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
-    }
-    $size = [math]::Round((Get-Item $target).Length / 1KB, 1)
-    Write-Ok "Backup written: $target ($size KB)"
-}
-elseif ($dbUrl -match "sqlite") {
-    if (-not (Test-Path $paths.Database)) { Write-Fail "SQLite database not found at $($paths.Database)"; exit 1 }
-    $target = Join-Path $OutputDir "trading-$stamp.db"
-    Write-Step "Copying SQLite database ..."
-
-    # Checkpoint so the .db file is self-contained before copying.
-    $ck = & $paths.Python -c "import sqlite3; c=sqlite3.connect(r'$($paths.Database)'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()" 2>$null
-    Copy-Item $paths.Database $target -Force
-    foreach ($suffix in @("-wal", "-shm")) {
-        $side = "$($paths.Database)$suffix"
-        if (Test-Path $side) { Copy-Item $side "$target$suffix" -Force }
-    }
-    $size = [math]::Round((Get-Item $target).Length / 1KB, 1)
-    Write-Ok "Backup written: $target ($size KB)"
-}
-else {
-    Write-Fail "DATABASE_URL is not recognised."
+if (-not ($dbUrl -match "^sqlite")) {
+    Write-Fail "DATABASE_URL must be SQLite. Found: $dbUrl"
     exit 1
 }
+
+if (-not (Test-Path $paths.Database)) {
+    Write-Fail "SQLite database not found at $($paths.Database)"
+    exit 1
+}
+
+$target = Join-Path $OutputDir "trading-$stamp.db"
+Write-Step "Creating online atomic SQLite backup to $target ..."
+
+$pyScript = @"
+import sqlite3
+import sys
+
+src_path = r'''$($paths.Database)'''
+dst_path = r'''$target'''
+
+try:
+    src = sqlite3.connect(src_path, timeout=30.0)
+    dst = sqlite3.connect(dst_path)
+    with dst:
+        src.backup(dst, pages=100)
+    dst.close()
+    src.close()
+    
+    # Verify backup integrity
+    verify = sqlite3.connect(dst_path)
+    cur = verify.cursor()
+    cur.execute('PRAGMA integrity_check')
+    res = cur.fetchone()
+    verify.close()
+    if not res or res[0] != 'ok':
+        print(f"INTEGRITY_CHECK_FAILED: {res}", file=sys.stderr)
+        sys.exit(1)
+    print("BACKUP_SUCCESS")
+except Exception as ex:
+    print(f"BACKUP_ERROR: {ex}", file=sys.stderr)
+    sys.exit(1)
+"@
+
+$backupResult = & $paths.Python -c $pyScript 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "SQLite online backup failed: $backupResult"
+    exit 1
+}
+
+$size = [math]::Round((Get-Item $target).Length / 1KB, 1)
+Write-Ok "Backup verified and written: $target ($size KB)"
 
 # ── Retention (only our own files) ────────────────────────────────────────────
 $cutoff = (Get-Date).AddDays(-$KeepDays)
