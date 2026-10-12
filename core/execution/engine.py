@@ -32,9 +32,16 @@ class ExecutionEngine:
         # Duplicate-order protection. Shared across calls on this engine.
         self.ledger = IdempotencyLedger()
 
-    def execute_proposal(self, proposal: TradeProposal, lot_size: float, magic: int = 888999) -> Optional[OrderResult]:
+    def execute_proposal(
+        self,
+        proposal: TradeProposal,
+        lot_size: float,
+        magic: int = 888999,
+        idempotency_key: Optional[str] = None,
+    ) -> Optional[OrderResult]:
         """
         Execute an approved TradeProposal as a market order.
+        If idempotency_key is provided, routes through submit() to prevent duplicate orders.
         """
         if lot_size <= 0:
             logger.error(f"Cannot execute {proposal.symbol} with lot_size <= 0")
@@ -55,7 +62,51 @@ class ExecutionEngine:
             comment=f"{proposal.strategy_name[:20]}"
         )
         
+        if idempotency_key:
+            report = self.submit(request, idempotency_key=idempotency_key)
+            return OrderResult(
+                retcode=report.retcode if report.retcode is not None else (RetCode.DONE if report.state in FILLED_STATES else RetCode.REJECT),
+                deal=report.deal or 0,
+                order=report.order or 0,
+                volume=report.volume or 0.0,
+                price=report.price or 0.0,
+                comment=report.comment or report.state.value,
+            )
+
         return self._send_with_retry(request)
+
+    def submit_proposal(
+        self,
+        proposal: TradeProposal,
+        lot_size: float,
+        idempotency_key: str,
+        magic: int = 888999,
+    ) -> ExecutionReport:
+        """
+        Submit an approved TradeProposal guarded by the IdempotencyLedger.
+        Guarantees that a proposal with the same idempotency key is submitted at most once.
+        """
+        if lot_size <= 0:
+            logger.error(f"Cannot submit {proposal.symbol} with lot_size <= 0")
+            return ExecutionReport(
+                state=ExecutionState.REJECTED,
+                idempotency_key=idempotency_key,
+                comment="lot_size <= 0",
+            )
+
+        order_type = OrderType.BUY if proposal.direction == 1 else OrderType.SELL
+        request = OrderRequest(
+            symbol=proposal.symbol,
+            action=TradeAction.DEAL,
+            type=order_type,
+            volume=lot_size,
+            price=0.0,
+            sl=proposal.stop_loss,
+            tp=proposal.take_profit,
+            magic=magic,
+            comment=f"{proposal.strategy_name[:20]}",
+        )
+        return self.submit(request, idempotency_key=idempotency_key)
 
     def close_position(self, ticket: int, symbol: str, volume: float, direction: int) -> Optional[OrderResult]:
         """
@@ -81,7 +132,30 @@ class ExecutionEngine:
     def modify_position(self, ticket: int, symbol: str, new_sl: float, new_tp: float) -> Optional[OrderResult]:
         """
         Modify Stop Loss and Take Profit of an existing position.
+        Safety gate: never allows loosening an existing stop loss.
         """
+        # Safety gate: query existing position and refuse to loosen stop loss
+        try:
+            positions = self.adapter.get_positions(symbol=symbol)
+            pos = next((p for p in positions if p.ticket == ticket), None)
+            if pos is not None and pos.sl > 0.0 and new_sl > 0.0:
+                # BUY: direction == 1 (type == 0). Loosening means new_sl < pos.sl
+                if pos.direction == 1 and new_sl < pos.sl:
+                    logger.error(
+                        "Safety violation blocked: attempting to widen/loosen BUY SL for ticket %d (current=%f, proposed=%f)",
+                        ticket, pos.sl, new_sl,
+                    )
+                    return None
+                # SELL: direction == -1 (type == 1). Loosening means new_sl > pos.sl
+                elif pos.direction == -1 and new_sl > pos.sl:
+                    logger.error(
+                        "Safety violation blocked: attempting to widen/loosen SELL SL for ticket %d (current=%f, proposed=%f)",
+                        ticket, pos.sl, new_sl,
+                    )
+                    return None
+        except Exception as exc:
+            logger.warning("Could not verify existing position SL during modify_position: %s", exc)
+
         request = OrderRequest(
             symbol=symbol,
             action=TradeAction.SLTP,

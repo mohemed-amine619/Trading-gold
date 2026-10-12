@@ -5,16 +5,16 @@
 
 ## 0. TEST BASELINE
 
-**220 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
+**224 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
 
 | Area | Tests | Status |
 |---|---|---|
 | Trading safety (paper default) | 18 | Implemented and tested |
-| Execution safety (idempotency) | 31 | Implemented and tested |
+| Execution safety & idempotency | 33 | Implemented and tested |
 | Bridge contract and auth | 31 | Implemented, tested against a mock |
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 21 | Implemented and tested |
-| Risk, position, strategy, market, backtest, API | 64 | Implemented and tested |
+| Risk, position, strategy, market, backtest, API | 66 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter`.
@@ -93,7 +93,6 @@ A precise checklist is in `docs/TROUBLESHOOTING.md`.
 | Gap | Impact |
 |---|---|
 | **API has no authentication** | Loopback binding is a mitigation, not security |
-| **`/api/emergency-stop` is a stub** | Returns success, stops nothing; not wired to `RiskEngine` |
 | **Money stored as `Float`** | Not accounting-grade precision |
 | **Bridge modify/close return 501** | Live position management impossible over HTTP |
 | **No broker connection ever tested end-to-end** | All broker testing is against a mock |
@@ -101,7 +100,6 @@ A precise checklist is in `docs/TROUBLESHOOTING.md`.
 | **Backtesting minimal** | Look-ahead bias not systematically prevented |
 | **`run.py` still holds credential fallbacks** | Lines 130–132; needs rotation at the broker |
 | **Index/energy asset classes unverified** | No broker adapter exercised |
-| **`/api/status` returns hardcoded values** | `is_connected`, `open_positions`, `daily_pnl` are stubs |
 
 ---
 

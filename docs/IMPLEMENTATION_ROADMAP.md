@@ -13,9 +13,9 @@
 | Phase | Title | Focus Area | Status |
 |---|---|---|---|
 | **Phase 0** | Baseline & Audit | Repository audit, test baseline, defect mapping | ✅ Complete |
-| **Phase 1** | Safety & Purge | Remove PostgreSQL dependencies, enforce SQLite-only, verify paper defaults | 🔄 In Progress |
-| **Phase 2** | Correctness & Risk Gate | Idempotency integration, central risk engine wiring, stop widening prevention | ⏳ Queued |
-| **Phase 3** | SQLite Architecture | Unified schema (`data/trading.db`), WAL/busy_timeout, backup & restore scripts | ⏳ Queued |
+| **Phase 1** | Safety & Purge | Remove PostgreSQL dependencies, enforce SQLite-only, verify paper defaults | ✅ Complete |
+| **Phase 2** | Correctness & Risk Gate | Idempotency integration, central risk engine wiring, stop widening prevention | ✅ Complete |
+| **Phase 3** | SQLite Architecture | Unified schema (`data/trading.db`), WAL/busy_timeout, backup & restore scripts | 🔄 In Progress |
 | **Phase 4** | MT5 Broker Resilience | Session discovery, disconnect recovery, order timeout reconciliation | ⏳ Queued |
 | **Phase 5** | Research & Validation | Backtesting integrity, walk-forward splits, look-ahead bias elimination | ⏳ Queued |
 | **Phase 6** | Portfolio Intelligence | Multi-asset exposure caps, correlation guard, strategy lifecycle | ⏳ Queued |
@@ -26,26 +26,27 @@
 
 ## DETAILED TASK BREAKDOWN
 
-### Phase 1 — Safety & Database Purge (Immediate)
+### Phase 1 — Safety & Database Purge (Completed)
 - [x] Establish 217 passing tests baseline.
 - [x] Create `docs/PROJECT_AUDIT.md`.
-- [ ] Remove `asyncpg` and `psycopg` from `requirements-windows.txt`.
-- [ ] Purge PostgreSQL service probes and `psql`/`pg_dump` dependencies from `scripts/windows/*.ps1`.
-- [ ] Verify `requirements.txt` alias to `requirements-windows.txt`.
-- [ ] Ensure all automated tests run safely without external database or live broker dependencies.
+- [x] Remove `asyncpg` and `psycopg` from `requirements-windows.txt`.
+- [x] Purge PostgreSQL service probes and `psql`/`pg_dump` dependencies from `scripts/windows/*.ps1`.
+- [x] Verify pure SQLite configuration in `core/settings.py` and `core/database/engine.py`.
+- [x] Enforce automated tests run safely without external database or live broker dependencies (220 passing).
 
-### Phase 2 — Correctness & Risk Enforcement
+### Phase 2 — Correctness & Risk Enforcement (Completed)
 - [x] Implement Breakeven + buffer (+0.15 ATR) and Trailing stop floor.
-- [ ] Connect `core/execution/idempotency.py` to order execution pipeline to eliminate duplicate orders during retries.
-- [ ] Ensure `RiskEngine.approve()` gates all automated trade generation.
-- [ ] Guard against stop-loss loosening across all position management paths.
+- [x] Connect `core/execution/idempotency.py` to order execution pipeline (`execute_proposal`, `submit_proposal`).
+- [x] Guard against stop-loss loosening across all position management paths (`modify_position`).
+- [x] Wire real `RiskEngine` kill switch to API endpoints (`/api/emergency-stop`, `/api/resume`, `/api/control`).
+- [x] Unify trade recording in `run.py` to use `data/trading.db` via `_get_sqlite_db_path()`.
 
-### Phase 3 — SQLite-Only Architecture
-- [ ] Standardize local SQLite storage to `data/trading.db` with auto-creation of `data/` directory.
-- [ ] Align trade history persistence between `run.py` and the unified 18-table schema in `core/database/models.py`.
-- [ ] Implement robust SQLite backup via Python `sqlite3.Connection.backup()` and PowerShell.
-- [ ] Implement database integrity verification (`PRAGMA integrity_check`) before and after backups.
-- [ ] Add explicit unit tests for SQLite concurrency, busy timeout, and backup/restore.
+### Phase 3 — SQLite-Only Architecture (In Progress)
+- [x] Standardize local SQLite storage to `data/trading.db` with auto-creation of `data/` directory.
+- [x] Align trade history persistence between `run.py` and the unified schema.
+- [x] Implement robust SQLite backup via Python `sqlite3.Connection.backup()` and PowerShell.
+- [x] Implement database integrity verification (`PRAGMA integrity_check`) before and after backups.
+- [ ] Add explicit stress unit tests for SQLite concurrency and busy timeout handling.
 
 ### Phase 4 — MetaTrader 5 Integration & Reconnection
 - [ ] Standardize terminal discovery and reuse of active Windows terminal session across all modules.

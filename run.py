@@ -210,6 +210,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _get_sqlite_db_path() -> str:
+    """Resolve unified SQLite database path from DATABASE_URL or default to data/trading.db."""
+    db_url = os.getenv("DATABASE_URL", "sqlite:///./data/trading.db")
+    if db_url.startswith("sqlite:///"):
+        path = db_url.replace("sqlite:///", "")
+        if path.startswith("./"):
+            path = path[2:]
+        return path
+    return os.path.join("data", "trading.db")
+
+
+
 # ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
@@ -903,7 +915,11 @@ class StandaloneAIBot:
         try:
             import sqlite3
             from datetime import datetime
-            conn = sqlite3.connect("trading_bot.db")
+            db_path = _get_sqlite_db_path()
+            parent = os.path.dirname(db_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            conn = sqlite3.connect(db_path, timeout=10.0)
             cursor = conn.cursor()
             cursor.execute('''CREATE TABLE IF NOT EXISTS trades
                             (id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -1830,12 +1846,30 @@ if __name__ == "__main__":
             for b in bots:
                 b._close_profitable("USER_SECURE_PROFITS")
         return {"status": "ok"}
+
+    @app.post("/api/emergency-stop")
+    def api_emergency_stop():
+        logger.warning("EMERGENCY STOP Triggered via /api/emergency-stop!")
+        for b in bots:
+            b._close_all("EMERGENCY_STOP")
+            b.paused = True
+        return {"status": "emergency_stop_activated", "message": "All trading stopped and positions closing."}
+
+    @app.post("/api/resume")
+    def api_resume():
+        logger.info("Trading RESUMED via /api/resume.")
+        for b in bots:
+            b.paused = False
+        return {"status": "trading_resumed", "message": "Trading resumed."}
         
     @app.get("/api/history")
     def api_history():
         import sqlite3
         try:
-            conn = sqlite3.connect("trading_bot.db")
+            db_path = _get_sqlite_db_path()
+            if not os.path.exists(db_path):
+                return {"history": []}
+            conn = sqlite3.connect(db_path, timeout=5.0)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")

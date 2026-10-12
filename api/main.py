@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from core.logging_setup import configure_logging
 from core.settings import get_settings, Settings
 from core.database.engine import init_async_db
+from core.risk.engine import get_risk_engine, RiskEngine
 from api.config_router import router as config_router
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class StatusResponse(BaseModel):
     open_positions: int
     daily_pnl: float
     status: str
+    emergency_stop: bool = False
 
 @app.get("/api/health")
 def health_check():
@@ -112,22 +114,47 @@ async def readiness_check():
     )
 
 @app.get("/api/status", response_model=StatusResponse)
-def get_system_status(settings: Settings = Depends(get_settings)):
+def get_system_status(
+    settings: Settings = Depends(get_settings),
+    risk_engine: RiskEngine = Depends(get_risk_engine),
+):
+    r_status = risk_engine.status()
+    is_stopped = r_status.get("emergency_stop", False)
     return StatusResponse(
         trading_mode=settings.trading_mode.value,
         is_connected=False,
-        open_positions=0,
+        open_positions=r_status.get("open_positions_count", 0),
         daily_pnl=0.0,
-        status="running"
+        status="stopped" if is_stopped else "running",
+        emergency_stop=is_stopped,
     )
 
 @app.post("/api/emergency-stop")
-def emergency_stop():
-    return {"status": "emergency_stop_activated", "message": "All trading stopped and positions closing."}
+def emergency_stop(risk_engine: RiskEngine = Depends(get_risk_engine)):
+    risk_engine.trigger_emergency_stop()
+    logger.critical("Emergency stop invoked via API")
+    return {"status": "emergency_stop_activated", "message": "All trading stopped and emergency stop activated."}
 
 @app.post("/api/resume")
-def resume_trading():
-    return {"status": "trading_resumed"}
+def resume_trading(risk_engine: RiskEngine = Depends(get_risk_engine)):
+    risk_engine.reset_emergency_stop()
+    logger.info("Emergency stop reset via API")
+    return {"status": "trading_resumed", "message": "Trading resumed."}
+
+@app.post("/api/control")
+def control_action(action_data: dict, risk_engine: RiskEngine = Depends(get_risk_engine)):
+    action = action_data.get("action")
+    if action == "emergency_stop":
+        risk_engine.trigger_emergency_stop()
+        logger.critical("Emergency stop invoked via /api/control")
+        return {"status": "ok", "message": "Emergency stop activated"}
+    elif action == "pause":
+        risk_engine.trigger_emergency_stop()
+        return {"status": "ok", "message": "Trading paused"}
+    elif action == "resume":
+        risk_engine.reset_emergency_stop()
+        return {"status": "ok", "message": "Trading resumed"}
+    return {"status": "ok"}
 
 @app.post("/api/settings")
 async def update_settings(new_config: dict):

@@ -276,3 +276,50 @@ def test_filled_report_requires_no_resubmission():
     )
     assert report.is_safe_to_resubmit is False
     assert report.is_filled is True
+
+
+def test_execute_proposal_with_idempotency_key_blocks_duplicate():
+    from core.risk.engine import TradeProposal
+    proposal = TradeProposal(
+        symbol="EURUSD",
+        direction=1,
+        entry_price=1.1000,
+        stop_loss=1.0950,
+        take_profit=1.1100,
+        strategy_name="TrendFollow",
+    )
+    adapter = ScriptedAdapter([_done()])
+    engine = ExecutionEngine(adapter, retry_delay_ms=0)
+
+    res1 = engine.execute_proposal(proposal, lot_size=0.1, idempotency_key="prop-1")
+    assert res1 is not None
+    assert res1.success is True
+    assert len(adapter.sent) == 1
+
+    # Resubmitting same key must NOT send a second order to broker
+    res2 = engine.execute_proposal(proposal, lot_size=0.1, idempotency_key="prop-1")
+    assert res2 is not None
+    assert res2.success is True
+    assert len(adapter.sent) == 1
+
+
+def test_submit_proposal_blocks_duplicate():
+    from core.risk.engine import TradeProposal
+    proposal = TradeProposal(
+        symbol="EURUSD",
+        direction=-1,
+        entry_price=1.1000,
+        stop_loss=1.1050,
+        take_profit=1.0900,
+        strategy_name="Breakout",
+    )
+    adapter = ScriptedAdapter([_done()])
+    engine = ExecutionEngine(adapter, retry_delay_ms=0)
+
+    rep1 = engine.submit_proposal(proposal, lot_size=0.2, idempotency_key="prop-2")
+    assert rep1.is_filled is True
+    assert len(adapter.sent) == 1
+
+    rep2 = engine.submit_proposal(proposal, lot_size=0.2, idempotency_key="prop-2")
+    assert rep2.is_filled is True
+    assert len(adapter.sent) == 1

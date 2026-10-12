@@ -478,3 +478,25 @@ class RiskEngine:
             "open_positions_count": self._open_positions_count,
             "trades_today": self._trades_today,
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global instance access
+# ─────────────────────────────────────────────────────────────────────────────
+
+_risk_engine_instance: Optional[RiskEngine] = None
+
+
+def get_risk_engine() -> RiskEngine:
+    """Return the global RiskEngine instance, creating one if not yet initialized."""
+    global _risk_engine_instance
+    if _risk_engine_instance is None:
+        _risk_engine_instance = RiskEngine()
+    return _risk_engine_instance
+
+
+def set_risk_engine(engine: Optional[RiskEngine]) -> None:
+    """Explicitly set or reset the global RiskEngine instance."""
+    global _risk_engine_instance
+    _risk_engine_instance = engine
+
