@@ -140,15 +140,15 @@ CONFIG = {
     "n_candles": int(os.getenv("HISTORY_CANDLES", 600)),
     
     # --- AI Settings ---
-    "ai_confidence_threshold": 0.62,
-    "ai_train_bars":  800,
-    "ai_retrain_bars": 50,
+    "ai_confidence_threshold": float(os.getenv("AI_CONFIDENCE_THRESHOLD", "0.55")),
+    "ai_train_bars":  int(os.getenv("AI_TRAIN_BARS", "800")),
+    "ai_retrain_bars": int(os.getenv("AI_RETRAIN_BARS", "50")),
     
     # --- strategy scoring ---
-    "min_signal_score": 60,
-    "adx_min": 25,
-    "adx_strong": 35,
-    "use_session_filter": True,
+    "min_signal_score": float(os.getenv("MIN_SIGNAL_SCORE", "50")),
+    "adx_min": float(os.getenv("ADX_MIN", "18")),
+    "adx_strong": float(os.getenv("ADX_STRONG", "30")),
+    "use_session_filter": os.getenv("USE_SESSION_FILTER", "false").lower() in ("true", "1", "yes") if os.getenv("USE_SESSION_FILTER") is not None else False,
     
     # trade window (UTC)
     "london_start_utc": 7,  "london_end_utc": 16,
