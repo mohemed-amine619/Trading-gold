@@ -23,12 +23,13 @@ from core.settings import Settings
 @pytest.fixture(autouse=True)
 def isolated_settings(monkeypatch, tmp_path):
     """
-    Detach Settings from any real ``.env`` for the duration of each test.
+    Detach Settings and run.py from any real ``.env`` for the duration of each test.
 
     pydantic-settings resolves ``env_file`` at instantiation time, so pointing
     it at a path that cannot exist makes the model fall back to process
     environment variables and its own defaults only.
     """
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
     monkeypatch.setitem(
         Settings.model_config, "env_file", str(tmp_path / "__no_such_env__")
     )
