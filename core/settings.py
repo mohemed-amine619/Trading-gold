@@ -243,9 +243,11 @@ class Settings(BaseSettings):
     trail_tighten2_atr: float = Field(default=4.0)
     trail_tighten2_mult: float = Field(default=1.0)
 
-    # Breakeven
+    # Breakeven & progressive profit lock
     enable_breakeven: bool = Field(default=True)
-    breakeven_trigger_atr: float = Field(default=1.0)
+    breakeven_trigger_atr: float = Field(default=0.4)
+    breakeven_buffer_atr: float = Field(default=0.15)
+    profit_lock_ratio: float = Field(default=0.50)
 
     # Partial close
     enable_partial_close: bool = Field(default=True)
@@ -363,6 +365,8 @@ class Settings(BaseSettings):
             "max_daily_dd": self.max_daily_loss_pct,
             "enable_breakeven": self.enable_breakeven,
             "breakeven_trigger_atr": self.breakeven_trigger_atr,
+            "breakeven_buffer_atr": self.breakeven_buffer_atr,
+            "profit_lock_ratio": self.profit_lock_ratio,
             "enable_partial_close": self.enable_partial_close,
             "partial_close_trigger_atr": self.partial_close_trigger_atr,
             "partial_close_fraction": self.partial_close_fraction,

@@ -24,6 +24,42 @@ class TestTrailing(unittest.TestCase):
         sl = calculate_proposed_sl(direction=-1, price_open=1000.0, price_current=940.0, current_sl=1100.0, config=config)
         self.assertEqual(sl, 995.0)
 
+    def test_progressive_breakeven_long(self):
+        config = TrailingConfig(breakeven_activation=50.0, breakeven_offset=5.0, profit_locking_ratio=0.5)
+        # Step 1: Profit = 50 (trigger reached, extra = 0) -> SL = 1000 + 5 = 1005
+        sl1 = calculate_proposed_sl(direction=1, price_open=1000.0, price_current=1050.0, current_sl=900.0, config=config)
+        self.assertEqual(sl1, 1005.0)
+
+        # Step 2: Profit = 70 (extra = 20, locks 5 + 10 = 15) -> SL = 1015
+        sl2 = calculate_proposed_sl(direction=1, price_open=1000.0, price_current=1070.0, current_sl=sl1, config=config)
+        self.assertEqual(sl2, 1015.0)
+
+        # Step 3: Profit = 100 (extra = 50, locks 5 + 25 = 30) -> SL = 1030
+        sl3 = calculate_proposed_sl(direction=1, price_open=1000.0, price_current=1100.0, current_sl=sl2, config=config)
+        self.assertEqual(sl3, 1030.0)
+
+        # Step 4: Retracement to profit = 80 (SL must NEVER loosen, stays at 1030)
+        sl4 = calculate_proposed_sl(direction=1, price_open=1000.0, price_current=1080.0, current_sl=sl3, config=config)
+        self.assertEqual(sl4, 1030.0)
+
+    def test_progressive_breakeven_short(self):
+        config = TrailingConfig(breakeven_activation=50.0, breakeven_offset=5.0, profit_locking_ratio=0.5)
+        # Step 1: Profit = 50 -> SL = 1000 - 5 = 995
+        sl1 = calculate_proposed_sl(direction=-1, price_open=1000.0, price_current=950.0, current_sl=1100.0, config=config)
+        self.assertEqual(sl1, 995.0)
+
+        # Step 2: Profit = 70 -> extra = 20, locks 5 + 10 = 15 -> SL = 985
+        sl2 = calculate_proposed_sl(direction=-1, price_open=1000.0, price_current=930.0, current_sl=sl1, config=config)
+        self.assertEqual(sl2, 985.0)
+
+        # Step 3: Profit = 100 -> extra = 50, locks 5 + 25 = 30 -> SL = 970
+        sl3 = calculate_proposed_sl(direction=-1, price_open=1000.0, price_current=900.0, current_sl=sl2, config=config)
+        self.assertEqual(sl3, 970.0)
+
+        # Step 4: Retracement to 920 (profit 80) -> SL must never widen, stays at 970
+        sl4 = calculate_proposed_sl(direction=-1, price_open=1000.0, price_current=920.0, current_sl=sl3, config=config)
+        self.assertEqual(sl4, 970.0)
+
     def test_calculate_fixed_trailing_long(self):
         config = TrailingConfig(mode="fixed", activation_distance=50.0, trailing_distance=20.0)
         sl = calculate_proposed_sl(direction=1, price_open=1000.0, price_current=1060.0, current_sl=1000.0, config=config)

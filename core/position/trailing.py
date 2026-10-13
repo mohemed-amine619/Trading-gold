@@ -31,9 +31,11 @@ def calculate_proposed_sl(
     profit = (price_current - price_open) * direction
     proposed_sl = current_sl
 
-    # 1. Breakeven
+    # 1. Breakeven & Progressive Profit Locking
     if config.breakeven_activation > 0 and profit >= config.breakeven_activation:
-        be_price = price_open + (config.breakeven_offset * direction)
+        extra_profit = max(0.0, profit - config.breakeven_activation)
+        locked_offset = config.breakeven_offset + (extra_profit * max(0.0, config.profit_locking_ratio))
+        be_price = price_open + (locked_offset * direction)
         if _is_better_sl(direction, be_price, proposed_sl):
             proposed_sl = be_price
 

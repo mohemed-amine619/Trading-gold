@@ -141,10 +141,24 @@ After that, in order:
 - `tests/unit/test_position.py` (Fixed floating point & setup bugs)
 
 ## 3. TEST RESULTS
-- **Passed:** 81/81 (63 pre-existing + 18 new safety tests)
+- **Passed:** 232/232
 - **Failed:** 0
 - **Command:** `.venv/bin/python -m pytest tests/ -q`
-- **Summary:** Position tests now correctly classify bot vs manual trades and correctly handle floating point assertion variations for trailing stops and breakeven limits.
+- **Summary:** All unit and integration test suites passing (232 tests). Includes full safety gates, instrument registry, trailing logic, and progressive profit locking ratchets.
+
+## 3.2 PROGRESSIVE BREAKEVEN & ENTRY RESPONSIVENESS (this phase)
+- **Responsive Trade Execution:**
+  - `MIN_SIGNAL_SCORE`: Lowered to 50 (was hardcoded 60) configurable via env.
+  - `AI_CONFIDENCE_THRESHOLD`: Lowered to 0.55 (was hardcoded 0.62) configurable via env.
+  - `ADX_MIN`: Lowered to 18 (was hardcoded 25) allowing earlier entries before trend exhaustion.
+  - `USE_SESSION_FILTER`: Configurable (default `false`) permitting 24/5 trading when markets are open.
+- **Continuous Progressive Breakeven & Profit Ratchet:**
+  - `BREAKEVEN_TRIGGER_ATR`: Defaulted to 0.4 ATR (was 0.8 ATR) to protect positions very early.
+  - `BREAKEVEN_BUFFER_ATR`: Defaulted to 0.15 ATR to lock in spread, commission, and swap fees.
+  - `PROFIT_LOCK_RATIO`: Defaulted to 0.50 (50%). As profit expands beyond the trigger, the stop loss ratchets forward into guaranteed profit rather than remaining stationary at the initial entry line.
+  - Stop loss strictly obeys directional monotonicity: it never loosens or widens upon market retracements.
+  - Respects broker minimum stop levels (`trade_stops_level * point`) to prevent order rejection.
+  - Implemented across both `run.py` and `core/position/trailing.py` / `core/settings.py`.
 
 ## 3.1 SAFETY HARDENING (this phase)
 - **`run.py` now defaults to PAPER mode.** `dry_run` was read by every mutating

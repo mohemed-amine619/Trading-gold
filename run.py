@@ -173,14 +173,15 @@ CONFIG = {
     "max_open_pos":            3,
     "max_daily_dd":            0.03,
     
-    # --- breakeven / profit lock ---
+    # --- breakeven / progressive profit lock ---
     "enable_breakeven":        True,
-    "breakeven_trigger_atr":   0.8,    # Move to breakeven early at +0.8x ATR profit (was 1.2)
-    "breakeven_buffer_atr":    0.15,   # +0.15x ATR profit buffer beyond entry (covers spread, commission & swap)
+    "breakeven_trigger_atr":   float(os.getenv("BREAKEVEN_TRIGGER_ATR", "0.4")),    # Move to breakeven early at +0.4x ATR profit (was 0.8)
+    "breakeven_buffer_atr":    float(os.getenv("BREAKEVEN_BUFFER_ATR", "0.15")),   # +0.15x ATR profit buffer beyond entry (covers spread, commission & swap)
+    "profit_lock_ratio":       float(os.getenv("PROFIT_LOCK_RATIO", "0.50")),      # Continuously lock 50% of further profit into SL
     "enable_partial_close":    True,
-    "partial_close_trigger_atr": 1.2,  # Lock in 50% partial profit early at +1.2x ATR
-    "profit_lock_activate_atr": 1.0,   # Activate giveback protect at +1.0x ATR
-    "profit_giveback_pct":     0.30,   # If peak profit gives back 30%, close immediately to secure 70%
+    "partial_close_trigger_atr": float(os.getenv("PARTIAL_CLOSE_TRIGGER_ATR", "1.2")),  # Lock in 50% partial profit early at +1.2x ATR
+    "profit_lock_activate_atr": float(os.getenv("PROFIT_LOCK_ACTIVATE_ATR", "1.0")),   # Activate giveback protect at +1.0x ATR
+    "profit_giveback_pct":     float(os.getenv("PROFIT_GIVEBACK_PCT", "0.30")),   # If peak profit gives back 30%, close immediately to secure 70%
     
     # --- system ---
     "sleep_interval":   1.0,
@@ -1498,15 +1499,35 @@ class StandaloneAIBot:
                 self._close_position(pos, "profit lock giveback")
                 continue
 
-            # ---- breakeven (locks entry + buffer to guarantee 0 loss) -
+            # ---- PROGRESSIVE BREAKEVEN & PROFIT LOCKING (Advances SL as profit grows) ----
             be_buffer = self.cfg.get("breakeven_buffer_atr", 0.15) * atr
             be_sl = (pos.price_open + be_buffer) if direction == 1 else (pos.price_open - be_buffer)
             if self.cfg.get("enable_breakeven", True):
-                be_trigger = self.cfg.get("breakeven_trigger_atr", 0.8) * atr
+                be_trigger = self.cfg.get("breakeven_trigger_atr", 0.4) * atr
                 if profit_move >= be_trigger:
-                    if ((direction == 1 and pos.sl < be_sl) or
-                            (direction == -1 and (pos.sl == 0 or pos.sl > be_sl))):
-                        self._modify_sl(pos, be_sl)
+                    target_sl = be_sl
+
+                    # Progressive profit locking: as profit increases, advance SL forward into profit
+                    extra_profit = profit_move - be_trigger
+                    lock_ratio = self.cfg.get("profit_lock_ratio", 0.50)
+                    if extra_profit > 0 and lock_ratio > 0:
+                        locked_gain = be_buffer + (extra_profit * lock_ratio)
+                        progressive_sl = (pos.price_open + locked_gain) if direction == 1 else (pos.price_open - locked_gain)
+                        target_sl = max(target_sl, progressive_sl) if direction == 1 else min(target_sl, progressive_sl)
+
+                    # Ensure minimum distance from current price to respect broker stops level
+                    info = mt5.symbol_info(pos.symbol)
+                    min_dist = (info.trade_stops_level * info.point) if info and info.trade_stops_level else (atr * 0.1)
+                    min_dist = max(min_dist, atr * 0.05)
+
+                    if direction == 1:
+                        target_sl = min(target_sl, close_price - min_dist)
+                        if target_sl > pos.sl + 1e-9 and target_sl >= be_sl:
+                            self._modify_sl(pos, target_sl)
+                    else:
+                        target_sl = max(target_sl, close_price + min_dist)
+                        if (pos.sl == 0 or target_sl < pos.sl - 1e-9) and target_sl <= be_sl:
+                            self._modify_sl(pos, target_sl)
 
             # ---- trailing stop (accelerating, never falls below breakeven)
             trail_atr  = self.cfg.get("trail_atr_mult", 1.5) * atr
