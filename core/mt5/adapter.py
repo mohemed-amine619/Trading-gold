@@ -36,6 +36,19 @@ from core.mt5.types import (
 logger = logging.getLogger(__name__)
 
 
+class MT5CallError(RuntimeError):
+    """A broker call failed in a way that makes account state UNKNOWN.
+
+    MetaTrader5's Python API signals failure by returning None and recording
+    the reason in ``last_error()``. Collapsing that into an empty result is
+    unsafe for account-scoped reads (positions, deals, orders): callers
+    cannot distinguish "nothing is open" from "I could not ask", and the
+    first reading is almost always acted upon by deleting local state.
+
+    Raising forces callers to treat an unverifiable account as a fault.
+    """
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Abstract interface
 # ─────────────────────────────────────────────────────────────────────────────
@@ -290,7 +303,18 @@ class RealMT5Adapter(MT5Adapter):
             kwargs["symbol"] = symbol
         if magic is not None:
             kwargs["magic"] = magic
-        raw = mt5.positions_get(**kwargs) or []
+        raw = mt5.positions_get(**kwargs)
+        if raw is None:
+            # MT5 returns None on failure (disconnected terminal, timeout).
+            # Returning [] here made a connection loss indistinguishable from
+            # "every position was closed", and PositionManager.reconcile()
+            # deletes all local tracking on an empty list — so a transient
+            # blip silently orphaned live positions. Fail loudly instead.
+            err = mt5.last_error()
+            raise MT5CallError(
+                f"positions_get({kwargs}) failed: {err}. "
+                "Refusing to report zero positions — treat account state as UNKNOWN."
+            )
         result = []
         for p in raw:
             result.append(MT5Position(
@@ -327,9 +351,19 @@ class RealMT5Adapter(MT5Adapter):
             "type_time":    request.type_time,
             "type_filling": request.type_filling,
         }
+        # Forward the position ticket. Without this, SL/TP modifications and
+        # closes are sent with position=0, which a broker either rejects or —
+        # worse on a hedging account — applies to the wrong position.
+        if request.position:
+            req_dict["position"] = int(request.position)
         result = mt5.order_send(req_dict)
         if result is None:
-            return OrderResult(retcode=0, comment="order_send returned None")
+            # retcode=0 is not a valid MT5 "success"; report it as an
+            # indeterminate outcome so callers reconcile rather than resubmit.
+            return OrderResult(
+                retcode=RetCode.TIMEOUT,
+                comment="order_send returned None (indeterminate — reconcile before resubmitting)",
+            )
         return OrderResult(
             retcode=result.retcode,
             deal=getattr(result, "deal", 0),
@@ -426,6 +460,9 @@ class MockMT5Adapter(MT5Adapter):
         # Per-symbol reference prices so a multi-symbol mock stays coherent.
         self._base_prices: dict[str, float] = {}
         self._asset_of: dict[str, str] = {}
+        # Explicitly pinned market prices (see set_price). Keeps the tick and
+        # position price_current consistent, as they are on a real terminal.
+        self._pinned_prices: dict[str, float] = {}
         # Symbols this mock is willing to describe. An unlisted symbol returns
         # None from get_symbol_info(), as a real broker would for an unknown one.
         self._known: set[str] = {symbol} if symbol else set()
@@ -527,14 +564,33 @@ class MockMT5Adapter(MT5Adapter):
             trade_mode=4,  # SYMBOL_TRADE_MODE_FULL
         )
 
+    def set_price(self, symbol: str, price: float) -> None:
+        """Pin the mock's market price for a symbol.
+
+        A real tick and ``MT5Position.price_current`` are the same market
+        price by definition. The mock previously generated its tick from a
+        static base price, so a test could set ``pos.price_current`` to
+        simulate profit while the tick — the price the broker would validate
+        a stop against — stayed at the base. Any code comparing the two was
+        untestable. Pinning the price keeps both views consistent.
+        """
+        self._pinned_prices[symbol] = float(price)
+
     def get_tick(self, symbol: str) -> Optional[Tick]:
         if not self._connected:
             return None
-        base = self.base_price_for(symbol)
+        if symbol not in self._known:
+            # Do not raise AttributeError on an unknown symbol. Returning None
+            # matches the SymbolInfo contract and lets callers fail safely.
+            logger.warning("[MOCK] get_tick for unregistered symbol %r", symbol)
+            return None
+        base = self._pinned_prices.get(symbol, self.base_price_for(symbol))
         # Spread expressed in the instrument's own price units.
         point = self.get_symbol_info(symbol).point or 0.01
         spread = (self.get_symbol_info(symbol).spread or 20) * point
-        mid = base + self._rng.gauss(0, base * 0.0002)
+        # Deterministic: no per-call random walk. Tests must be reproducible,
+        # and two get_tick calls for the same state must agree.
+        mid = base
         return Tick(
             symbol=symbol,
             time=datetime.now(timezone.utc),
@@ -587,6 +643,21 @@ class MockMT5Adapter(MT5Adapter):
         symbol: Optional[str] = None,
         magic: Optional[int] = None,
     ) -> list[MT5Position]:
+        # Refresh price_current/profit from the live tick, as mt5.positions_get()
+        # does on a real terminal. Without this the mock reported a frozen
+        # price_current that could disagree with get_tick(), which made any
+        # code comparing the two untestable.
+        for pos in self._positions:
+            tick = self.get_tick(pos.symbol)
+            if tick is None:
+                continue
+            info = self.get_symbol_info(pos.symbol)
+            tick_size = (info.trade_tick_size if info else None) or 0.01
+            tick_value = (info.trade_tick_value if info else None) or 1.0
+            mark = tick.bid if pos.direction == 1 else tick.ask
+            pos.price_current = mark
+            ticks = (mark - pos.price_open) / tick_size
+            pos.profit = ticks * tick_value * pos.volume
         result = self._positions
         if symbol:
             result = [p for p in result if p.symbol == symbol]

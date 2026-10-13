@@ -29,8 +29,10 @@ class StrategyEnsemble:
         
         buy_score = 0.0
         sell_score = 0.0
-        total_weight = 0.0
+        buy_weight = 0.0
+        sell_weight = 0.0
         reasons = []
+        abstain_reasons = []
         
         for strategy in self.strategies:
             signal = strategy.evaluate(df, regime)
@@ -38,21 +40,33 @@ class StrategyEnsemble:
             
             if signal.direction == 1:
                 buy_score += signal.score * weight
+                buy_weight += weight
                 if signal.score > 50:
                     reasons.append(f"{strategy.name}: BUY ({signal.score:.1f})")
             elif signal.direction == -1:
                 sell_score += signal.score * weight
+                sell_weight += weight
                 if signal.score > 50:
                     reasons.append(f"{strategy.name}: SELL ({signal.score:.1f})")
-                    
-            total_weight += weight
+            # Neutral strategies abstain. They are NOT counted in the
+            # denominator: doing so treated "no opinion" as "opinion against",
+            # so a single unanimous 90/100 signal was diluted to 30/100 and
+            # discarded whenever the other members abstained.
+            else:
+                abstain_reasons.append(f"{strategy.name}: neutral ({signal.reason})")
 
-        if total_weight == 0:
-            return Signal(direction=0, score=0.0, reason="No strategies active", invalidation="")
+        if buy_weight == 0 and sell_weight == 0:
+            # Nobody took a side. Report an honest zero rather than a residual
+            # score: a neutral signal must never carry a tradable score.
+            reason = "All strategies abstained"
+            if abstain_reasons:
+                reason += " (" + "; ".join(abstain_reasons) + ")"
+            return Signal(direction=0, score=0.0, reason=reason, invalidation="")
             
-        # Normalize scores
-        buy_score /= total_weight
-        sell_score /= total_weight
+        # Normalize each side by the weight that actually voted for it, so
+        # abstentions cannot dilute a confident, unanimous signal.
+        buy_score = buy_score / buy_weight if buy_weight else 0.0
+        sell_score = sell_score / sell_weight if sell_weight else 0.0
         
         # Decide direction
         if buy_score > sell_score and buy_score > 50:
@@ -70,4 +84,4 @@ class StrategyEnsemble:
                 invalidation="Price breaks above recent resistance or momentum flips bullish."
             )
             
-        return Signal(direction=0, score=max(buy_score, sell_score), reason="Insufficient confluence", invalidation="")
+        return Signal(direction=0, score=0.0, reason="Insufficient confluence", invalidation="")

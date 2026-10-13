@@ -5,16 +5,17 @@
 
 ## 0. TEST BASELINE
 
-**226 passing, 0 failing** — `.venv\Scripts\python.exe -m pytest tests\ -q`
+**293 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
-| Trading safety (paper default) | 18 | Implemented and tested |
+| Trading safety (paper default & credential hygiene) | 23 | Implemented and tested |
+| Safety tripwires & fail-closed regressions | 54 | Implemented and tested |
 | Execution safety & idempotency | 34 | Implemented and tested |
 | Bridge contract and auth | 31 | Implemented, tested against a mock |
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 22 | Implemented and tested |
-| Risk, position, strategy, market, backtest, API | 66 | Implemented and tested |
+| Risk, position, strategy, market, backtest, API | 74 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter`.

@@ -24,11 +24,53 @@ from core.risk.engine import TradeProposal
 
 logger = logging.getLogger(__name__)
 
+
+def _order_result_from_report(report: ExecutionReport) -> OrderResult:
+    """Convert an ExecutionReport back to the legacy OrderResult shape.
+
+    The retcode must be derived from the execution STATE, not copied from
+    ``report.retcode``. ``ExecutionReport.retcode`` is an ``int`` that is never
+    None, so the old ``report.retcode if report.retcode is not None else ...``
+    guard was dead code: an indeterminate UNKNOWN outcome (timeout / dropped
+    connection) was reported to the caller as retcode 0, which every caller
+    reads as "definite rejection". That told the trading loop the order had
+    failed when the broker may well have filled it — the exact duplication
+    scenario the idempotency ledger exists to prevent.
+    """
+    if report.state in FILLED_STATES:
+        retcode = RetCode.DONE
+    elif report.state is ExecutionState.UNKNOWN:
+        # Preserve ambiguity. Callers must reconcile before acting on this.
+        retcode = RetCode.TIMEOUT
+    elif report.state is ExecutionState.NOT_SENT:
+        retcode = RetCode.REQUOTE
+    elif report.state is ExecutionState.PARTIAL_FILL:
+        retcode = RetCode.DONE_PARTIAL
+    else:
+        retcode = RetCode.REJECT
+
+    return OrderResult(
+        retcode=retcode,
+        deal=report.deal or 0,
+        order=report.order or 0,
+        volume=report.volume or 0.0,
+        price=report.price or 0.0,
+        comment=report.comment or report.state.value,
+    )
+
+
 class ExecutionEngine:
-    def __init__(self, adapter: MT5Adapter, max_retries: int = 3, retry_delay_ms: int = 500):
+    def __init__(
+        self,
+        adapter: MT5Adapter,
+        max_retries: int = 3,
+        retry_delay_ms: int = 500,
+        magic_number: int = 888999,
+    ):
         self.adapter = adapter
         self.max_retries = max_retries
         self.retry_delay_ms = retry_delay_ms
+        self.magic_number = magic_number
         # Duplicate-order protection. Shared across calls on this engine.
         self.ledger = IdempotencyLedger()
 
@@ -64,14 +106,7 @@ class ExecutionEngine:
         
         if idempotency_key:
             report = self.submit(request, idempotency_key=idempotency_key)
-            return OrderResult(
-                retcode=report.retcode if report.retcode is not None else (RetCode.DONE if report.state in FILLED_STATES else RetCode.REJECT),
-                deal=report.deal or 0,
-                order=report.order or 0,
-                volume=report.volume or 0.0,
-                price=report.price or 0.0,
-                comment=report.comment or report.state.value,
-            )
+            return _order_result_from_report(report)
 
         return self._send_with_retry(request)
 
@@ -110,51 +145,76 @@ class ExecutionEngine:
 
     def close_position(self, ticket: int, symbol: str, volume: float, direction: int) -> Optional[OrderResult]:
         """
-        Close an existing position by sending an opposite market order.
+        Close an existing position.
+
+        Passes ``position=ticket`` so hedging accounts close the intended
+        position instead of opening a second, opposite one. This previously
+        discarded the ticket on the assumption that OrderRequest had no such
+        field; it has had one all along (``core/mt5/types.py``), and the
+        RealMT5Adapter now forwards it.
         """
         order_type = OrderType.SELL if direction == 1 else OrderType.BUY
-        
+
         request = OrderRequest(
             symbol=symbol,
             action=TradeAction.DEAL,
             type=order_type,
             volume=volume,
             price=0.0,
-            magic=888999,
-            comment="close_pos"
+            magic=self.magic_number,
+            comment="close_pos",
+            position=ticket,
         )
-        
-        # Set position ticket for MT5 if needed (supported in some brokers)
-        # request.position = ticket (would require adding position field to OrderRequest)
-        
+
         return self._send_with_retry(request)
-        
+
     def modify_position(self, ticket: int, symbol: str, new_sl: float, new_tp: float) -> Optional[OrderResult]:
         """
         Modify Stop Loss and Take Profit of an existing position.
+
         Safety gate: never allows loosening an existing stop loss.
+
+        The gate fails CLOSED. If the current position cannot be read — a
+        transient broker error, a connection drop, a ticket that no longer
+        resolves — we refuse the modification rather than submitting an
+        unverified stop. It previously logged a warning and fell through to
+        send anyway, so a broker hiccup silently disabled the single most
+        safety-critical guard in this module.
         """
-        # Safety gate: query existing position and refuse to loosen stop loss
         try:
             positions = self.adapter.get_positions(symbol=symbol)
-            pos = next((p for p in positions if p.ticket == ticket), None)
-            if pos is not None and pos.sl > 0.0 and new_sl > 0.0:
-                # BUY: direction == 1 (type == 0). Loosening means new_sl < pos.sl
-                if pos.direction == 1 and new_sl < pos.sl:
-                    logger.error(
-                        "Safety violation blocked: attempting to widen/loosen BUY SL for ticket %d (current=%f, proposed=%f)",
-                        ticket, pos.sl, new_sl,
-                    )
-                    return None
-                # SELL: direction == -1 (type == 1). Loosening means new_sl > pos.sl
-                elif pos.direction == -1 and new_sl > pos.sl:
-                    logger.error(
-                        "Safety violation blocked: attempting to widen/loosen SELL SL for ticket %d (current=%f, proposed=%f)",
-                        ticket, pos.sl, new_sl,
-                    )
-                    return None
-        except Exception as exc:
-            logger.warning("Could not verify existing position SL during modify_position: %s", exc)
+        except Exception as e:
+            logger.error(
+                "Refusing SL/TP modification for ticket %d (%s): failed to read positions (%s). "
+                "Cannot verify the existing stop.",
+                ticket, symbol, e,
+            )
+            return None
+
+        pos = next((p for p in positions if p.ticket == ticket), None)
+        if pos is None:
+            logger.error(
+                "Refusing SL/TP modification for ticket %d (%s): position not "
+                "found. Cannot verify the existing stop.",
+                ticket, symbol,
+            )
+            return None
+
+        if pos.sl > 0.0 and new_sl > 0.0:
+            # BUY: direction == 1 (type == 0). Loosening means new_sl < pos.sl
+            if pos.direction == 1 and new_sl < pos.sl:
+                logger.error(
+                    "Safety violation blocked: attempting to widen/loosen BUY SL for ticket %d (current=%f, proposed=%f)",
+                    ticket, pos.sl, new_sl,
+                )
+                return None
+            # SELL: direction == -1 (type == 1). Loosening means new_sl > pos.sl
+            elif pos.direction == -1 and new_sl > pos.sl:
+                logger.error(
+                    "Safety violation blocked: attempting to widen/loosen SELL SL for ticket %d (current=%f, proposed=%f)",
+                    ticket, pos.sl, new_sl,
+                )
+                return None
 
         request = OrderRequest(
             symbol=symbol,
@@ -164,7 +224,7 @@ class ExecutionEngine:
             price=0.0,
             sl=new_sl,
             tp=new_tp,
-            magic=888999,
+            magic=self.magic_number,
             comment="modify_sltp",
             position=ticket
         )
@@ -247,7 +307,26 @@ class ExecutionEngine:
 
         while attempts <= self.max_retries:
             attempts += 1
-            result = self.adapter.send_order(request)
+            try:
+                result = self.adapter.send_order(request)
+            except Exception as exc:
+                # send_order reaching the broker before raising is the exact
+                # indeterminate case this module exists to handle. Record it as
+                # UNKNOWN and complete the ledger entry — letting the exception
+                # escape would leave the key in_flight forever, blocking every
+                # future submission with that key.
+                logger.error(
+                    "Submission %s raised during send_order (%s: %s); treating "
+                    "outcome as UNKNOWN and requiring reconciliation.",
+                    idempotency_key, type(exc).__name__, exc,
+                )
+                report = ExecutionReport(
+                    state=ExecutionState.UNKNOWN,
+                    idempotency_key=idempotency_key,
+                    comment=f"send_order raised {type(exc).__name__}: {exc}",
+                    attempts=attempts,
+                )
+                break
 
             state = state_from_retcode(
                 result.retcode,
@@ -289,7 +368,7 @@ class ExecutionEngine:
                 continue
             break
 
-        assert report is not None
+        assert report is not None  # loop always sets report or breaks via raise path
         self.ledger.complete(report)
         return report
 

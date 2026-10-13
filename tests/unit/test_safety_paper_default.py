@@ -69,6 +69,82 @@ def load_run(tmp_path, monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Credential safety
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `run.py` previously carried a real broker account number, password and
+# server as `os.getenv(...) or "<literal>"` fallbacks. That leaks live
+# credentials into every clone and, worse, silently logs into a real account
+# when the operator forgets to configure `.env`. These tests lock that shut.
+
+# Strings from the removed hardcoded credential block. Kept as fragments so a
+# future paste of similar material is still caught.
+_FORBIDDEN_CREDENTIAL_FRAGMENTS = (
+    "Exness-MT5Trail16",
+    "Amine2002@",
+)
+
+
+def test_run_py_has_no_hardcoded_credential_fallbacks(load_run):
+    """Credentials must come from the environment, with no literal fallback."""
+    run = load_run()
+    for key in ("account", "password", "server"):
+        value = run.CONFIG[key]
+        assert value is None, (
+            f"CONFIG[{key!r}] must be None when MT5_* env vars are unset; "
+            f"got a hardcoded fallback {value!r}"
+        )
+
+
+def test_run_py_source_contains_no_known_credential_literals():
+    """Static guard: the credential strings must not reappear in run.py."""
+    source = RUN_PY.read_text(encoding="utf-8")
+    for fragment in _FORBIDDEN_CREDENTIAL_FRAGMENTS:
+        assert fragment not in source, (
+            f"run.py contains a hardcoded credential fragment {fragment!r}. "
+            "Credentials belong in .env only."
+        )
+
+
+def test_credentials_are_read_from_env_when_present(load_run, monkeypatch):
+    """A configured environment is still honoured — we removed defaults, not support."""
+    monkeypatch.setenv("MT5_LOGIN", "1234567")
+    monkeypatch.setenv("MT5_PASSWORD", "from-env")
+    monkeypatch.setenv("MT5_SERVER", "Broker-Server")
+    run = load_run()
+    assert run.CONFIG["account"] == 1234567
+    assert run.CONFIG["password"] == "from-env"
+    assert run.CONFIG["server"] == "Broker-Server"
+
+
+def test_invalid_login_falls_back_to_none_not_zero(load_run, monkeypatch):
+    """A non-integer MT5_LOGIN must be ignored, never silently become 0."""
+    monkeypatch.setenv("MT5_LOGIN", "not-a-number")
+    run = load_run()
+    assert run.CONFIG["account"] is None
+    assert run._env_login() is None
+
+
+def test_no_tracked_source_file_contains_credential_literals():
+    """Repo-wide sweep: no tracked .py file may embed a known credential.
+
+    This test file is skipped — it necessarily contains the fragments as
+    detector data, which is not the same as embedding a credential.
+    """
+    offenders = []
+    for path in REPO_ROOT.rglob("*.py"):
+        if any(part in {".venv", "venv", ".git", "__pycache__"} for part in path.parts):
+            continue
+        if path.name == Path(__file__).name:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for fragment in _FORBIDDEN_CREDENTIAL_FRAGMENTS:
+            if fragment in text:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {fragment!r}")
+    assert not offenders, "Hardcoded credentials found: " + "; ".join(offenders)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Configuration defaults
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -87,7 +87,12 @@ class Settings(BaseSettings):
     # ──────────────────────────────────────────────────────────
     raw_symbols: str = Field(
         default="XAUUSDm",
-        validation_alias="SYMBOLS",
+        # Accept BOTH the documented key (TRADE_SYMBOLS, used by .env.example
+        # and by run.py) and the bare key. Previously only "SYMBOLS" was read,
+        # so an operator who followed .env.example exactly — setting
+        # TRADE_SYMBOLS — silently got the default XAUUSDm and traded gold
+        # they never asked for.
+        validation_alias=AliasChoices("TRADE_SYMBOLS", "SYMBOLS"),
         description="Comma-separated list of symbols to trade",
     )
 
@@ -203,12 +208,56 @@ class Settings(BaseSettings):
     # ──────────────────────────────────────────────────────────
     # Risk defaults
     # ──────────────────────────────────────────────────────────
-    risk_per_trade: float = Field(default=0.01, ge=0.001, le=0.05)
-    max_daily_loss_pct: float = Field(default=0.02, ge=0.005, le=0.20)
-    max_drawdown_pct: float = Field(default=0.10, ge=0.01, le=0.50)
-    max_open_positions: int = Field(default=5, ge=1, le=50)
+    # These are conservative *software safety defaults* chosen so that a fresh
+    # install cannot expose more than trivial capital. They are NOT financial
+    # advice and they are not tuned for profitability — they exist so that a
+    # defect in strategy or execution cannot escalate into an account event.
+    #
+    #   risk_per_trade        fraction of equity risked on ONE trade
+    #   max_aggregate_risk    fraction of equity at risk across ALL open trades
+    #   max_daily_loss_pct    fraction of the day's starting equity
+    #   max_drawdown_pct      fraction of the equity high-water mark
+    #
+    # See docs/RISK_MANAGEMENT.md for the exact semantics of each.
+    risk_per_trade: float = Field(
+        default=0.0025,
+        ge=0.0001,
+        le=0.05,
+        description="Fraction of equity risked per trade (0.0025 = 0.25%)",
+    )
+    max_aggregate_risk_pct: float = Field(
+        default=0.01,
+        ge=0.0005,
+        le=0.25,
+        description="Fraction of equity that may be at risk across all open positions",
+    )
+    max_daily_loss_pct: float = Field(
+        default=0.01, ge=0.002, le=0.20,
+        description="Daily loss limit as a fraction of daily starting equity",
+    )
+    max_weekly_loss_pct: float = Field(
+        default=0.03, ge=0.002, le=0.30,
+        description="Weekly loss limit as a fraction of weekly starting equity",
+    )
+    max_drawdown_pct: float = Field(
+        default=0.05, ge=0.005, le=0.50,
+        description="Drawdown circuit breaker as a fraction of equity high-water mark",
+    )
+    max_open_positions: int = Field(default=3, ge=1, le=50)
+    max_positions_per_symbol: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Maximum concurrent positions per symbol (1 = never stack)",
+    )
     min_rr_ratio: float = Field(default=1.5, ge=0.5, le=10.0)
-    max_margin_usage: float = Field(default=0.50, ge=0.10, le=0.90)
+    max_margin_usage: float = Field(default=0.30, ge=0.05, le=0.90)
+    max_loss_per_trade_pct: float = Field(
+        default=0.0025,
+        ge=0.0001,
+        le=0.05,
+        description="Hard backstop cap on a single trade's loss as a fraction of equity",
+    )
     magic_number: int = Field(default=888999)
 
     # ──────────────────────────────────────────────────────────
@@ -256,8 +305,7 @@ class Settings(BaseSettings):
     partial_close2_trigger_atr: float = Field(default=3.0)
     partial_close2_fraction: float = Field(default=0.25)
 
-    # Hard per-trade stop (backstop)
-    max_loss_per_trade_pct: float = Field(default=0.01, ge=0.001, le=0.05)
+    # NOTE: max_loss_per_trade_pct is declared in the Risk defaults block above.
 
     # Profit lock / giveback
     profit_lock_activate_atr: float = Field(default=1.2)

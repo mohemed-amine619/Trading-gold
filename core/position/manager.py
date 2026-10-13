@@ -54,9 +54,6 @@ class PositionManager:
         # Configuration for trailing
         self.trail_activate_rr = 1.0  # Activate trailing stop when 1R in profit
         self.trail_distance_rr = 0.5  # Trail by 0.5R
-        
-        self.trail_activate_rr = 1.0  # Activate trailing stop when 1R in profit
-        self.trail_distance_rr = 0.5  # Trail by 0.5R
         self.breakeven_rr = 0.5       # Move to breakeven when 0.5R in profit
         
         self.pnl_engine = PNLDecisionEngine(
@@ -84,6 +81,11 @@ class PositionManager:
         """
         Reconcile local state with the actual broker state.
         Detects closed, partially closed, externally modified, and new positions.
+
+        If the broker cannot be read, the account state is UNKNOWN — not
+        empty. Propagating the error here is deliberate: the alternative was
+        to delete every tracked position because a call timed out, which
+        orphans live positions with no stop management.
         """
         broker_positions = self.adapter.get_positions()
         broker_tickets = {pos.ticket: pos for pos in broker_positions}
@@ -174,7 +176,8 @@ class PositionManager:
         metrics = self.pnl_engine.calculate_metrics(
             ticket=pos.ticket,
             open_price=pos.price_open,
-            current_price=pos.price_current,
+            # Same snapshot the stop logic uses (see note at calculate_proposed_sl).
+            current_price=current_price_for_sl,
             sl=pos.sl,
             initial_sl=pos.sl, # Fallback, ideally we store initial_sl in PositionState
             direction=pos.direction,
@@ -225,7 +228,12 @@ class PositionManager:
         proposed_sl = calculate_proposed_sl(
             direction=pos.direction,
             price_open=pos.price_open,
-            price_current=pos.price_current,
+            # Use the SAME price snapshot that the validation below will check
+            # against. These previously came from different sources (the tick
+            # vs pos.price_current), so a stop could be proposed against one
+            # price and judged against another — which is how a stop above the
+            # market can pass a "never loosen" test.
+            price_current=current_price_for_sl,
             current_sl=pos.sl,
             config=config,
             atr_value=atr_val

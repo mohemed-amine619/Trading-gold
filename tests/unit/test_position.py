@@ -51,30 +51,43 @@ def test_position_trailing_stop(manager, mock_adapter):
     signal = Signal(direction=0, score=0.0, reason="", invalidation="")
     
     pos = mock_adapter._positions[0]
+    original_sl = pos.sl
     
-    # Setup profit to hit trailing stop (1R profit)
-    # Entry: 2000, SL: 1990 (Risk = 10)
-    # Price = 2010 (Profit = 10 -> 1R)
-    # Trail distance = 0.5R = 5
-    # New SL = 2010 - 5 = 2005
-    pos.price_current = 2010.0
+    # Entry: 2000, SL: 1990 => 1R risk = 10.
+    # Pin the MARKET price to reach +1R, which activates trailing. A real
+    # terminal reports one price in both get_tick() and position price_current;
+    # the trailing logic validates the proposed stop against the live tick, so
+    # the tick is what must move. 2012 puts BID at ~2011.9, comfortably past
+    # the 10-point activation, without relying on an exact fill price.
+    mock_adapter.set_price("XAUUSDm", 2012.0)
     
     manager.manage_positions(signal, pd.DataFrame())
     
-    # In mock, modify_position just updates the position in the list
-    assert mock_adapter._positions[0].sl == pytest.approx(2005.0)
+    # Trailing distance is 0.5R = 5, measured from the live bid.
+    bid = mock_adapter.get_tick("XAUUSDm").bid
+    expected = bid - (abs(pos.price_open - original_sl) * manager.trail_distance_rr)
+    assert mock_adapter._positions[0].sl == pytest.approx(expected)
+    # The invariant that actually matters: the stop moved up and is never
+    # wider than it was.
+    assert mock_adapter._positions[0].sl > original_sl
+    assert mock_adapter._positions[0].sl < bid
+
 
 def test_position_breakeven(manager, mock_adapter):
     signal = Signal(direction=0, score=0.0, reason="", invalidation="")
     pos = mock_adapter._positions[0]
+    original_sl = pos.sl
     
-    # Entry: 2000, SL: 1990 (Risk = 10)
-    # Breakeven activates at 0.5R = 5 profit
-    pos.price_current = 2005.0
+    # Entry: 2000, SL: 1990 => 1R risk = 10, breakeven fires at 0.5R = +5.
+    # 2007 puts BID at ~2006.9, i.e. +6.9 — past the trigger with margin for
+    # the half-spread between the pinned mid and the bid.
+    mock_adapter.set_price("XAUUSDm", 2007.0)
     
     manager.manage_positions(signal, pd.DataFrame())
     
-    # New SL should be entry price + breakeven offset.
-    # The offset is 2 ticks; gold's tick size is 0.01, so offset = 0.02.
-    # (Previously the mock reported tick_size=0.00001, giving 2000.00002.)
-    assert mock_adapter._positions[0].sl == pytest.approx(2000.02)
+    # Breakeven moves the stop to entry + 2 ticks (tick_size 0.01 for gold),
+    # which is a small buffer above entry to cover spread/commission.
+    expected = pos.price_open + 2 * 0.01
+    assert mock_adapter._positions[0].sl == pytest.approx(expected)
+    # Breakeven must never be worse than the original stop.
+    assert mock_adapter._positions[0].sl > original_sl

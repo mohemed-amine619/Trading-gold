@@ -342,11 +342,21 @@ def infer_asset_class(canon: str) -> tuple[AssetClass, InstrumentType]:
 # Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
-@dataclass(frozen=True)
 class ResolutionError(Exception):
-    """Raised when an instrument cannot be safely resolved for trading."""
+    """Raised when an instrument cannot be safely resolved for trading.
 
-    message: str
+    A plain Exception subclass, deliberately NOT a frozen dataclass. The
+    dataclass version broke two things: `e.args` was empty (so anything
+    logging `exc.args` saw nothing), and `frozen=True` made the instance
+    reject `__traceback__` assignment, so Python's own machinery raised
+    `FrozenInstanceError` while propagating the error. That turned a
+    clear "cannot resolve XAUUSDm: missing tick_value" into an unrelated
+    crash in contextlib/pytest.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.message

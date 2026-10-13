@@ -166,3 +166,76 @@ def test_progressive_breakeven_ratchet_math_short():
     # 4. Price retraces upwards to 1993.0 -> SL must NEVER loosen, remains 1995.5
     current_sl = compute_sl(1993.0, current_sl)
     assert current_sl == 1995.5
+
+
+def test_trading_profile_money_printer(tmp_path, monkeypatch):
+    """Verify that TRADING_PROFILE=money_printer applies aggressive compounding defaults."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TRADING_PROFILE", "money_printer")
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+
+    cfg = mod.CONFIG
+    assert cfg["min_signal_score"] == 45.0
+    assert cfg["adx_min"] == 15.0
+    assert cfg["adx_strong"] == 25.0
+    assert cfg["risk_per_trade"] == 0.015
+    assert cfg["sl_atr_mult"] == 1.8
+    assert cfg["tp_rr_ratio"] == 2.0
+    assert cfg["breakeven_trigger_atr"] == 0.3
+    assert cfg["profit_lock_ratio"] == 0.55
+    assert cfg["partial_close_trigger_atr"] == 0.9
+    assert cfg["max_open_pos"] == 5
+    assert cfg["max_daily_dd"] == 0.05
+    sys.modules.pop("run", None)
+
+
+def test_ai_confidence_lot_sizing(run_module):
+    """Verify that _size_lot scales size up with high AI confidence and down with low."""
+    cfg = run_module.CONFIG.copy()
+    cfg["risk_per_trade"] = 0.01
+    cfg["dynamic_risk"] = False
+
+    base = run_module._size_lot(
+        account_equity=10_000.0,
+        sl_dist_price=10.0,
+        tick_size=0.01,
+        tick_value=1.0,
+        vol_min=0.01,
+        vol_max=100.0,
+        vol_step=0.01,
+        cfg=cfg,
+        ai_conf=0.65,
+    )
+
+    high_conf = run_module._size_lot(
+        account_equity=10_000.0,
+        sl_dist_price=10.0,
+        tick_size=0.01,
+        tick_value=1.0,
+        vol_min=0.01,
+        vol_max=100.0,
+        vol_step=0.01,
+        cfg=cfg,
+        ai_conf=0.90,
+    )
+
+    low_conf = run_module._size_lot(
+        account_equity=10_000.0,
+        sl_dist_price=10.0,
+        tick_size=0.01,
+        tick_value=1.0,
+        vol_min=0.01,
+        vol_max=100.0,
+        vol_step=0.01,
+        cfg=cfg,
+        ai_conf=0.55,
+    )
+
+    assert high_conf > base
+    assert low_conf < base
+    assert high_conf == pytest.approx(base * 1.5, rel=0.05)
+    assert low_conf == pytest.approx(base * 0.5, rel=0.05)
+

@@ -1,4 +1,5 @@
 import math
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 from dataclasses import dataclass
 
@@ -15,9 +16,19 @@ class TrailingConfig:
     profit_locking_ratio: float = 0.0  # e.g., 0.5 to lock 50% of profit
 
 def normalize_price(price: float, tick_size: float) -> float:
+    """Snap a price onto the broker's tick grid.
+
+    Python's ``round()`` uses banker's rounding (0.5 -> 0, 1.5 -> 2,
+    2.5 -> 2), so it disagrees with MetaTrader 5, which rounds half away
+    from zero. On a protective stop that difference can land the normalised
+    price one tick on the *less* protective side of the intended level.
+    """
     if tick_size <= 0:
         return price
-    return round(price / tick_size) * tick_size
+    d_price = Decimal(str(price))
+    d_tick = Decimal(str(tick_size))
+    d_ticks = (d_price / d_tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return float(d_ticks * d_tick)
 
 def calculate_proposed_sl(
     direction: int,
@@ -72,12 +83,17 @@ def validate_sl_modification(
     current_price_for_sl: float,
     tick_size: float,
     point: float,
-    stops_level: int,
-    freeze_level: int
+    stops_level: Optional[int] = None,
+    freeze_level: Optional[int] = None
 ) -> Optional[float]:
     """
     Validates and normalizes the proposed SL against MT5 constraints.
     Returns the normalized valid SL, or None if the modification is invalid/rejected.
+
+    ``stops_level`` and ``freeze_level`` are Optional: brokers legitimately
+    omit them and ``SymbolInfo`` models absence as None. Comparing None
+    values raised TypeError and killed the position-management loop, so a
+    missing level is now treated as "no broker-imposed minimum" (0).
     """
     # 1. Normalize
     norm_sl = normalize_price(proposed_sl, tick_size)
@@ -90,9 +106,17 @@ def validate_sl_modification(
     if not _is_better_sl(direction, norm_sl, current_sl):
         return None
 
-    # 3. Stops level & Freeze level check
+    # 3. Side of price: a stop must sit on the protective side of the market.
+    # MT5 rejects any other placement with INVALID_STOPS (10022), and passing
+    # one through wastes a modification round-trip on every trailing tick.
+    if direction == 1 and norm_sl >= current_price_for_sl:
+        return None
+    if direction == -1 and norm_sl <= current_price_for_sl:
+        return None
+
+    # 4. Stops level & Freeze level check
     # SL distance must be >= max(stops_level, freeze_level) * point
-    min_dist = max(stops_level, freeze_level) * point
+    min_dist = max(stops_level or 0, freeze_level or 0) * point
     actual_dist = abs(current_price_for_sl - norm_sl)
     
     # Strict MT5 rule: distance from execution price to stop must be >= min_dist

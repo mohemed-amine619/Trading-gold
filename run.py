@@ -120,6 +120,54 @@ if _TRADING_MODE == "live":
     print("=" * 70)
 
 # ---------------------------------------------------------------------------
+# Trading Profile resolution (balanced vs high-performance money_printer)
+# ---------------------------------------------------------------------------
+_PROFILE = os.getenv("TRADING_PROFILE", "balanced").strip().lower()
+_IS_AGGRESSIVE = (
+    _PROFILE in ("money_printer", "aggressive", "high_performance", "scalper")
+    or os.getenv("AGGRESSIVE_MODE", "false").strip().lower() in ("true", "1", "yes")
+)
+
+if _IS_AGGRESSIVE:
+    print("=" * 70)
+    print("  TRADING_PROFILE=money_printer (High-Performance Scalper / Compounding)")
+    print("  - Multi-Symbol scanning active (Gold + Major FX pairs)")
+    print("  - High-frequency responsive entries (Confluence threshold: 45)")
+    print("  - Compound R:R risk structure: 1.8 ATR SL / 2.0 RR TP")
+    print("  - Early partial TP @ 0.9 ATR + Progressive Breakeven ratchet @ 55%")
+    print("  - Dynamic AI lot scaling: +50% on high confidence setups")
+    print("=" * 70)
+
+def _profile_cfg(env_var: str, balanced_val, aggressive_val, val_type=float):
+    raw = os.getenv(env_var)
+    if raw is None or raw == "":
+        return val_type(aggressive_val if _IS_AGGRESSIVE else balanced_val)
+    if _IS_AGGRESSIVE:
+        try:
+            if val_type(raw) == val_type(balanced_val):
+                return val_type(aggressive_val)
+        except (ValueError, TypeError):
+            pass
+    return val_type(raw)
+
+
+def _env_login() -> int | None:
+    """Read MT5_LOGIN from the environment. Returns None when unset/invalid.
+
+    Returns None rather than 0 so that a misconfigured login is detectable:
+    0 is not a valid MT5 account number.
+    """
+    raw = (os.getenv("MT5_LOGIN") or "").strip()
+    if not raw or raw == "0":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"WARNING: MT5_LOGIN={raw!r} is not an integer; ignoring.")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Per-account configuration (override anything from config.py here)
 # NOTE: the original keys here are left 100% identical to the original —
 # nothing was changed, removed, or reordered. New keys for the power-up
@@ -127,9 +175,13 @@ if _TRADING_MODE == "live":
 # ---------------------------------------------------------------------------
 CONFIG = {
     # --- connection ---
-    "account":  int(os.getenv("MT5_LOGIN").strip()) if os.getenv("MT5_LOGIN") and os.getenv("MT5_LOGIN").strip() not in ("0", "") else 261009880,
-    "password": os.getenv("MT5_PASSWORD") or "Amine2002@",
-    "server":   os.getenv("MT5_SERVER") or "Exness-MT5Trail16",
+    # Credentials come from the environment ONLY. There are deliberately no
+    # fallback literals here: a default of `None` fails loudly at connect
+    # time instead of silently logging into whatever account was once pasted
+    # into this file. See docs/SECURITY.md for credential rotation.
+    "account":  _env_login(),
+    "password": os.getenv("MT5_PASSWORD") or None,
+    "server":   os.getenv("MT5_SERVER") or None,
     "mt5_path": os.getenv("MT5_PATH") or "",
     
     # --- instrument ---
@@ -140,14 +192,14 @@ CONFIG = {
     "n_candles": int(os.getenv("HISTORY_CANDLES", 600)),
     
     # --- AI Settings ---
-    "ai_confidence_threshold": float(os.getenv("AI_CONFIDENCE_THRESHOLD", "0.55")),
+    "ai_confidence_threshold": _profile_cfg("AI_CONFIDENCE_THRESHOLD", 0.55, 0.50),
     "ai_train_bars":  int(os.getenv("AI_TRAIN_BARS", "800")),
     "ai_retrain_bars": int(os.getenv("AI_RETRAIN_BARS", "50")),
     
     # --- strategy scoring ---
-    "min_signal_score": float(os.getenv("MIN_SIGNAL_SCORE", "50")),
-    "adx_min": float(os.getenv("ADX_MIN", "18")),
-    "adx_strong": float(os.getenv("ADX_STRONG", "30")),
+    "min_signal_score": _profile_cfg("MIN_SIGNAL_SCORE", 50.0, 45.0),
+    "adx_min": _profile_cfg("ADX_MIN", 18.0, 15.0),
+    "adx_strong": _profile_cfg("ADX_STRONG", 30.0, 25.0),
     "use_session_filter": os.getenv("USE_SESSION_FILTER", "false").lower() in ("true", "1", "yes") if os.getenv("USE_SESSION_FILTER") is not None else False,
     
     # trade window (UTC)
@@ -155,33 +207,33 @@ CONFIG = {
     "ny_start_utc":     12, "ny_end_utc":     21,
     
     # --- risk & money management ---
-    "risk_per_trade":   0.01,
-    "sl_atr_mult":      2.5,
-    "tp_rr_ratio":      2.5,
+    "risk_per_trade":   _profile_cfg("RISK_PER_TRADE", 0.01, 0.015),
+    "sl_atr_mult":      _profile_cfg("SL_ATR_MULT", 2.5, 1.8),
+    "tp_rr_ratio":      _profile_cfg("TP_RR_RATIO", 2.5, 2.0),
     
     # --- dynamic trade management ("never lose" once in profit) ---
-    "trail_atr_mult":          1.5,    # Trailing distance in ATR (tighter to protect gains)
-    "trail_activate_atr":      1.0,    # Activate trailing stop when profit >= 1.0x ATR
-    "trail_tighten1_atr":      2.0,    # Tighter trail at 2.0x ATR profit
-    "trail_tighten1_mult":     1.0,
-    "trail_tighten2_atr":      3.0,    # Ultra-tight trail at 3.0x ATR profit
-    "trail_tighten2_mult":     0.6,
+    "trail_atr_mult":          _profile_cfg("TRAIL_ATR_MULT", 1.5, 1.2),
+    "trail_activate_atr":      _profile_cfg("TRAIL_ACTIVATE_ATR", 1.0, 0.8),
+    "trail_tighten1_atr":      _profile_cfg("TRAIL_TIGHTEN1_ATR", 2.0, 1.5),
+    "trail_tighten1_mult":     _profile_cfg("TRAIL_TIGHTEN1_MULT", 1.0, 0.8),
+    "trail_tighten2_atr":      _profile_cfg("TRAIL_TIGHTEN2_ATR", 3.0, 2.2),
+    "trail_tighten2_mult":     _profile_cfg("TRAIL_TIGHTEN2_MULT", 0.6, 0.5),
     "dynamic_risk":            True,
     "min_risk_scale":          0.5,
-    "max_risk_scale":          1.2,
-    "max_margin_usage":        0.30,
-    "max_open_pos":            3,
-    "max_daily_dd":            0.03,
+    "max_risk_scale":          _profile_cfg("MAX_RISK_SCALE", 1.2, 1.5),
+    "max_margin_usage":        _profile_cfg("MAX_MARGIN_USAGE", 0.30, 0.45),
+    "max_open_pos":            _profile_cfg("MAX_OPEN_POS", 3, 5, val_type=int),
+    "max_daily_dd":            _profile_cfg("MAX_DAILY_DD", 0.03, 0.05),
     
     # --- breakeven / progressive profit lock ---
     "enable_breakeven":        True,
-    "breakeven_trigger_atr":   float(os.getenv("BREAKEVEN_TRIGGER_ATR", "0.4")),    # Move to breakeven early at +0.4x ATR profit (was 0.8)
-    "breakeven_buffer_atr":    float(os.getenv("BREAKEVEN_BUFFER_ATR", "0.15")),   # +0.15x ATR profit buffer beyond entry (covers spread, commission & swap)
-    "profit_lock_ratio":       float(os.getenv("PROFIT_LOCK_RATIO", "0.50")),      # Continuously lock 50% of further profit into SL
+    "breakeven_trigger_atr":   _profile_cfg("BREAKEVEN_TRIGGER_ATR", 0.4, 0.3),
+    "breakeven_buffer_atr":    float(os.getenv("BREAKEVEN_BUFFER_ATR", "0.15")),
+    "profit_lock_ratio":       _profile_cfg("PROFIT_LOCK_RATIO", 0.50, 0.55),
     "enable_partial_close":    True,
-    "partial_close_trigger_atr": float(os.getenv("PARTIAL_CLOSE_TRIGGER_ATR", "1.2")),  # Lock in 50% partial profit early at +1.2x ATR
-    "profit_lock_activate_atr": float(os.getenv("PROFIT_LOCK_ACTIVATE_ATR", "1.0")),   # Activate giveback protect at +1.0x ATR
-    "profit_giveback_pct":     float(os.getenv("PROFIT_GIVEBACK_PCT", "0.30")),   # If peak profit gives back 30%, close immediately to secure 70%
+    "partial_close_trigger_atr": _profile_cfg("PARTIAL_CLOSE_TRIGGER_ATR", 1.2, 0.9),
+    "profit_lock_activate_atr": _profile_cfg("PROFIT_LOCK_ACTIVATE_ATR", 1.0, 0.8),
+    "profit_giveback_pct":     _profile_cfg("PROFIT_GIVEBACK_PCT", 0.30, 0.25),
     
     # --- system ---
     "sleep_interval":   1.0,
@@ -830,9 +882,10 @@ def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
               vol_min, vol_max, vol_step, cfg, adx=0.0, ai_conf=0.0):
     scale    = _risk_scale(adx, cfg) if cfg.get("dynamic_risk") else 1.0
     # --- FEATURE 1: AI CONFIDENCE SIZING ---
-    if ai_conf >= 0.85:
+    high_threshold = 0.70 if _IS_AGGRESSIVE else 0.85
+    if ai_conf >= high_threshold:
         scale *= 1.5
-    elif ai_conf > 0 and ai_conf <= 0.65:
+    elif ai_conf > 0 and ai_conf <= 0.60:
         scale *= 0.5
     risk_amt = account_equity * cfg["risk_per_trade"] * scale
     sl_ticks = sl_dist_price / (tick_size + 1e-10)
@@ -950,7 +1003,8 @@ class StandaloneAIBot:
             return False
             
         acc = mt5.account_info()
-        target_account = self.cfg.get("account", 0)
+        # _env_login() returns None (not 0) when unset, so normalise to 0 here.
+        target_account = self.cfg.get("account") or 0
         
         if acc is not None and (target_account <= 0 or acc.login == target_account):
             logger.info("Already logged in to terminal account %s. Bypassing login step.", acc.login)
@@ -960,6 +1014,15 @@ class StandaloneAIBot:
             logger.error(
                 "MT5 login failed: no MT5_LOGIN configured and terminal is not logged into an active account. "
                 "Please configure MT5_LOGIN/MT5_PASSWORD/MT5_SERVER in .env or log into MetaTrader 5 manually."
+            )
+            ok = False
+        elif not self.cfg.get("password") or not self.cfg.get("server"):
+            # Never call mt5.login() with a None credential: it produces a
+            # confusing retcode instead of a clear configuration error.
+            logger.error(
+                "MT5 login failed: MT5_LOGIN is set (%s) but MT5_PASSWORD/MT5_SERVER are not. "
+                "Refusing to attempt login with incomplete credentials.",
+                target_account,
             )
             ok = False
         else:
@@ -1181,7 +1244,7 @@ class StandaloneAIBot:
             equity, abs(price - sl),
             info.trade_tick_size, info.trade_tick_value,
             info.volume_min, info.volume_max, info.volume_step,
-            self.cfg, adx=adx,
+            self.cfg, adx=adx, ai_conf=ai_conf,
         )
 
         if not self._margin_ok(price, volume, equity):
@@ -1694,7 +1757,8 @@ import uvicorn
 from fastapi import FastAPI, Response, Request
 
 if __name__ == "__main__":
-    symbols_str = os.getenv("TRADE_SYMBOLS", CONFIG.get("symbol", "XAUUSDm"))
+    default_symbols = "XAUUSDm,EURUSDm,GBPUSDm" if _IS_AGGRESSIVE else CONFIG.get("symbol", "XAUUSDm")
+    symbols_str = os.getenv("TRADE_SYMBOLS", default_symbols)
     symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
     if not symbols:
         symbols = ["XAUUSDm"]

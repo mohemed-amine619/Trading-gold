@@ -77,11 +77,39 @@ class TradeProposal:
     account_info: Optional[AccountInfo] = None
     symbol_info: Optional[SymbolInfo] = None
     tick: Optional[Tick] = None
+    # Margin this order will require, in account currency. Callers that can
+    # compute it (via MT5Adapter.calc_margin) should; 0.0 is treated as
+    # "unknown" by the margin check, which then relies on committed margin
+    # alone rather than assuming a free margin allowance.
+    margin_estimate: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Risk Engine
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Parameters that may be changed at runtime, with their permitted ranges.
+# Anything not listed here is internal state and must not be writable from an
+# API request — see RiskEngine.update_config.
+_CONFIGURABLE: dict[str, tuple[float, float]] = {
+    "risk_per_trade": (0.001, 0.05),
+    "max_daily_loss_pct": (0.005, 0.20),
+    "max_weekly_loss_pct": (0.005, 0.30),
+    "max_drawdown_pct": (0.01, 0.50),
+    "max_open_positions": (1, 50),
+    "min_rr_ratio": (0.5, 10.0),
+    "max_margin_usage": (0.10, 0.90),
+    "max_spread_points": (0.0, 10_000.0),
+    "max_consecutive_losses": (1, 100),
+    "loss_streak_cooldown_minutes": (0, 1440),
+    "max_trades_per_day": (1, 500),
+    "dynamic_risk": (0, 1),  # handled as bool below
+    "min_risk_scale": (0.0, 1.0),
+    "max_risk_scale": (0.0, 3.0),
+    "adx_trending_min": (0.0, 100.0),
+    "adx_strong_trend": (0.0, 100.0),
+}
+
 
 class RiskEngine:
     """
@@ -157,11 +185,34 @@ class RiskEngine:
     # ── Configuration reload ─────────────────────────────────────────────────
 
     def update_config(self, **kwargs) -> None:
-        """Runtime reconfiguration from dashboard settings."""
+        """Runtime reconfiguration from dashboard/API settings.
+
+        Only the keys in ``_CONFIGURABLE`` may be written, and each value must
+        validate against its own bound. This method previously used
+        ``setattr(self, k, v) for any k that happens to exist``, which meant an
+        unauthenticated caller could overwrite ``_emergency_stop`` (disarming
+        the kill switch) or ``_daily_start_equity`` (zeroing the daily loss
+        limit) through the config endpoint.
+
+        Raises ValueError on an unknown key or an out-of-range value; the
+        config is left untouched.
+        """
         with self._lock:
             for k, v in kwargs.items():
-                if hasattr(self, k):
-                    setattr(self, k, v)
+                if k not in _CONFIGURABLE:
+                    raise ValueError(
+                        f"{k!r} is not a configurable risk parameter. "
+                        f"Configurable keys: {sorted(_CONFIGURABLE)}"
+                    )
+                bounds = _CONFIGURABLE[k]
+                if not isinstance(v, (int, float)) or isinstance(v, bool):
+                    raise ValueError(f"{k} must be a number, got {type(v).__name__}")
+                lo, hi = bounds
+                if not (lo <= v <= hi):
+                    raise ValueError(f"{k}={v} outside permitted range [{lo}, {hi}]")
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+        logger.info("Risk config updated: %s", {k: kwargs[k] for k in sorted(kwargs)})
 
     # ── State updates (called by position monitor) ───────────────────────────
 
@@ -363,26 +414,38 @@ class RiskEngine:
             passed.append(f"spread_ok ({spread_pts:.1f} pts)")
 
         # ── 12. Calculate position size ───────────────────────────────────
-        lot_size = 0.0
-        if proposal.symbol_info and equity > 0:
-            lot_size = self.calculate_lot_size(
-                equity=equity,
-                sl_distance=sl_dist,
-                symbol_info=proposal.symbol_info,
-                adx=adx,
-            )
-            if lot_size <= 0:
-                return reject("position_size: calculated lot size is zero or negative")
-            passed.append(f"lot_size_ok ({lot_size:.2f})")
+        # Sizing must never be optional. Previously the whole block was gated on
+        # `if proposal.symbol_info and equity > 0:`, so a proposal carrying no
+        # broker metadata skipped the block, left lot_size at 0.0 and still
+        # returned APPROVED — a fail-open on the most safety-critical value.
+        if proposal.symbol_info is None:
+            return reject("position_size: missing broker symbol metadata (cannot size)")
+        if equity <= 0:
+            return reject(f"position_size: unusable equity ({equity:.2f})")
+
+        lot_size = self.calculate_lot_size(
+            equity=equity,
+            sl_distance=sl_dist,
+            symbol_info=proposal.symbol_info,
+            adx=adx,
+        )
+        if lot_size <= 0:
+            return reject("position_size: calculated lot size is zero or negative")
+        passed.append(f"lot_size_ok ({lot_size:.2f})")
 
         # ── 13. Margin check ──────────────────────────────────────────────
         if proposal.account_info and equity > 0:
             margin_limit = equity * self.max_margin_usage
-            if used_margin >= margin_limit:
+            # Count the margin the NEW order will consume, not just what is
+            # already committed. Comparing committed-only let the last few
+            # orders of a session each pass individually while collectively
+            # breaching the cap.
+            projected = used_margin + proposal.margin_estimate
+            if projected >= margin_limit:
                 return reject(
-                    f"margin_limit: used {used_margin:.2f} >= limit {margin_limit:.2f}"
+                    f"margin_limit: projected {projected:.2f} >= limit {margin_limit:.2f}"
                 )
-            passed.append(f"margin_ok (used={used_margin:.2f})")
+            passed.append(f"margin_ok (projected={projected:.2f})")
 
         # ── All checks passed ─────────────────────────────────────────────
         result = RiskDecisionResult(
@@ -417,28 +480,71 @@ class RiskEngine:
             lots = (equity × risk% × risk_scale) / (sl_ticks × tick_value)
 
         Clamped to broker [volume_min, volume_max] with step rounding.
+
+        Returns 0.0 when the trade genuinely cannot be sized. Callers MUST
+        reject a 0.0 result — it means "refuse", never "trade the minimum".
+
+        This method refuses rather than substitutes a plausible constant when
+        broker metadata is missing. It previously did the opposite
+        (``trade_tick_value or 1.0``), which silently invented a tick value
+        for instruments the broker never described and produced a confident,
+        wrong lot size.
         """
-        if sl_distance <= 0 or equity <= 0:
-            return symbol_info.volume_min
+        # Refuse rather than default. Missing broker metadata is not a licence
+        # to guess — see core/instruments/model.py CRITICAL_FIELDS.
+        if (
+            sl_distance <= 0
+            or equity <= 0
+            or not symbol_info.trade_tick_size
+            or not symbol_info.trade_tick_value
+            or not symbol_info.volume_step
+            or symbol_info.volume_min is None
+        ):
+            logger.error(
+                "Refusing to size %s: incomplete broker metadata "
+                "(sl_distance=%.6f equity=%.2f tick_size=%r tick_value=%r "
+                "step=%r vol_min=%r)",
+                symbol_info.name,
+                sl_distance,
+                equity,
+                symbol_info.trade_tick_size,
+                symbol_info.trade_tick_value,
+                symbol_info.volume_step,
+                symbol_info.volume_min,
+            )
+            return 0.0
 
         scale = self._risk_scale(adx) if self.dynamic_risk else 1.0
         risk_amount = equity * self.risk_per_trade * scale
 
-        tick_size  = symbol_info.trade_tick_size or 1e-5
-        tick_value = symbol_info.trade_tick_value or 1.0
+        tick_size  = symbol_info.trade_tick_size
+        tick_value = symbol_info.trade_tick_value
         sl_ticks   = sl_distance / tick_size
         risk_per_lot = sl_ticks * tick_value
 
         if risk_per_lot <= 0:
-            return symbol_info.volume_min
+            return 0.0
 
         raw_lots  = risk_amount / risk_per_lot
-        step      = symbol_info.volume_step or 0.01
-        vol_min   = symbol_info.volume_min or 0.01
-        vol_max   = symbol_info.volume_max or 100.0
+        step      = symbol_info.volume_step
+        vol_min   = symbol_info.volume_min
+        vol_max   = symbol_info.volume_max
 
         lots = math.floor(raw_lots / step) * step
-        return max(vol_min, min(lots, vol_max))
+
+        # Never round UP to the broker minimum just to produce a tradeable
+        # size — that silently risks more than the configured budget. Refuse.
+        if lots < vol_min:
+            logger.warning(
+                "Refusing to size %s: risk budget supports %.4f lots but broker "
+                "minimum is %s. Taking the minimum would exceed the risk budget.",
+                symbol_info.name, lots, vol_min,
+            )
+            return 0.0
+
+        if vol_max is not None:
+            lots = min(lots, vol_max)
+        return lots
 
     def _risk_scale(self, adx: float) -> float:
         """Scale risk between min and max based on ADX strength."""
@@ -487,11 +593,46 @@ class RiskEngine:
 _risk_engine_instance: Optional[RiskEngine] = None
 
 
+def risk_engine_from_settings(settings=None) -> RiskEngine:
+    """Build a RiskEngine from validated Settings.
+
+    This is the only sanctioned way to construct a production RiskEngine.
+    ``get_risk_engine()`` used to call ``RiskEngine()`` with nothing but
+    hardcoded defaults, so every risk value in ``.env`` (risk_per_trade,
+    max_daily_loss_pct, max_open_positions, min_rr_ratio, max_margin_usage,
+    max_spread_points, ...) was silently ignored in production.
+    """
+    if settings is None:
+        from core.settings import get_settings
+        settings = get_settings()
+
+    return RiskEngine(
+        risk_per_trade=settings.risk_per_trade,
+        max_daily_loss_pct=settings.max_daily_loss_pct,
+        max_weekly_loss_pct=settings.max_weekly_loss_pct,
+        max_drawdown_pct=settings.max_drawdown_pct,
+        max_open_positions=settings.max_open_positions,
+        min_rr_ratio=settings.min_rr_ratio,
+        max_margin_usage=settings.max_margin_usage,
+        max_spread_points=settings.max_spread_points,
+        max_consecutive_losses=settings.max_consecutive_losses,
+        loss_streak_cooldown_minutes=settings.loss_streak_cooldown_minutes,
+        max_trades_per_day=settings.max_trades_per_day,
+        sl_atr_mult=settings.sl_atr_mult,
+        tp_rr_ratio=settings.tp_rr_ratio,
+        dynamic_risk=settings.dynamic_risk,
+        min_risk_scale=settings.min_risk_scale,
+        max_risk_scale=settings.max_risk_scale,
+        adx_trending_min=settings.adx_trending_min,
+        adx_strong_trend=settings.adx_strong_trend,
+    )
+
+
 def get_risk_engine() -> RiskEngine:
     """Return the global RiskEngine instance, creating one if not yet initialized."""
     global _risk_engine_instance
     if _risk_engine_instance is None:
-        _risk_engine_instance = RiskEngine()
+        _risk_engine_instance = risk_engine_from_settings()
     return _risk_engine_instance
 
 
