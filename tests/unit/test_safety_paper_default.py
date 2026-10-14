@@ -37,8 +37,15 @@ RUN_PY = REPO_ROOT / "run.py"
 def _install_mt5_stub() -> None:
     """Register a minimal MetaTrader5 stub so run.py imports on Linux."""
     if "MetaTrader5" in sys.modules:
+        stub = sys.modules["MetaTrader5"]
+        if not hasattr(stub, "TIMEFRAME_M1"):
+            stub.TIMEFRAME_M1 = 1
+        if not hasattr(stub, "TIMEFRAME_M5"):
+            stub.TIMEFRAME_M5 = 5
         return
     stub = types.ModuleType("MetaTrader5")
+    stub.TIMEFRAME_M1 = 1
+    stub.TIMEFRAME_M5 = 5
     stub.TIMEFRAME_M15 = 15
     stub.TIMEFRAME_H1 = 16385
     stub.TIMEFRAME_H4 = 16388

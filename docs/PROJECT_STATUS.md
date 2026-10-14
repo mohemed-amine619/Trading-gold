@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**293 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**297 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -15,7 +15,7 @@
 | Bridge contract and auth | 31 | Implemented, tested against a mock |
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 22 | Implemented and tested |
-| Risk, position, strategy, market, backtest, API | 74 | Implemented and tested |
+| Risk, position, strategy, scalping & market | 78 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter`.

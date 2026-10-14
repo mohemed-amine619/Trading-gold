@@ -173,6 +173,62 @@ def _env_login() -> int | None:
 # nothing was changed, removed, or reordered. New keys for the power-up
 # features are appended at the end of the dict, clearly marked.
 # ---------------------------------------------------------------------------
+
+def _parse_timeframe(tf_str: Optional[str], default_val: int) -> int:
+    if not tf_str:
+        return default_val
+    s = str(tf_str).strip().upper()
+    mapping = {
+        "M1": getattr(mt5, "TIMEFRAME_M1", 1),
+        "M2": getattr(mt5, "TIMEFRAME_M2", 2),
+        "M3": getattr(mt5, "TIMEFRAME_M3", 3),
+        "M4": getattr(mt5, "TIMEFRAME_M4", 4),
+        "M5": getattr(mt5, "TIMEFRAME_M5", 5),
+        "M6": getattr(mt5, "TIMEFRAME_M6", 6),
+        "M10": getattr(mt5, "TIMEFRAME_M10", 10),
+        "M12": getattr(mt5, "TIMEFRAME_M12", 12),
+        "M15": getattr(mt5, "TIMEFRAME_M15", 15),
+        "M20": getattr(mt5, "TIMEFRAME_M20", 20),
+        "M30": getattr(mt5, "TIMEFRAME_M30", 30),
+        "H1": getattr(mt5, "TIMEFRAME_H1", 16385),
+        "H2": getattr(mt5, "TIMEFRAME_H2", 16386),
+        "H3": getattr(mt5, "TIMEFRAME_H3", 16387),
+        "H4": getattr(mt5, "TIMEFRAME_H4", 16388),
+        "H6": getattr(mt5, "TIMEFRAME_H6", 16390),
+        "H8": getattr(mt5, "TIMEFRAME_H8", 16392),
+        "H12": getattr(mt5, "TIMEFRAME_H12", 16396),
+        "D1": getattr(mt5, "TIMEFRAME_D1", 16408),
+        "W1": getattr(mt5, "TIMEFRAME_W1", 32769),
+        "MN1": getattr(mt5, "TIMEFRAME_MN1", 49153),
+    }
+    return mapping.get(s, default_val)
+
+
+def _default_trend_tfs(primary_tf: int) -> tuple[int, int]:
+    """Derive appropriate intermediate and macro trend timeframes from primary execution timeframe."""
+    m1 = getattr(mt5, "TIMEFRAME_M1", 1)
+    m5 = getattr(mt5, "TIMEFRAME_M5", 5)
+    m15 = getattr(mt5, "TIMEFRAME_M15", 15)
+    h1 = getattr(mt5, "TIMEFRAME_H1", 16385)
+    h4 = getattr(mt5, "TIMEFRAME_H4", 16388)
+
+    if primary_tf == m1:
+        return m5, m15
+    elif primary_tf == m5:
+        return m15, h1
+    elif primary_tf == m15:
+        return h1, h4
+    elif primary_tf == getattr(mt5, "TIMEFRAME_M30", 30):
+        return h1, h4
+    return h1, h4
+
+
+_primary_tf_str = _profile_cfg("TIMEFRAME", "M15", "M1", val_type=str)
+_primary_tf = _parse_timeframe(_primary_tf_str, getattr(mt5, "TIMEFRAME_M15", 15))
+_def_h1_tf, _def_h4_tf = _default_trend_tfs(_primary_tf)
+_h1_tf = _parse_timeframe(os.getenv("TREND_TF"), _def_h1_tf)
+_h4_tf = _parse_timeframe(os.getenv("MACRO_TREND_TF"), _def_h4_tf)
+
 CONFIG = {
     # --- connection ---
     # Credentials come from the environment ONLY. There are deliberately no
@@ -186,9 +242,9 @@ CONFIG = {
     
     # --- instrument ---
     "symbol":    os.getenv("TRADE_SYMBOL", "XAUUSDm"),
-    "timeframe": mt5.TIMEFRAME_M15,
-    "h1_tf":     mt5.TIMEFRAME_H1,
-    "h4_tf":     mt5.TIMEFRAME_H4,
+    "timeframe": _primary_tf,
+    "h1_tf":     _h1_tf,
+    "h4_tf":     _h4_tf,
     "n_candles": int(os.getenv("HISTORY_CANDLES", 600)),
     
     # --- AI Settings ---
@@ -237,6 +293,7 @@ CONFIG = {
     
     # --- system ---
     "sleep_interval":   1.0,
+    "max_trades_per_day": _profile_cfg("MAX_TRADES_PER_DAY", 15, 60, val_type=int),
     "magic_number":     int(os.getenv("MAGIC_NUMBER", 888999)),
     "deviation":        20,
 
@@ -800,11 +857,13 @@ def _momentum_score(last: pd.Series, direction: int) -> float:
     if direction == 1:
         score += min(1.0, max(0.0, (rsi - 45.0) / 25.0)) * 0.35
         score += (1.0 if mh > 0 and mh > mhp else 0.5 if mh > 0 else 0.0) * 0.35
-        score += (1.0 if sk > sd and 50 < sk < 80 else 0.5 if sk > sd else 0.0) * 0.30
+        # Reward both oversold bounce and upward momentum continuation
+        score += (1.0 if sk > sd and (sk < 35 or 50 < sk < 80) else 0.5 if sk > sd else 0.0) * 0.30
     else:
         score += min(1.0, max(0.0, (55.0 - rsi) / 25.0)) * 0.35
         score += (1.0 if mh < 0 and mh < mhp else 0.5 if mh < 0 else 0.0) * 0.35
-        score += (1.0 if sk < sd and 20 < sk < 50 else 0.5 if sk < sd else 0.0) * 0.30
+        # Reward both overbought rejection and downward momentum continuation
+        score += (1.0 if sk < sd and (sk > 65 or 20 < sk < 50) else 0.5 if sk < sd else 0.0) * 0.30
     return min(1.0, score)
 
 
@@ -1091,8 +1150,8 @@ class StandaloneAIBot:
         sym = self.cfg["symbol"]
         n   = self.cfg["n_candles"]
         m15 = _fetch(sym, self.cfg["timeframe"], n)
-        h1  = _fetch(sym, self.cfg.get("h1_tf", mt5.TIMEFRAME_H1), 300)
-        h4  = _fetch(sym, self.cfg.get("h4_tf", mt5.TIMEFRAME_H4), 300)
+        h1  = _fetch(sym, self.cfg.get("h1_tf", getattr(mt5, "TIMEFRAME_H1", 16385)), 300)
+        h4  = _fetch(sym, self.cfg.get("h4_tf", getattr(mt5, "TIMEFRAME_H4", 16388)), 300)
         return m15, h1, h4
 
     def _prepared_m15(self, m15: pd.DataFrame) -> pd.DataFrame:
@@ -1173,7 +1232,8 @@ class StandaloneAIBot:
         if self.trade_date != today:
             self.trade_date  = today
             self.trades_today = 0
-        return self.trades_today < self.cfg.get("max_trades_per_day", 8)
+        limit = self.cfg.get("max_trades_per_day", 60 if _IS_AGGRESSIVE else 15)
+        return self.trades_today < limit
 
     # --------------------------------------------------------------
     def _margin_ok(self, price: float, volume: float, equity: float) -> bool:

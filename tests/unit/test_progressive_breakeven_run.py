@@ -22,8 +22,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _install_mt5_stub() -> None:
     if "MetaTrader5" in sys.modules:
+        stub = sys.modules["MetaTrader5"]
+        if not hasattr(stub, "TIMEFRAME_M1"):
+            stub.TIMEFRAME_M1 = 1
+        if not hasattr(stub, "TIMEFRAME_M5"):
+            stub.TIMEFRAME_M5 = 5
         return
     stub = types.ModuleType("MetaTrader5")
+    stub.TIMEFRAME_M1 = 1
+    stub.TIMEFRAME_M5 = 5
     stub.TIMEFRAME_M15 = 15
     stub.TIMEFRAME_H1 = 16385
     stub.TIMEFRAME_H4 = 16388
@@ -238,4 +245,64 @@ def test_ai_confidence_lot_sizing(run_module):
     assert low_conf < base
     assert high_conf == pytest.approx(base * 1.5, rel=0.05)
     assert low_conf == pytest.approx(base * 0.5, rel=0.05)
+
+
+def test_scalping_timeframe_m1(tmp_path, monkeypatch):
+    """Verify that TIMEFRAME=M1 configures M1 execution and cascades trend to M5 and M15."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TIMEFRAME", "M1")
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+    assert mod.CONFIG["timeframe"] == 1       # M1
+    assert mod.CONFIG["h1_tf"] == 5          # M5 intermediate trend
+    assert mod.CONFIG["h4_tf"] == 15         # M15 macro trend
+    sys.modules.pop("run", None)
+
+
+def test_scalping_timeframe_m5(tmp_path, monkeypatch):
+    """Verify that TIMEFRAME=M5 configures M5 execution and cascades trend to M15 and H1."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TIMEFRAME", "M5")
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+    assert mod.CONFIG["timeframe"] == 5       # M5
+    assert mod.CONFIG["h1_tf"] == 15         # M15 intermediate trend
+    assert mod.CONFIG["h4_tf"] == 16385      # H1 macro trend
+    sys.modules.pop("run", None)
+
+
+def test_scalping_timeframe_override(tmp_path, monkeypatch):
+    """Verify that custom TREND_TF and MACRO_TREND_TF explicitly override defaults."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TIMEFRAME", "M1")
+    monkeypatch.setenv("TREND_TF", "M15")
+    monkeypatch.setenv("MACRO_TREND_TF", "H1")
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+    assert mod.CONFIG["timeframe"] == 1       # M1
+    assert mod.CONFIG["h1_tf"] == 15         # overridden to M15
+    assert mod.CONFIG["h4_tf"] == 16385      # overridden to H1
+    sys.modules.pop("run", None)
+
+
+def test_scalping_momentum_oversold_bounce(run_module):
+    """Verify that oversold bounce (stoch_k < 35, stoch_k > stoch_d) receives full points."""
+    import pandas as pd
+    last_series = pd.Series({
+        "rsi": 46.0,
+        "macd_hist": 0.5,
+        "macd_hist_prev": 0.2,
+        "stoch_k": 28.0,
+        "stoch_d": 22.0,
+    })
+    score = run_module._momentum_score(last_series, direction=1)
+    # MACD hist > 0 & growing (0.35) + Stoch oversold turn (0.30) + RSI (small)
+    assert score >= 0.65
+
 
