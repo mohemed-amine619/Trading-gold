@@ -2129,12 +2129,31 @@ if __name__ == "__main__":
         except Exception:
             return {"history": []}
 
+    def _find_available_dashboard_port() -> int:
+        explicit = os.getenv("DASHBOARD_PORT")
+        if explicit:
+            return int(explicit)
+        import socket
+        for p in list(range(8000, 8015)) + [8080, 8081, 8082]:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("127.0.0.1", p))
+                    return p
+            except OSError:
+                continue
+        return 8000
+
+    dashboard_port = _find_available_dashboard_port()
+
     def run_dashboard():
         import logging
         import uvicorn
         logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-        uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
-        
+        try:
+            uvicorn.run(app, host="127.0.0.1", port=dashboard_port, log_level="warning")
+        except Exception as e:
+            logger.error("Failed to start Dashboard on port %d: %s", dashboard_port, e)
+
     # Start dashboard in background
     import threading
     t = threading.Thread(target=run_dashboard, daemon=True)
@@ -2142,7 +2161,7 @@ if __name__ == "__main__":
     
     import time
     print("\n" + "="*60)
-    print("🚀 DASHBOARD RUNNING AT: http://127.0.0.1:8000")
+    print(f"🚀 DASHBOARD RUNNING AT: http://127.0.0.1:{dashboard_port}")
     print("="*60 + "\n")
     time.sleep(1)
     
