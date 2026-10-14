@@ -71,7 +71,11 @@ import threading
 import time
 import os
 from dotenv import load_dotenv
-load_dotenv()
+env_file = os.getenv("ENV_FILE")
+if env_file and os.path.exists(env_file):
+    load_dotenv(dotenv_path=env_file, override=True)
+else:
+    load_dotenv()
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import List, Optional, Tuple
