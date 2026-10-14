@@ -276,6 +276,7 @@ class Settings(BaseSettings):
     retry_backoff_seconds: float = Field(default=0.5, ge=0.1)
     poll_interval_seconds: float = Field(default=5.0, ge=0.5)
     max_spread_points: Optional[float] = Field(default=None)
+    max_spread_atr_ratio: float = Field(default=0.25, ge=0.01, le=1.0)
     max_slippage_pct: float = Field(default=0.001)
 
     # ──────────────────────────────────────────────────────────
@@ -443,6 +444,8 @@ class Settings(BaseSettings):
             "profit_lock_activate_atr": self.profit_lock_activate_atr,
             "profit_giveback_pct": self.profit_giveback_pct,
             "cut_losing_after_hours": self.cut_losing_after_hours,
+            "max_spread_points": self.max_spread_points,
+            "max_spread_atr_ratio": self.max_spread_atr_ratio,
         }
 
 

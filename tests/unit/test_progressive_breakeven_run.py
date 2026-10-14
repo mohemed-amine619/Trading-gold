@@ -306,3 +306,64 @@ def test_scalping_momentum_oversold_bounce(run_module):
     assert score >= 0.65
 
 
+def test_scalper_profile_configuration(tmp_path, monkeypatch):
+    """TRADING_PROFILE=scalper configures high-frequency, tight scalp parameters."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TRADING_PROFILE", "scalper")
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+    assert mod._IS_SCALPER is True
+    assert mod._IS_AGGRESSIVE is True
+    assert mod.CONFIG["timeframe"] == 1             # M1
+    assert mod.CONFIG["sl_atr_mult"] == 1.5         # Tight 1.5 ATR SL
+    assert mod.CONFIG["tp_rr_ratio"] == 2.0         # 2.0 RR target
+    assert mod.CONFIG["breakeven_trigger_atr"] == 0.3  # Fast 0.3 ATR Breakeven
+    assert mod.CONFIG["partial_close_trigger_atr"] == 0.8  # Rapid 0.8 ATR partial TP
+    assert mod.CONFIG["max_spread_atr_ratio"] == 0.20  # Max 20% spread-to-ATR
+    sys.modules.pop("run", None)
+
+
+def test_scalper_spread_guard(run_module):
+    """_spread_ok rejects orders when spread exceeds the ATR threshold."""
+    info = types.SimpleNamespace(point=0.01)
+    tick = types.SimpleNamespace(ask=2000.50, bid=2000.00)  # Spread = 0.50
+    bot = run_module.StandaloneAIBot(run_module.CONFIG)
+
+    # Case 1: ATR is 1.0 -> spread (0.50) is 50% of ATR > max (40% default) -> rejected
+    assert bot._spread_ok(info, tick, atr=1.0) is False
+
+    # Case 2: ATR is 5.0 -> spread (0.50) is 10% of ATR <= max -> accepted
+    assert bot._spread_ok(info, tick, atr=5.0) is True
+
+
+def test_scalper_momentum_ribbon_bonus(run_module):
+    """EMA 9/21 ribbon alignment and pinbars provide confluence bonuses."""
+    import pandas as pd
+    base_series = pd.Series({
+        "rsi": 50.0,
+        "macd_hist": 0.0,
+        "macd_hist_prev": 0.0,
+        "stoch_k": 50.0,
+        "stoch_d": 50.0,
+    })
+    base_score = run_module._momentum_score(base_series, direction=1)
+
+    # Bullish ribbon (close >= ema9 > ema21) + bull pinbar
+    scalp_series = pd.Series({
+        "rsi": 50.0,
+        "macd_hist": 0.0,
+        "macd_hist_prev": 0.0,
+        "stoch_k": 50.0,
+        "stoch_d": 50.0,
+        "close": 2005.0,
+        "ema9": 2004.0,
+        "ema21": 2002.0,
+        "bull_pinbar": True,
+    })
+    scalp_score = run_module._momentum_score(scalp_series, direction=1)
+    assert scalp_score > base_score
+
+
+

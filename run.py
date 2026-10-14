@@ -123,28 +123,42 @@ if _TRADING_MODE == "live":
 # Trading Profile resolution (balanced vs high-performance money_printer)
 # ---------------------------------------------------------------------------
 _PROFILE = os.getenv("TRADING_PROFILE", "balanced").strip().lower()
+_IS_SCALPER = _PROFILE in ("scalper", "ultra_scalper")
 _IS_AGGRESSIVE = (
-    _PROFILE in ("money_printer", "aggressive", "high_performance", "scalper")
+    _IS_SCALPER
+    or _PROFILE in ("money_printer", "aggressive", "high_performance")
     or os.getenv("AGGRESSIVE_MODE", "false").strip().lower() in ("true", "1", "yes")
 )
 
 if _IS_AGGRESSIVE:
     print("=" * 70)
-    print("  TRADING_PROFILE=money_printer (High-Performance Scalper / Compounding)")
-    print("  - Multi-Symbol scanning active (Gold + Major FX pairs)")
-    print("  - High-frequency responsive entries (Confluence threshold: 45)")
-    print("  - Compound R:R risk structure: 1.8 ATR SL / 2.0 RR TP")
-    print("  - Early partial TP @ 0.9 ATR + Progressive Breakeven ratchet @ 55%")
-    print("  - Dynamic AI lot scaling: +50% on high confidence setups")
+    if _IS_SCALPER:
+        print("  TRADING_PROFILE=scalper (Ultra-Fast Microstructure Scalper)")
+        print("  - Microstructure Confluence: EMA 9/21 Ribbon + Pinbars + Volume Surge")
+        print("  - Fast responsive entries (Score >= 45, Dynamic Spread Guard <= 25% ATR)")
+        print("  - Sharp Scalp R:R: 1.5 ATR SL / 2.0 RR TP (Target: 3.0 ATR)")
+        print("  - Rapid Partial TP @ 0.8 ATR + Fast Breakeven @ 0.3 ATR")
+        print("  - Micro-trailing ratchet @ 0.7 ATR + Rejection Wick Profit Securing")
+    else:
+        print("  TRADING_PROFILE=money_printer (High-Performance Scalper / Compounding)")
+        print("  - Multi-Symbol scanning active (Gold + Major FX pairs)")
+        print("  - High-frequency responsive entries (Confluence threshold: 45)")
+        print("  - Compound R:R risk structure: 1.8 ATR SL / 2.0 RR TP")
+        print("  - Early partial TP @ 0.9 ATR + Progressive Breakeven ratchet @ 55%")
+        print("  - Dynamic AI lot scaling: +50% on high confidence setups")
     print("=" * 70)
 
-def _profile_cfg(env_var: str, balanced_val, aggressive_val, val_type=float):
+def _profile_cfg(env_var: str, balanced_val, aggressive_val, val_type=float, scalper_val=None):
     raw = os.getenv(env_var)
     if raw is None or raw == "":
+        if _IS_SCALPER and scalper_val is not None:
+            return val_type(scalper_val)
         return val_type(aggressive_val if _IS_AGGRESSIVE else balanced_val)
     if _IS_AGGRESSIVE:
         try:
             if val_type(raw) == val_type(balanced_val):
+                if _IS_SCALPER and scalper_val is not None:
+                    return val_type(scalper_val)
                 return val_type(aggressive_val)
         except (ValueError, TypeError):
             pass
@@ -264,12 +278,12 @@ CONFIG = {
     
     # --- risk & money management ---
     "risk_per_trade":   _profile_cfg("RISK_PER_TRADE", 0.01, 0.015),
-    "sl_atr_mult":      _profile_cfg("SL_ATR_MULT", 2.5, 1.8),
-    "tp_rr_ratio":      _profile_cfg("TP_RR_RATIO", 2.5, 2.0),
+    "sl_atr_mult":      _profile_cfg("SL_ATR_MULT", 2.5, 1.8, scalper_val=1.5),
+    "tp_rr_ratio":      _profile_cfg("TP_RR_RATIO", 2.5, 2.0, scalper_val=2.0),
     
     # --- dynamic trade management ("never lose" once in profit) ---
-    "trail_atr_mult":          _profile_cfg("TRAIL_ATR_MULT", 1.5, 1.2),
-    "trail_activate_atr":      _profile_cfg("TRAIL_ACTIVATE_ATR", 1.0, 0.8),
+    "trail_atr_mult":          _profile_cfg("TRAIL_ATR_MULT", 1.5, 1.2, scalper_val=1.0),
+    "trail_activate_atr":      _profile_cfg("TRAIL_ACTIVATE_ATR", 1.0, 0.8, scalper_val=0.7),
     "trail_tighten1_atr":      _profile_cfg("TRAIL_TIGHTEN1_ATR", 2.0, 1.5),
     "trail_tighten1_mult":     _profile_cfg("TRAIL_TIGHTEN1_MULT", 1.0, 0.8),
     "trail_tighten2_atr":      _profile_cfg("TRAIL_TIGHTEN2_ATR", 3.0, 2.2),
@@ -283,13 +297,14 @@ CONFIG = {
     
     # --- breakeven / progressive profit lock ---
     "enable_breakeven":        True,
-    "breakeven_trigger_atr":   _profile_cfg("BREAKEVEN_TRIGGER_ATR", 0.4, 0.3),
+    "breakeven_trigger_atr":   _profile_cfg("BREAKEVEN_TRIGGER_ATR", 0.4, 0.3, scalper_val=0.3),
     "breakeven_buffer_atr":    float(os.getenv("BREAKEVEN_BUFFER_ATR", "0.15")),
     "profit_lock_ratio":       _profile_cfg("PROFIT_LOCK_RATIO", 0.50, 0.55),
     "enable_partial_close":    True,
-    "partial_close_trigger_atr": _profile_cfg("PARTIAL_CLOSE_TRIGGER_ATR", 1.2, 0.9),
-    "profit_lock_activate_atr": _profile_cfg("PROFIT_LOCK_ACTIVATE_ATR", 1.0, 0.8),
+    "partial_close_trigger_atr": _profile_cfg("PARTIAL_CLOSE_TRIGGER_ATR", 1.2, 0.9, scalper_val=0.8),
+    "profit_lock_activate_atr": _profile_cfg("PROFIT_LOCK_ACTIVATE_ATR", 1.0, 0.8, scalper_val=0.7),
     "profit_giveback_pct":     _profile_cfg("PROFIT_GIVEBACK_PCT", 0.30, 0.25),
+    "max_spread_atr_ratio":    _profile_cfg("MAX_SPREAD_ATR_RATIO", 0.40, 0.25, scalper_val=0.20),
     
     # --- system ---
     "sleep_interval":   1.0,
@@ -420,8 +435,11 @@ def _fetch(symbol: str, tf: int, n: int) -> pd.DataFrame:
 def _prepare(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """Attach all indicators needed by the scoring system and AI features."""
     df = df.copy()
-    cl, hi, lo = df["close"], df["high"], df["low"]
+    cl, hi, lo, op = df["close"], df["high"], df["low"], df["open"]
 
+    # Scalping & Trend EMAs
+    df["ema9"]   = ta.ema(cl, length=9)
+    df["ema21"]  = ta.ema(cl, length=21)
     df["ema50"]  = ta.ema(cl, length=50)
     df["ema200"] = ta.ema(cl, length=200)
     df["rsi"]    = ta.rsi(cl, length=14)
@@ -463,6 +481,34 @@ def _prepare(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     except Exception:
         df["adx"] = df["di_plus"] = df["di_minus"] = 0.0
 
+    # Bollinger Bands
+    try:
+        bb_df = ta.bbands(cl, length=20, std=2.0)
+        if bb_df is not None and not bb_df.empty:
+            p_col = next((c for c in bb_df.columns if "BBP" in c), None)
+            w_col = next((c for c in bb_df.columns if "BBB" in c), None)
+            df["bb_pct_b"] = bb_df[p_col] if p_col else 0.5
+            df["bb_width"] = bb_df[w_col] if w_col else 0.0
+        else:
+            df["bb_pct_b"] = 0.5
+            df["bb_width"] = 0.0
+    except Exception:
+        df["bb_pct_b"] = 0.5
+        df["bb_width"] = 0.0
+
+    # Candlestick Microstructure for Scalping (Pinbars, Rejection Wicks, Engulfing)
+    hl = (hi - lo).clip(lower=1e-10)
+    upper_wick = hi - df[["open", "close"]].max(axis=1)
+    lower_wick = df[["open", "close"]].min(axis=1) - lo
+
+    # Rejection wicks (>= 45% wick and closed opposite to rejection)
+    df["bull_pinbar"] = (lower_wick / hl >= 0.45) & (cl > op)
+    df["bear_pinbar"] = (upper_wick / hl >= 0.45) & (cl < op)
+
+    # Momentum Engulfing
+    df["bull_engulf"] = (cl > op) & (cl > hi.shift(1)) & (op <= cl.shift(1))
+    df["bear_engulf"] = (cl < op) & (cl < lo.shift(1)) & (op >= cl.shift(1))
+
     df["vol_sma20"] = df["tick_volume"].rolling(20).mean()
     df["vol_ratio"] = df["tick_volume"] / (df["vol_sma20"] + 1e-10)
 
@@ -497,6 +543,9 @@ FEATURE_COLS: List[str] = [
     # --- POWER-UP: new engineered features (D/E) ---
     "atr_slope", "ema50_slope", "keltner_width",
     "obv_slope", "hh_count_5", "ll_count_5", "accel",
+    # --- SCALPER POWER-UP: fast microstructure features ---
+    "dist_ema9", "dist_ema21", "ema9_21_spread",
+    "pinbar_wick", "bb_squeeze",
 ]
 
 _EP = 1e-10
@@ -672,6 +721,20 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # Momentum acceleration: 2nd derivative of returns (is momentum speeding up?)
     df["accel"] = df["ret_1"] - df["ret_1"].shift(1)
 
+    # --- SCALPER POWER-UP: fast microstructure features ---
+    ema9_local = df.get("ema9", ta.ema(close, length=9))
+    ema21_local = df.get("ema21", ta.ema(close, length=21))
+    df["dist_ema9"] = (close - ema9_local) / (ema9_local + _EP)
+    df["dist_ema21"] = (close - ema21_local) / (ema21_local + _EP)
+    df["ema9_21_spread"] = (ema9_local - ema21_local) / (ema21_local + _EP)
+
+    # Pinbar wick delta (positive = buyers rejected low, negative = sellers rejected high)
+    df["pinbar_wick"] = df["lower_wick"] - df["upper_wick"]
+
+    # Bollinger Bands squeeze ratio
+    bb_w = df.get("bb_width", pd.Series(0.0, index=df.index))
+    df["bb_squeeze"] = bb_w / (bb_w.rolling(20).mean() + _EP)
+
     return df
 
 
@@ -835,16 +898,26 @@ def _trend_score(df, direction: int) -> float:
     last = df.iloc[-1]
     ef   = last.get("ema50",  float("nan"))
     es   = last.get("ema200", float("nan"))
+    e9   = last.get("ema9",   float("nan"))
+    e21  = last.get("ema21",  float("nan"))
     rsi  = last.get("rsi", 50.0)
     if pd.isna(ef) or pd.isna(es):
+        if not pd.isna(e9) and not pd.isna(e21):
+            return 0.7 if (e9 > e21 if direction == 1 else e9 < e21) else 0.2
         return 0.0
     if direction == 1:
         ema_ok = 1.0 if ef > es else 0.0
+        # Fast scalp ribbon alignment bonus (e9 > e21 > ef)
+        if not pd.isna(e9) and not pd.isna(e21) and e9 > e21 and e21 > ef:
+            ema_ok = 1.15
         rsi_ok = min(1.0, max(0.0, (rsi - 45.0) / 20.0))
     else:
         ema_ok = 1.0 if ef < es else 0.0
+        # Fast scalp ribbon alignment bonus (e9 < e21 < ef)
+        if not pd.isna(e9) and not pd.isna(e21) and e9 < e21 and e21 < ef:
+            ema_ok = 1.15
         rsi_ok = min(1.0, max(0.0, (55.0 - rsi) / 20.0))
-    return 0.65 * ema_ok + 0.35 * rsi_ok
+    return min(1.0, 0.65 * ema_ok + 0.35 * rsi_ok)
 
 
 def _momentum_score(last: pd.Series, direction: int) -> float:
@@ -853,17 +926,32 @@ def _momentum_score(last: pd.Series, direction: int) -> float:
     mhp  = float(last.get("macd_hist_prev", 0.0))
     sk   = float(last.get("stoch_k", 50.0))
     sd   = float(last.get("stoch_d", 50.0))
+    e9   = float(last.get("ema9", 0.0))
+    e21  = float(last.get("ema21", 0.0))
+    cl   = float(last.get("close", 0.0))
+
     score = 0.0
     if direction == 1:
         score += min(1.0, max(0.0, (rsi - 45.0) / 25.0)) * 0.35
         score += (1.0 if mh > 0 and mh > mhp else 0.5 if mh > 0 else 0.0) * 0.35
         # Reward both oversold bounce and upward momentum continuation
         score += (1.0 if sk > sd and (sk < 35 or 50 < sk < 80) else 0.5 if sk > sd else 0.0) * 0.30
+        # Scalper EMA 9/21 ribbon & price action bonus
+        if e9 > 0 and e21 > 0 and cl >= e9 and e9 > e21:
+            score += 0.10
+        if bool(last.get("bull_pinbar", False)) or bool(last.get("bull_engulf", False)):
+            score += 0.10
     else:
         score += min(1.0, max(0.0, (55.0 - rsi) / 25.0)) * 0.35
         score += (1.0 if mh < 0 and mh < mhp else 0.5 if mh < 0 else 0.0) * 0.35
         # Reward both overbought rejection and downward momentum continuation
         score += (1.0 if sk < sd and (sk > 65 or 20 < sk < 50) else 0.5 if sk < sd else 0.0) * 0.30
+        # Scalper EMA 9/21 ribbon & price action bonus
+        if e9 > 0 and e21 > 0 and cl <= e9 and e9 < e21:
+            score += 0.10
+        if bool(last.get("bear_pinbar", False)) or bool(last.get("bear_engulf", False)):
+            score += 0.10
+
     return min(1.0, score)
 
 
@@ -1249,17 +1337,23 @@ class StandaloneAIBot:
             return False
         return True
 
-    def _spread_ok(self, info, tick) -> bool:
-        """Optional spread guard. Disabled unless the user adds
-        'max_spread_points' to CONFIG — added purely via cfg.get() so the
-        existing CONFIG dict never needs to change."""
+    def _spread_ok(self, info, tick, atr: float = 0.0) -> bool:
+        """Spread guard with both fixed-point threshold and dynamic ATR-relative
+        ratio (vital for scalping to prevent entering when spread friction is high)."""
+        spread_price = tick.ask - tick.bid
         max_spread = self.cfg.get("max_spread_points")
-        if not max_spread:
-            return True
-        spread_points = (tick.ask - tick.bid) / info.point if info.point else 0
-        if spread_points > max_spread:
-            logger.info("Spread guard: %.1f pts > max %.1f – skipping entry",
-                        spread_points, max_spread)
+        if max_spread:
+            spread_points = spread_price / info.point if info.point else 0
+            if spread_points > max_spread:
+                logger.info("Spread guard: %.1f pts > max %.1f – skipping entry",
+                            spread_points, max_spread)
+                return False
+
+        # Relative spread-to-ATR guard for scalping (prevents trading when friction is too high)
+        max_spread_atr_ratio = self.cfg.get("max_spread_atr_ratio", 0.25 if _IS_AGGRESSIVE else 0.40)
+        if atr > 0 and (spread_price / atr) > max_spread_atr_ratio:
+            logger.info("Scalp Spread guard: spread (%.5f) is %.1f%% of ATR (%.5f) > max %.1f%% – skipping entry",
+                        spread_price, (spread_price / atr) * 100.0, atr, max_spread_atr_ratio * 100.0)
             return False
         return True
 
@@ -1276,14 +1370,14 @@ class StandaloneAIBot:
         if tick is None:
             return False
 
-        if not self._spread_ok(info, tick):
-            return False
-
-        price = tick.ask if direction == 1 else tick.bid
-
         last = m15p.iloc[-1]
         atr  = float(last.get("atr", info.point * 100))
         adx  = float(last.get("adx", 0.0))
+
+        if not self._spread_ok(info, tick, atr):
+            return False
+
+        price = tick.ask if direction == 1 else tick.bid
 
         sl_dist = self.cfg["sl_atr_mult"] * atr
         if direction == 1:
@@ -1354,10 +1448,14 @@ class StandaloneAIBot:
         return False
 
     # --------------------------------------------------------------
-    def _close_position(self, pos, reason: str) -> bool:
+    def _close_position(self, pos, reason: str, pnl: Optional[float] = None) -> bool:
+        calc_pnl = float(getattr(pos, "profit", 0.0)) + float(getattr(pos, "swap", 0.0)) if pnl is None else float(pnl)
         if self.cfg.get("dry_run"):
-            logger.info("[DRY-RUN] CLOSE ticket=%s (%s) reason=%s",
-                        pos.ticket, pos.symbol, reason)
+            logger.info("[DRY-RUN] CLOSE ticket=%s (%s) pnl=%+.2f reason=%s",
+                        pos.ticket, pos.symbol, calc_pnl, reason)
+            self._peak_profit.pop(pos.ticket, None)
+            self._partial_stages.pop(pos.ticket, None)
+            self._record_trade_result(calc_pnl)
             return True
         is_buy = pos.type == mt5.ORDER_TYPE_BUY
         tick   = mt5.symbol_info_tick(pos.symbol)
@@ -1560,6 +1658,13 @@ class StandaloneAIBot:
             if last_dir == direction and last_score < 35:
                 if floating_pnl <= 0: # Cut losers before they hit hard DD
                     self._close_position(pos, "AI Early Exit (Momentum Dead)", floating_pnl)
+                    continue
+
+            # Scenario C: Scalp Rejection Exit (Lock in profit when opposite pinbar forms)
+            if profit_move >= 0.35 * atr and floating_pnl > 0:
+                opp_pinbar = bool(last.get("bear_pinbar", False)) if direction == 1 else bool(last.get("bull_pinbar", False))
+                if opp_pinbar:
+                    self._close_position(pos, "Scalp Rejection Exit (Opposite Pinbar)", floating_pnl)
                     continue
                     
             # --- TIME DECAY (Cut losers early) ---
