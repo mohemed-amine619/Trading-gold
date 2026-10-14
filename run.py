@@ -1309,11 +1309,11 @@ class StandaloneAIBot:
 
     # --------------------------------------------------------------
     def _open_positions(self):
-        return mt5.positions_get(symbol=self.cfg["symbol"],
-                                 magic=self.cfg.get("magic_number", 888999)) or []
+        return mt5.positions_get(symbol=self.cfg["symbol"]) or []
 
     def _count_positions(self) -> int:
-        return len(self._open_positions())
+        bot_magic = self.cfg.get("magic_number", 888999)
+        return len([p for p in self._open_positions() if getattr(p, "magic", 0) == bot_magic])
 
     def _trades_today_ok(self) -> bool:
         today = date.today()
@@ -1516,7 +1516,7 @@ class StandaloneAIBot:
             "position": pos.ticket,
             "sl":       float(new_sl),
             "tp":       float(new_tp),
-            "magic":    self.cfg.get("magic_number", 888999),
+            "magic":    getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
         }
         result = __import__("MetaTrader5").order_send(req)
         if result and result.retcode == __import__("MetaTrader5").TRADE_RETCODE_DONE:
@@ -1532,7 +1532,7 @@ class StandaloneAIBot:
             "position": pos.ticket,
             "sl":       float(new_sl),
             "tp":       float(pos.tp),
-            "magic":    self.cfg.get("magic_number", 888999),
+            "magic":    getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
         }
         result = mt5.order_send(req)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
