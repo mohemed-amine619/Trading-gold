@@ -40,7 +40,7 @@ writes its `trades` table into the single configured database via
 Run everything with `.venv/bin/python` — the repo has two virtualenvs and only `.venv` has pytest.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 458 passed
+.venv/bin/python -m pytest tests/ -q          # 473 passed
 .venv/bin/python -m pytest tests/unit/test_risk_engine.py -q   # single file
 .venv/bin/python -m pytest tests/unit -k approve -q            # single test by name
 ```
