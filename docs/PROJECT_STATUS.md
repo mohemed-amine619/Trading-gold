@@ -1,14 +1,15 @@
 # PROJECT STATUS
 
 > **Target platform: native Windows 11.** No Docker, WSL, Linux host or VM is
-> required. Last updated: 2026-10-11.
+> required. Last updated: 2026-10-15.
 
 ## 0. TEST BASELINE
 
-**297 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**350 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
+| AI model validation, calibration & edge-gated sizing | 39 | Implemented and tested |
 | Trading safety (paper default & credential hygiene) | 23 | Implemented and tested |
 | Safety tripwires & fail-closed regressions | 54 | Implemented and tested |
 | Execution safety & idempotency | 34 | Implemented and tested |
@@ -16,9 +17,76 @@
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 22 | Implemented and tested |
 | Risk, position, strategy, scalping & market | 78 | Implemented and tested |
+| Manual trades isolation & order execution | 7 | Implemented and tested |
+| Other unit tests | 3 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter`.
+
+---
+
+## 0.1 IMPLEMENTED — AI MODEL VALIDATION (champion/challenger)
+
+`run.py` → `AIEnsemble` previously promoted **any** model that finished
+fitting, and reported the raw soft-vote probability as "confidence". Three
+concrete defects, all fixed:
+
+1. **Silent model decay.** A retrain that had collapsed into a coin flip went
+   straight into production. Every retrain is now a *challenger*: fitted on
+   the older part of the rolling window, scored on a strictly later,
+   never-trained-on validation split, and promoted only if it clears the
+   gates. The incumbent survives a rejected challenger untouched.
+2. **Uncalibrated confidence.** Raw `predict_proba` from a soft-voting
+   ensemble is systematically overconfident, and that number drove both the
+   45-point confluence score *and* the position-size multiplier. Output is
+   now Platt-scaled against the validation split, clipped to `[0.02, 0.98]`
+   so it can never report certainty it has not earned.
+3. **Sizing on bravado.** Upsizing was `ai_conf >= 0.70/0.85` — magic numbers
+   compared against an uncalibrated probability. Size now scales with the
+   model's **edge** over a coin flip (`AI_MIN_EDGE_FOR_SIZE_UP`, default
+   0.10), so a confidently-wrong prediction cannot enlarge a position.
+
+### The decisive gate: lift over the trivial baseline
+
+Accuracy alone is not evidence of skill, because the best trivial predictor
+is *"always answer the majority class"*, which scores
+`max(UP_rate, 1 - UP_rate)`. Measured on a validation window that was 73.8%
+UP, a model scoring 61.3% accuracy — which the old code promoted and reported
+as "61% accurate" — is **12.5 points worse than doing nothing**. `AI_MIN_OOS_EDGE`
+(default `0.0`) blocks it. AUC is gated separately (`AI_MIN_OOS_AUC`) because
+a model can post above-baseline accuracy while being unable to *rank*
+outcomes at all (observed AUC: 0.523).
+
+On an AR(1) control series: `phi=0` (random walk) is promoted but its
+calibrated confidence lands at ~0.52 and it abstains; `phi=±0.5` (genuine
+autocorrelation) promotes at 0.66–0.69 accuracy / 0.69–0.76 AUC / +0.11–0.13
+lift and trades.
+
+### Also fixed in this phase
+
+- **Live crash risk.** The `AIEnsemble` config object is built inline in
+  `_get_signal`. New keys were added to `CONFIG`, `core/settings.py`,
+  `as_legacy_config()`, **and** that construction site — `train()` reads them
+  outside any `try`, so a missing key would have raised `AttributeError`
+  straight into the main loop. Guarded by a test.
+- **Retrain spin.** The anti-spin guard keyed on `_n_trains`, which only
+  increments on *promotion*. A model that never cleared the gate therefore
+  looked brand new forever and re-entered the synchronous first-fit path on
+  every bar. Now keyed on `_n_attempts`, counted in `update()`, and the
+  cadence no longer short-circuits on `not self._trained`.
+- **`y_tr` unbound** on the too-small-to-validate path (caught by test).
+- **`_build_xy` raising** on short/malformed frames now returns `False`
+  instead of propagating into the trading loop.
+- **Wrong UP column.** `proba[1]` assumed ascending class order; now resolved
+  from `classes_`.
+
+### Known limitation (stated, not hidden)
+
+Calibration is fitted on the same validation split that gates promotion, so
+the reported confidence carries some optimism bias. Proper nested
+cross-validation is the fix; it needs more labelled history than the current
+window provides. Until then the number is *directionally* honest rather than
+strictly out-of-sample.
 
 ---
 

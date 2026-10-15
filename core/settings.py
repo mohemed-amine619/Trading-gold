@@ -268,6 +268,45 @@ class Settings(BaseSettings):
     ai_train_bars: int = Field(default=500, ge=100)
     ai_retrain_bars: int = Field(default=50, ge=10)
 
+    # ── AI model validation ────────────────────────────────────────────
+    # These govern the champion/challenger promotion gate in AIEnsemble.train().
+    # A model is only allowed to go live if it beats chance on a strictly
+    # later, never-trained-on validation split.
+    ai_validation_fraction: float = Field(
+        default=0.20, ge=0.0, le=0.5,
+        description="Fraction of the rolling window held out as out-of-sample validation",
+    )
+    ai_min_oos_accuracy: float = Field(
+        default=0.52, ge=0.50, le=1.0,
+        description="Minimum out-of-sample accuracy for a model to be promoted. 0.50 is a coin flip",
+    )
+    ai_min_oos_auc: float = Field(
+        default=0.50, ge=0.0, le=1.0,
+        description="Minimum out-of-sample AUC (ranking skill). 0.50 is random ordering",
+    )
+    ai_min_oos_edge: float = Field(
+        default=0.0, ge=-1.0, le=1.0,
+        description=(
+            "Minimum accuracy lift over the majority-class baseline. "
+            "0.0 requires the model to at least match 'always predict the "
+            "majority class'; below that its expectancy is negative"
+        ),
+    )
+    ai_promote_tolerance: float = Field(
+        default=0.01, ge=0.0, le=0.5,
+        description="How much worse than the incumbent a challenger may score and still be promoted",
+    )
+    ai_calibrate: bool = Field(
+        default=True,
+        description="Platt-scale raw predict_proba before it is used for scoring or sizing",
+    )
+    ai_min_edge_for_size_up: float = Field(
+        default=0.10, ge=0.0, le=0.5,
+        description="Confidence margin over 0.5 required before AI upsizes a position",
+    )
+    ai_size_high_conf: float = Field(default=0.85, ge=0.0, le=1.0)
+    ai_size_low_conf: float = Field(default=0.60, ge=0.0, le=1.0)
+
     # ──────────────────────────────────────────────────────────
     # Execution
     # ──────────────────────────────────────────────────────────
@@ -393,6 +432,15 @@ class Settings(BaseSettings):
             "ai_confidence_threshold": self.ai_confidence_threshold,
             "ai_train_bars": self.ai_train_bars,
             "ai_retrain_bars": self.ai_retrain_bars,
+            "ai_validation_fraction": self.ai_validation_fraction,
+            "ai_min_oos_accuracy": self.ai_min_oos_accuracy,
+            "ai_min_oos_auc": self.ai_min_oos_auc,
+            "ai_min_oos_edge": self.ai_min_oos_edge,
+            "ai_promote_tolerance": self.ai_promote_tolerance,
+            "ai_calibrate": self.ai_calibrate,
+            "ai_min_edge_for_size_up": self.ai_min_edge_for_size_up,
+            "ai_size_high_conf": self.ai_size_high_conf,
+            "ai_size_low_conf": self.ai_size_low_conf,
             "min_signal_score": self.min_signal_score,
             "adx_min": self.adx_trending_min,
             "adx_strong": self.adx_strong_trend,

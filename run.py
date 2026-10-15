@@ -102,6 +102,8 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     VotingClassifier,
 )
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -269,6 +271,38 @@ CONFIG = {
     "ai_confidence_threshold": _profile_cfg("AI_CONFIDENCE_THRESHOLD", 0.55, 0.50),
     "ai_train_bars":  int(os.getenv("AI_TRAIN_BARS", "800")),
     "ai_retrain_bars": int(os.getenv("AI_RETRAIN_BARS", "50")),
+
+    # --- AI model rigor ---
+    # The ensemble is trained on a rolling window, but a model that is only
+    # ever FIT is not a model that has been shown to work. These govern a
+    # time-ordered train/validation split and the promotion gate that decides
+    # whether a freshly-trained challenger is allowed to replace the live
+    # model. See AIEnsemble.train().
+    "ai_validation_fraction":  float(os.getenv("AI_VALIDATION_FRACTION", "0.20")),
+    # Minimum out-of-sample accuracy for a model to be promoted at all.
+    # 0.50 is a coin flip; anything at or below that has no tradeable edge.
+    "ai_min_oos_accuracy":     float(os.getenv("AI_MIN_OOS_ACCURACY", "0.52")),
+    # Ranking (AUC) gate. Accuracy alone is fooled by class imbalance: a model
+    # that always answers UP scores 0.58 on a window that is 58% UP. AUC
+    # measures whether the model can ORDER outcomes at all. 0.50 == random.
+    "ai_min_oos_auc":          float(os.getenv("AI_MIN_OOS_AUC", "0.50")),
+    # Lift over the trivial baseline. The best naive predictor is "always
+    # answer the majority class", which scores exactly the base rate. A model
+    # below it has negative expectancy and must not trade. Set to -1.0 to
+    # disable this gate entirely.
+    "ai_min_oos_edge":         float(os.getenv("AI_MIN_OOS_EDGE", "0.0")),
+    # A challenger may be this much WORSE than the incumbent and still be
+    # promoted (avoids churning models when two are statistically tied).
+    "ai_promote_tolerance":    float(os.getenv("AI_PROMOTE_TOLERANCE", "0.01")),
+    # Platt-scaling calibration of raw predict_proba output. Raw soft-voting
+    # probabilities are systematically overconfident; calibrating them is what
+    # makes "confidence 0.62" mean something before it is used to size a trade.
+    "ai_calibrate":            os.getenv("AI_CALIBRATE", "true").lower() in ("true", "1", "yes"),
+    # Expected-edge floor for AI-driven position upsizing, as a probability
+    # margin over a coin flip. Size scales with edge, not with raw confidence.
+    "ai_min_edge_for_size_up": float(os.getenv("AI_MIN_EDGE_FOR_SIZE_UP", "0.10")),
+    "ai_size_high_conf": _profile_cfg("AI_SIZE_HIGH_CONF", 0.85, 0.70),
+    "ai_size_low_conf":  _profile_cfg("AI_SIZE_LOW_CONF",  0.60, 0.60),
     
     # --- strategy scoring ---
     "min_signal_score": _profile_cfg("MIN_SIGNAL_SCORE", 50.0, 45.0),
@@ -315,6 +349,11 @@ CONFIG = {
     "max_trades_per_day": _profile_cfg("MAX_TRADES_PER_DAY", 15, 60, val_type=int),
     "magic_number":     int(os.getenv("MAGIC_NUMBER", 888999)),
     "deviation":        20,
+
+    # --- manual trade management ---
+    "ai_protect_manual_trades":  True,
+    "manual_trade_sl_atr":       2.0,
+    "manage_manual_trades_full": False,
 
     # --- safety ---
     # SAFETY: the bot MUST default to paper mode. Every mutating method
@@ -550,6 +589,22 @@ FEATURE_COLS: List[str] = [
     # --- SCALPER POWER-UP: fast microstructure features ---
     "dist_ema9", "dist_ema21", "ema9_21_spread",
     "pinbar_wick", "bb_squeeze",
+    # --- PRO TRADER FEATURES ---
+    # Regime: captures whether market is trending or ranging
+    "adx_slope",            # ADX acceleration (trend strengthening?)
+    "regime_score",         # composite trend/chop score normalised -1..+1
+    "kc_squeeze",           # Keltner-Bollinger squeeze (1=compressed, 0=open)
+    # Pullback quality: is price near value area (EMA21/50)?
+    "dist_ema21_atr",       # distance from EMA21 in ATR units
+    "dist_ema50_atr",       # distance from EMA50 in ATR units
+    "at_value_area",        # 1 if price within 0.75 ATR of EMA21 or EMA50
+    # Multi-bar momentum confirmation (avoids single-bar false signals)
+    "rsi_trending_2",       # RSI directional consistency over last 2 bars
+    "macd_hist_trending_2", # MACD histogram expanding for 2 bars
+    "consecutive_dir_3",    # net directional count over last 3 bars (-3..+3)
+    # Volatility regime
+    "atr_vs_20d",           # current ATR / 20-bar mean ATR
+    "bb_vs_kc_ratio",       # BB width / KC width (squeeze compression)
 ]
 
 _EP = 1e-10
@@ -739,6 +794,59 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     bb_w = df.get("bb_width", pd.Series(0.0, index=df.index))
     df["bb_squeeze"] = bb_w / (bb_w.rolling(20).mean() + _EP)
 
+    # -----------------------------------------------------------------------
+    # PRO TRADER FEATURES
+    # -----------------------------------------------------------------------
+    # 1. ADX slope — is the trend accelerating or decelerating?
+    adx_s = df.get("adx", pd.Series(0.0, index=df.index))
+    df["adx_slope"] = (adx_s - adx_s.shift(3)) / (adx_s.shift(3) + _EP)
+
+    # 2. Regime score: EMA50 slope direction × ADX magnitude → -1..+1
+    #    Positive = bullish trend, negative = bearish, near-zero = ranging
+    ema50_s = df.get("_ema50", df.get("ema50", ta.ema(close, length=50)))
+    ema50_slope_5 = (ema50_s - ema50_s.shift(5)) / (ema50_s.shift(5) + _EP)
+    adx_norm = (adx_s / 50.0).clip(0.0, 1.0)  # normalise ADX 0-50 → 0-1
+    # sign of EMA slope drives direction; ADX amplitude drives magnitude
+    df["regime_score"] = ema50_slope_5.apply(
+        lambda x: 1.0 if x > 0 else (-1.0 if x < 0 else 0.0)
+    ) * adx_norm
+
+    # 3. Keltner-Bollinger squeeze flag (Lazy Bear squeeze concept)
+    #    BB is inside KC → range compression → explosive breakout pending
+    bb_w_s = df.get("bb_width", pd.Series(pd.NA, index=df.index))
+    kc_w_s = df.get("keltner_width", (4.0 * atr_col) / (close + _EP))
+    df["kc_squeeze"] = (bb_w_s < kc_w_s).astype(float).fillna(0.0)
+    df["bb_vs_kc_ratio"] = bb_w_s / (kc_w_s + _EP)
+
+    # 4. Pullback-to-value distance (in ATR units — broker-independent)
+    ema21_s = df.get("ema21", ta.ema(close, length=21))
+    ema50_v = df.get("_ema50", ema50_s)
+    df["dist_ema21_atr"] = (close - ema21_s) / (atr_col + _EP)
+    df["dist_ema50_atr"] = (close - ema50_v) / (atr_col + _EP)
+    #    "At value area" = price is within 0.75 ATR of EMA21 or EMA50 (pullback zone)
+    df["at_value_area"] = (
+        (df["dist_ema21_atr"].abs() < 0.75) | (df["dist_ema50_atr"].abs() < 0.75)
+    ).astype(float)
+
+    # 5. Multi-bar momentum confirmation
+    rsi_s = df.get("rsi", pd.Series(50.0, index=df.index))
+    macd_h = df.get("macd_hist", pd.Series(0.0, index=df.index))
+    #    RSI trending: difference over 2 bars (positive = rising momentum)
+    df["rsi_trending_2"] = rsi_s - rsi_s.shift(2)
+    #    MACD histogram: expanding (same sign and larger) over 2 bars
+    macd_delta2 = macd_h - macd_h.shift(2)
+    same_sign = (macd_h * macd_h.shift(2) > 0).astype(float)
+    df["macd_hist_trending_2"] = macd_delta2 * same_sign
+    #    Consecutive directional closes: net -3..+3 (e.g. +3 = all 3 bars up)
+    dir_bar = (close > close.shift(1)).astype(float) * 2 - 1  # +1 or -1
+    df["consecutive_dir_3"] = (
+        dir_bar + dir_bar.shift(1) + dir_bar.shift(2)
+    )
+
+    # 6. Volatility regime: current ATR relative to its own 20-bar mean
+    atr_mean20 = atr_col.rolling(20).mean()
+    df["atr_vs_20d"] = atr_col / (atr_mean20 + _EP)
+
     return df
 
 
@@ -783,34 +891,185 @@ def _make_pipeline() -> Pipeline:
 
 _MIN_TRAIN = 150
 _MIN_PRED  = 50
+# Smallest out-of-sample split we will accept. Below this the measured
+# accuracy is noise, so we train without a promotion gate rather than promote
+# a model on 12 samples.
+_MIN_VALIDATION = 40
+# Calibration cannot produce a probability outside this band. Purely
+# empirical hit rates can reach 0.0/1.0 on a small validation split, and a
+# reported confidence of exactly 1.0 would be a lie — and would also make
+# any confidence-based sizing threshold trivially pass.
+_CALIBRATION_FLOOR = 0.02
+
+
+def _platt_scale(raw_prob, y_val) -> Optional[LogisticRegression]:
+    """Fit a Platt (sigmoid) calibrator mapping raw P(UP) -> empirical P(UP).
+
+    Why sigmoid and not isotonic: the validation split is only ~20% of a
+    few hundred labelled bars. Isotonic regression is non-parametric and will
+    happily memorise that split, producing a step function that looks
+    perfectly calibrated on the very data it was fitted to and misfires on
+    the next bar. Platt scaling fits exactly two parameters (slope and
+    intercept), which is the right model complexity for this sample size.
+
+    Returns None when there is not enough data, or when the split contains a
+    single class (there is nothing to calibrate *towards*).
+    """
+    p = np.asarray(raw_prob, dtype=float).ravel()
+    y = np.asarray(y_val, dtype=int).ravel()
+    if len(p) < _MIN_VALIDATION or len(set(y.tolist())) < 2:
+        return None
+    # logit transform, clipped so 0.0 and 1.0 do not produce infinities
+    eps = 1e-6
+    p = np.clip(p, eps, 1.0 - eps)
+    z = np.log(p / (1.0 - p)).reshape(-1, 1)
+    try:
+        cal = LogisticRegression(C=1e6, solver="lbfgs", random_state=42)
+        cal.fit(z, y)
+    except Exception as exc:
+        logger.warning("[AI] calibration fit failed (%s) — using raw probability", exc)
+        return None
+    return cal
+
+
+def _calibrated_prob(cal: Optional[LogisticRegression], prob: float) -> float:
+    """Apply a fitted calibrator to a raw probability."""
+    if cal is None:
+        return prob
+    eps = 1e-6
+    p = float(np.clip(prob, eps, 1.0 - eps))
+    z = np.array([[math.log(p / (1.0 - p))]])
+    try:
+        out = float(cal.predict_proba(z)[0][1])
+    except Exception:
+        return p
+    return min(1.0 - _CALIBRATION_FLOOR, max(_CALIBRATION_FLOOR, out))
+
+
+def _mean_feature_importance(pipeline: Pipeline, feature_cols: List[str]) -> dict:
+    """Average feature importance across the tree sub-estimators.
+
+    Diagnostic only — used for logging so it is possible to see what the
+    model is actually keying on. HistGradientBoosting has no
+    ``feature_importances_`` and is skipped rather than guessed at.
+    """
+    try:
+        voter = pipeline.named_steps["model"]
+        acc = np.zeros(len(feature_cols), dtype=float)
+        used = 0
+        for est in voter.estimators_:
+            fi = getattr(est, "feature_importances_", None)
+            if fi is None or len(fi) != len(feature_cols):
+                continue
+            acc += np.asarray(fi, dtype=float)
+            used += 1
+        if used == 0:
+            return {}
+        acc /= used
+        return dict(sorted(
+            zip(feature_cols, acc.tolist()), key=lambda kv: kv[1], reverse=True
+        ))
+    except Exception:
+        return {}
 
 
 class AIEnsemble:
-    """Stateful per-symbol ensemble: trains on roll, predicts direction."""
+    """Stateful per-symbol ensemble: trains on roll, predicts direction.
+
+    Champion/challenger design. Every retrain produces a *challenger* that
+    is fitted on the older part of the rolling window and scored on a
+    strictly later, never-trained-on validation split. The challenger only
+    replaces the live *champion* if its out-of-sample accuracy clears the
+    configured floor and is not meaningfully worse than the incumbent. This
+    is what stops a retrain that has silently decayed into a coin flip from
+    going live and quietly driving the account.
+    """
 
     def __init__(self, symbol: str, config):
         self.symbol          = symbol
         self.config          = config
         self._pipeline: Optional[Pipeline] = None
+        self._calibrator: Optional[LogisticRegression] = None
         self._feature_cols: List[str] = FEATURE_COLS[:]
         self._bars_since_train: int = 0
         self._n_trains: int = 0
+        self._n_attempts: int = 0
+        self._n_promotions: int = 0
+        self._n_rejections: int = 0
+        self._last_oos_accuracy: Optional[float] = None
+        self._last_oos_auc: Optional[float] = None
+        self._last_oos_base_rate: Optional[float] = None
+        self._last_oos_edge: Optional[float] = None
+        self._last_reject_reason: str = ""
+        self._feature_importance: dict = {}
         self._trained: bool = False
         self._lock = threading.Lock()   # guards pipeline swap during training
 
+    def top_features(self, n: int = 5) -> List[Tuple[str, float]]:
+        """Highest-weighted features of the live model, for logging/audit."""
+        with self._lock:
+            items = list(self._feature_importance.items())
+        return items[:n]
+
     def _build_xy(self, df):
+        """Build feature matrix X and label vector y.
+
+        Label definition (pro-grade):
+          - 1 (UP)   if the *best* close in the next 3 bars exceeds
+                     current close by ≥ 0.4 × ATR
+          - 0 (DOWN) if the *worst* close in the next 3 bars falls
+                     below current close by ≥ 0.4 × ATR
+          - NaN      if the move is below the ATR threshold in both
+                     directions — ambiguous, dropped from training.
+
+        This teaches the model to distinguish *meaningful* directional
+        moves from noise, the way a professional trader would frame it:
+        "did this setup produce a move worth trading?"
+        """
         df = build_features(df)
-        df["_target"] = (df["close"].shift(-1) > df["close"]).astype(int)
-        df = df.iloc[:-1].copy()
+        cl  = df["close"]
+        atr = df.get("atr", pd.Series(0.0, index=df.index))
+        threshold = 0.40  # ATR multiples — tune via ATR_LABEL_MULT env var if needed
+
+        # Best & worst close over next 3 bars (forward-looking)
+        fwd_max = cl.shift(-1).combine(cl.shift(-2), max).combine(cl.shift(-3), max)
+        fwd_min = cl.shift(-1).combine(cl.shift(-2), min).combine(cl.shift(-3), min)
+
+        move_up   = (fwd_max - cl) / (atr + _EP)
+        move_down = (cl - fwd_min) / (atr + _EP)
+
+        target = pd.Series(float("nan"), index=df.index)
+        target[move_up   >= threshold] = 1.0
+        target[move_down >= threshold] = 0.0
+        # Conflicted bars (both sides move ≥ threshold) → drop (chop)
+        target[(move_up >= threshold) & (move_down >= threshold)] = float("nan")
+
+        df["_target"] = target
+        df = df.iloc[:-3].copy()   # drop last 3 rows (no forward data)
         avail = [c for c in FEATURE_COLS if c in df.columns]
         df_clean = df[avail + ["_target"]].dropna()
         if len(df_clean) < _MIN_TRAIN:
             return None, None, avail
-        return df_clean[avail].values, df_clean["_target"].values, avail
+        return df_clean[avail].values, df_clean["_target"].values.astype(int), avail
 
     def train(self, df: pd.DataFrame) -> bool:
+        """Fit a challenger and promote it only if it validates out-of-sample.
+
+        The rolling window is split by TIME, never shuffled: the older
+        portion trains, the newer portion validates. Because the validation
+        bars are strictly later than anything the model was fitted on, the
+        measured accuracy is an honest out-of-sample estimate rather than a
+        training score dressed up as one.
+        """
         n = min(len(df), self.config.AI_TRAIN_BARS)
-        X, y, avail = self._build_xy(df.iloc[-n:].copy())
+        try:
+            X, y, avail = self._build_xy(df.iloc[-n:].copy())
+        except Exception as exc:
+            # Feature engineering on a short or malformed frame raises rather
+            # than returning None. train() must never propagate: update() calls
+            # it from the main trading loop.
+            logger.warning("[AI] %s feature build failed: %s", self.symbol, exc)
+            return False
         if X is None:
             logger.warning("[AI] %s: need >=%d samples, skipping train",
                            self.symbol, _MIN_TRAIN)
@@ -820,25 +1079,184 @@ class AIEnsemble:
             logger.warning("[AI] %s: degenerate labels (%.0f%% up) – skipping",
                            self.symbol, up_rate * 100)
             return False
+
+        # --- time-ordered train / validation split -------------------------
+        val_frac = min(max(float(self.config.AI_VALIDATION_FRACTION), 0.0), 0.5)
+        n_val = int(len(X) * val_frac)
+        y_va = None
+        if n_val >= _MIN_VALIDATION and (len(X) - n_val) >= _MIN_TRAIN:
+            X_tr, y_tr = X[:-n_val], y[:-n_val]
+            X_va, y_va = X[-n_val:], y[-n_val:]
+        else:
+            # Window too small to validate honestly. Still train, but record
+            # that there is no measured edge rather than implying one.
+            logger.warning("[AI] %s: %d samples too small for a %d-bar "
+                           "validation split — training ungated",
+                           self.symbol, len(X), _MIN_VALIDATION)
+            X_tr, y_tr = X, y
+
         try:
             pipe = _make_pipeline()
             # POWER-UP (D): recency-weighted training — recent bars get up
             # to ~2.5x the weight of the oldest bars in the window, so the
             # model adapts faster to the current regime instead of treating
             # a bar from 500 candles ago the same as the latest one.
-            sample_weight = np.linspace(0.4, 1.0, len(X))
-            pipe.fit(X, y, model__sample_weight=sample_weight)
-            with self._lock:
-                self._pipeline     = pipe
-                self._feature_cols = avail
-                self._trained      = True
-                self._n_trains    += 1
-            logger.info("[AI] %s trained (run #%d | samples=%d | up_rate=%.1f%%)",
-                        self.symbol, self._n_trains, len(X), up_rate * 100)
-            return True
+            sample_weight = np.linspace(0.4, 1.0, len(X_tr))
+            pipe.fit(X_tr, y_tr, model__sample_weight=sample_weight)
         except Exception as exc:
             logger.error("[AI] %s training error: %s", self.symbol, exc)
             return False
+
+        if y_va is None:
+            # No validation split was possible: fit as before, but do not
+            # pretend we measured anything.
+            self._promote(pipe, None, avail, len(X_tr))
+            return True
+
+        # --- out-of-sample measurement -------------------------------------
+        up_idx = self._up_index(pipe)
+        if up_idx is None:
+            self._reject("fitted model has no UP class")
+            return False
+        try:
+            raw_up = pipe.predict_proba(X_va)[:, up_idx]
+            # Predict-then-measure on the validation split, using the same
+            # 0.5 decision boundary that predict() applies live.
+            oos_acc = float(np.mean((raw_up >= 0.5).astype(int) == y_va))
+            try:
+                oos_auc = float(roc_auc_score(y_va, raw_up))
+            except Exception:
+                oos_auc = None
+        except Exception as exc:
+            logger.error("[AI] %s validation error: %s", self.symbol, exc)
+            return False
+
+        # Accuracy alone is not evidence of skill. The best trivial predictor
+        # is "always answer the majority class", and whichever class that is,
+        # it scores max(base_rate, 1 - base_rate). A model that cannot match
+        # that has negative expectancy against the do-nothing alternative.
+        # NOTE: comparing against the raw UP rate instead would be wrong --
+        # on a 38% UP window the trivial baseline scores 0.62, not 0.38.
+        base_rate = float(np.mean(y_va))
+        baseline = max(base_rate, 1.0 - base_rate)
+        oos_edge = oos_acc - baseline
+
+        # --- promotion gate ------------------------------------------------
+        gate_ok, gate_reason = self._passes_gate(oos_acc, oos_auc, base_rate)
+        if not gate_ok:
+            self._reject(gate_reason)
+            return False
+
+        if oos_auc is not None and oos_auc < 0.55:
+            # Not blocking — just honest. Near-chance ranking means most of the
+            # accuracy above is the base rate, not the model.
+            logger.warning(
+                "[AI] %s ranking skill is marginal (auc=%.3f, base_rate=%.3f, "
+                "acc=%.3f, lift=%+.3f) — promoted, but treat confidence sceptically",
+                self.symbol, oos_auc, base_rate, oos_acc, oos_edge)
+
+        calibrator = _platt_scale(raw_up, y_va) if self.config.AI_CALIBRATE else None
+        self._promote(pipe, calibrator, avail, len(X_tr),
+                      oos_acc=oos_acc, oos_auc=oos_auc,
+                      oos_base_rate=base_rate, oos_edge=oos_edge)
+        return True
+
+    def _passes_gate(self, oos_acc: float, oos_auc: Optional[float],
+                     base_rate: float) -> Tuple[bool, str]:
+        """Decide whether a challenger is fit to trade. Pure: (ok, reason).
+
+        ``base_rate`` is the fraction of UP labels in the validation window.
+        The trivial baseline is the majority class, which scores
+        ``max(base_rate, 1 - base_rate)``.
+
+        Kept separate from train() so the promotion policy can be exercised
+        directly, without fitting a model to test it.
+        """
+        floor = float(self.config.AI_MIN_OOS_ACCURACY)
+        if oos_acc < floor:
+            return False, ("oos accuracy %.3f below floor %.3f" % (oos_acc, floor))
+
+        if oos_auc is not None:
+            auc_floor = float(self.config.AI_MIN_OOS_AUC)
+            if oos_auc < auc_floor:
+                return False, ("oos auc %.3f below floor %.3f" % (oos_auc, auc_floor))
+
+        # The decisive check. A model that cannot match "always answer the
+        # majority class" has negative expectancy and is not allowed to trade,
+        # no matter how confident it looks. Defaults to 0.0; set
+        # AI_MIN_OOS_EDGE to a negative value to disable.
+        majority = "UP" if base_rate >= 0.5 else "DOWN"
+        baseline = max(base_rate, 1.0 - base_rate)
+        lift = oos_acc - baseline
+        min_edge_gate = float(self.config.AI_MIN_OOS_EDGE)
+        if lift < min_edge_gate:
+            return False, (
+                "oos lift %+.3f below floor %+.3f (acc %.3f vs baseline %.3f) "
+                "- model is worse than always answering %s"
+                % (lift, min_edge_gate, oos_acc, baseline, majority))
+
+        with self._lock:
+            incumbent_acc = self._last_oos_accuracy
+        tol = float(self.config.AI_PROMOTE_TOLERANCE)
+        if incumbent_acc is not None and oos_acc < incumbent_acc - tol:
+            return False, ("oos accuracy %.3f worse than incumbent %.3f"
+                           % (oos_acc, incumbent_acc))
+
+        return True, ""
+
+    @staticmethod
+    def _up_index(pipe: Pipeline) -> Optional[int]:
+        """Column index of the UP (label 1) probability, from the fitted model.
+
+        Never assume it is index 1 — the column order follows whatever classes
+        the estimator happened to observe.
+        """
+        try:
+            classes = np.asarray(pipe.named_steps["model"].classes_)
+        except Exception:
+            return None
+        hits = np.where(classes == 1)[0]
+        return int(hits[0]) if len(hits) else None
+
+    def _reject(self, reason: str) -> None:
+        """Record a rejected challenger. The live model is left untouched."""
+        with self._lock:
+            self._n_rejections += 1
+            self._last_reject_reason = reason
+        logger.warning("[AI] %s challenger rejected (%s) — keeping live model "
+                       "if one exists", self.symbol, reason)
+
+    def _promote(self, pipe, calibrator, avail, n_train,
+                 oos_acc: Optional[float] = None,
+                 oos_auc: Optional[float] = None,
+                 oos_base_rate: Optional[float] = None,
+                 oos_edge: Optional[float] = None) -> None:
+        """Atomically install a validated challenger as the live model."""
+        importance = _mean_feature_importance(pipe, avail)
+        with self._lock:
+            self._pipeline     = pipe
+            self._calibrator   = calibrator
+            self._feature_cols = avail
+            self._feature_importance = importance
+            self._trained      = True
+            self._n_trains    += 1
+            self._n_promotions += 1
+            self._last_oos_accuracy = oos_acc
+            self._last_oos_auc = oos_auc
+            self._last_oos_base_rate = oos_base_rate
+            self._last_oos_edge = oos_edge
+            self._last_reject_reason = ""
+        top = ", ".join("%s=%.3f" % (k, v) for k, v in list(importance.items())[:5])
+        logger.info(
+            "[AI] %s promoted run #%d | train=%d | oos_acc=%s | auc=%s | "
+            "base=%s | lift=%s | calibrated=%s | top: %s",
+            self.symbol, self._n_trains, n_train,
+            ("%.3f" % oos_acc) if oos_acc is not None else "n/a",
+            ("%.3f" % oos_auc) if oos_auc is not None else "n/a",
+            ("%.3f" % oos_base_rate) if oos_base_rate is not None else "n/a",
+            ("%+.3f" % oos_edge) if oos_edge is not None else "n/a",
+            calibrator is not None,
+            top or "n/a")
 
     def update(self, df: pd.DataFrame) -> None:
         """Retrain when due. Runs in a background thread so a slow fit
@@ -847,20 +1265,43 @@ class AIEnsemble:
         it always sees either the old or the fully-trained new model,
         never a half-written one."""
         self._bars_since_train += 1
-        if not self._trained:
-            # first-ever fit: do it synchronously, we have nothing to trade with yet
-            if self.train(df):
-                self._bars_since_train = 0
+        # The first attempt is immediate; after that the cadence governs
+        # REGARDLESS of whether a model was ever promoted. Testing
+        # `not self._trained` here would re-arm every single bar for a model
+        # that never clears the gate -- a full four-ensemble fit per candle,
+        # forever, in exchange for a model that still may not trade.
+        first_attempt = self._n_attempts == 0
+        if not (first_attempt
+                or self._bars_since_train >= self.config.AI_RETRAIN_BARS):
             return
-        if self._bars_since_train >= self.config.AI_RETRAIN_BARS:
-            self._bars_since_train = 0
-            snapshot = df.copy()
-            threading.Thread(target=self.train, args=(snapshot,), daemon=True).start()
+        self._bars_since_train = 0
+        # Count the ATTEMPT here, not inside train(). train() can raise
+        # before it reaches its own bookkeeping, and a counter that misses
+        # those raises leaves the model looking brand new forever -- which is
+        # exactly the spin-on-every-bar pathology this guard prevents.
+        self._n_attempts += 1
+        if first_attempt:
+            # Synchronous: we have nothing to trade with yet, and the caller
+            # is the main loop.
+            try:
+                self.train(df)
+            except Exception as exc:
+                logger.error("[AI] %s initial training error: %s", self.symbol, exc)
+            return
+        snapshot = df.copy()
+        threading.Thread(target=self.train, args=(snapshot,), daemon=True).start()
 
     def predict(self, df: pd.DataFrame) -> AISignal:
         with self._lock:
-            trained, pipeline, feature_cols = self._trained, self._pipeline, self._feature_cols
+            trained, pipeline, feature_cols = (
+                self._trained, self._pipeline, self._feature_cols)
+            calibrator = self._calibrator
+            oos_acc = self._last_oos_accuracy
+            oos_edge = self._last_oos_edge
+            reject_reason = self._last_reject_reason
         if not trained or pipeline is None:
+            if reject_reason:
+                return AISignal(0, 0.5, "model not promoted: %s" % reject_reason)
             return AISignal(0, 0.5, "model not trained yet")
         if len(df) < _MIN_PRED:
             return AISignal(0, 0.5, "not enough bars for prediction")
@@ -870,15 +1311,27 @@ class AIEnsemble:
             row     = feat_df[avail].iloc[[-1]]
             if row.isnull().any(axis=1).values[0]:
                 return AISignal(0, 0.5, "NaN in feature row")
-            proba   = pipeline.predict_proba(row.values)[0]
-            prob_up = float(proba[1])
+            up_idx = self._up_index(pipeline)
+            if up_idx is None:
+                return AISignal(0, 0.5, "model has no UP class")
+            raw_up = float(pipeline.predict_proba(row.values)[0][up_idx])
+            # Calibrated probability, not the raw soft-vote output. This is
+            # the number that drives the confluence score and the position
+            # size, so it has to mean what it says.
+            prob_up = _calibrated_prob(calibrator, raw_up)
             thr     = self.config.AI_CONFIDENCE_THRESHOLD
+            oos_txt = (" oos=%.3f" % oos_acc) if oos_acc is not None else ""
+            if oos_edge is not None:
+                oos_txt += " lift=%+.3f" % oos_edge
             if prob_up >= thr:
-                return AISignal(+1, prob_up, f"AI LONG  conf={prob_up:.3f}")
+                return AISignal(+1, prob_up,
+                                "AI LONG  conf=%.3f (raw %.3f)%s" % (prob_up, raw_up, oos_txt))
             if prob_up <= 1.0 - thr:
                 conf = 1.0 - prob_up
-                return AISignal(-1, conf, f"AI SHORT conf={conf:.3f}")
-            return AISignal(0, max(prob_up, 1.0 - prob_up), "AI uncertain")
+                return AISignal(-1, conf,
+                                "AI SHORT conf=%.3f (raw %.3f)%s" % (conf, raw_up, oos_txt))
+            return AISignal(0, max(prob_up, 1.0 - prob_up),
+                            "AI uncertain p=%.3f%s" % (prob_up, oos_txt))
         except Exception as exc:
             logger.error("[AI] %s predict error: %s", self.symbol, exc)
             return AISignal(0, 0.5, f"predict error: {exc}")
@@ -986,31 +1439,106 @@ def _structure_score(df: pd.DataFrame, direction: int) -> float:
     return min(1.0, max(0.0, room / 5.0))
 
 
+def _entry_quality_score(last: pd.Series) -> float:
+    """Score how well the entry aligns with value area (0-1).
+
+    A professional trader waits for price to pull back into EMA21/EMA50
+    before entering — they don't chase extended moves. This score is highest
+    when price is near a key EMA and at_value_area is true.
+
+    Returns a 0-1 score that feeds into _score_direction as 10 points.
+    """
+    at_val   = float(last.get("at_value_area", 0.5))
+    d21_atr  = abs(float(last.get("dist_ema21_atr", 1.0)))
+    d50_atr  = abs(float(last.get("dist_ema50_atr", 1.5)))
+    pinbar   = float(last.get("pinbar_wick", 0.0))
+
+    # Base: at value area gives good score
+    base = at_val * 0.6
+
+    # Proximity bonus: closer to EMA21 → higher quality pullback
+    prox21 = max(0.0, 1.0 - d21_atr / 2.0)  # 1.0 at EMA21, 0 at 2×ATR away
+    prox50 = max(0.0, 1.0 - d50_atr / 3.0)  # 1.0 at EMA50, 0 at 3×ATR away
+
+    # Pinbar bonus: strong rejection candle at value area = high quality
+    pinbar_bonus = min(0.2, abs(pinbar) * 0.3) if at_val > 0 else 0.0
+
+    return min(1.0, base + max(prox21, prox50) * 0.4 + pinbar_bonus)
+
+
+def _market_regime(last: pd.Series, cfg: dict) -> str:
+    """Classify the current market regime: TREND_UP, TREND_DOWN, or RANGING.
+
+    Uses ADX, regime_score (EMA50 slope × ADX), and Keltner squeeze.
+    A professional trader adapts strategy to regime — they don't trade
+    range-bound markets with trend-following entries.
+
+    Returns: 'TREND_UP' | 'TREND_DOWN' | 'RANGING'
+    """
+    adx        = float(last.get("adx", 0.0))
+    regime_s   = float(last.get("regime_score", 0.0))
+    kc_squeeze = float(last.get("kc_squeeze", 0.0))
+    adx_min    = cfg.get("adx_min", 18.0)
+
+    # During a squeeze, market is coiling — treat as ranging until breakout
+    if kc_squeeze > 0.5 and adx < adx_min:
+        return "RANGING"
+
+    if adx < adx_min:
+        return "RANGING"
+
+    if regime_s > 0.15:
+        return "TREND_UP"
+    if regime_s < -0.15:
+        return "TREND_DOWN"
+    return "RANGING"
+
+
 def _score_direction(ai_direction: int, ai_conf: float,
                      m15: pd.DataFrame, h1: pd.DataFrame, h4: pd.DataFrame,
                      direction: int, cfg: dict) -> float:
-    """Total confluence score (0-100) for the given direction."""
-    adx_val   = float(m15.iloc[-1].get("adx", 0.0))
+    """Total confluence score (0-100) for the given direction.
+
+    Professional weight allocation:
+      AI ensemble  45 pts  — the most predictive single component
+      H4 trend     20 pts  — higher timeframe = higher reliability
+      H1 trend     10 pts  — intermediate trend confirmation
+      Momentum     15 pts  — RSI / MACD / Stoch confluence
+      Entry quality 10 pts — pullback-to-value (EMA21/50), pinbar
+      ─────────────────────
+      Total        100 pts
+
+    Volume is folded into the regime context rather than scored separately;
+    it was previously too loosely correlated with direction to merit 10pts.
+    """
+    last       = m15.iloc[-1]
+    adx_val    = float(last.get("adx", 0.0))
     adx_strong = cfg.get("adx_strong", 30)
 
+    # AI component: 0-45 pts
     if ai_direction == direction:
-        ai_pts = ai_conf * 40.0
+        ai_pts = ai_conf * 45.0
     elif ai_direction == -direction:
         ai_pts = 0.0
     else:
-        ai_pts = 12.0
+        ai_pts = 13.5  # uncertain (0.5 × 27 midpoint)
 
+    # Trend component: H4 carries 20 pts, H1 carries 10 pts (total 30)
     h1_s  = _trend_score(h1, direction)
     h4_s  = _trend_score(h4, direction)
-    trend = h1_s * 12.0 + h4_s * 13.0
+    trend = h1_s * 10.0 + h4_s * 20.0
+
+    # ADX boost: strong trends get up to +25% on the trend component
     if adx_val >= adx_strong:
-        trend = min(25.0, trend * (1.0 + (adx_val - adx_strong) / 50.0))
+        trend = min(30.0, trend * (1.0 + (adx_val - adx_strong) / 50.0))
 
-    mom  = _momentum_score(m15.iloc[-1], direction) * 20.0
-    vol  = _volume_score(m15.iloc[-1]) * 10.0
-    stru = _structure_score(m15, direction) * 5.0
+    # Momentum: 15 pts
+    mom = _momentum_score(last, direction) * 15.0
 
-    return ai_pts + trend + mom + vol + stru
+    # Entry quality: 10 pts (pullback-to-value, pinbar at level)
+    eq = _entry_quality_score(last) * 10.0
+
+    return ai_pts + trend + mom + eq
 
 
 # ---------------------------------------------------------------------------
@@ -1032,11 +1560,20 @@ def _risk_scale(adx: float, cfg: dict) -> float:
 def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
               vol_min, vol_max, vol_step, cfg, adx=0.0, ai_conf=0.0):
     scale    = _risk_scale(adx, cfg) if cfg.get("dynamic_risk") else 1.0
-    # --- FEATURE 1: AI CONFIDENCE SIZING ---
-    high_threshold = 0.70 if _IS_AGGRESSIVE else 0.85
-    if ai_conf >= high_threshold:
+    # --- AI CONFIDENCE SIZING -------------------------------------------
+    # `ai_conf` is now a CALIBRATED probability (see AIEnsemble.predict),
+    # so it can be compared against a confidence level directly. Size is
+    # driven by the model's EDGE over a coin flip, not by how sure the model
+    # sounds: a model that is confidently wrong is the expensive case, and an
+    # unvalidated confidence must never be allowed to upsize a position.
+    high_tier = cfg.get("ai_size_high_conf", 0.85 if _IS_AGGRESSIVE else 0.70)
+    low_tier  = cfg.get("ai_size_low_conf", 0.60)
+    edge      = ai_conf - 0.5
+    min_edge  = cfg.get("ai_min_edge_for_size_up", 0.10)
+
+    if ai_conf >= high_tier and edge >= min_edge:
         scale *= 1.5
-    elif ai_conf > 0 and ai_conf <= 0.60:
+    elif 0.0 < ai_conf <= low_tier:
         scale *= 0.5
     risk_amt = account_equity * cfg["risk_per_trade"] * scale
     sl_ticks = sl_dist_price / (tick_size + 1e-10)
@@ -1068,6 +1605,7 @@ class StandaloneAIBot:
         self.trade_date: Optional[date] = None
         self._partial_stages: dict = {}   # ticket -> set of stage numbers done
         self._peak_profit: dict = {}      # ticket -> peak favourable move (price units), POWER-UP (B)
+        self._manual_sltp_failed: dict = {} # ticket -> epoch timestamp of last failed modification
         self._dd_positions_closed = False # one-shot equity protect close
 
         # --- GUI hook: thread-safe status snapshot. Only this bot thread
@@ -1284,6 +1822,17 @@ class StandaloneAIBot:
                 "AI_CONFIDENCE_THRESHOLD": self.cfg["ai_confidence_threshold"],
                 "AI_TRAIN_BARS":           self.cfg["ai_train_bars"],
                 "AI_RETRAIN_BARS":         self.cfg["ai_retrain_bars"],
+                # Model-validation + calibration knobs. These MUST be present
+                # here: AIEnsemble.train() reads them outside any try/except,
+                # so a missing key raises AttributeError straight into the
+                # main loop. Keep this in sync with CONFIG and core/settings.py.
+                "AI_VALIDATION_FRACTION":  self.cfg["ai_validation_fraction"],
+                "AI_MIN_OOS_ACCURACY":     self.cfg["ai_min_oos_accuracy"],
+                "AI_MIN_OOS_AUC":          self.cfg["ai_min_oos_auc"],
+                "AI_MIN_OOS_EDGE":         self.cfg["ai_min_oos_edge"],
+                "AI_PROMOTE_TOLERANCE":    self.cfg["ai_promote_tolerance"],
+                "AI_CALIBRATE":            self.cfg["ai_calibrate"],
+                "AI_MIN_EDGE_FOR_SIZE_UP": self.cfg["ai_min_edge_for_size_up"],
             })())
         self.ai.update(m15p)
         ai_sig       = self.ai.predict(m15p)
@@ -1331,14 +1880,39 @@ class StandaloneAIBot:
     def _margin_ok(self, price: float, volume: float, equity: float) -> bool:
         sym = self.cfg["symbol"]
         margin = mt5.order_calc_margin(mt5.ORDER_TYPE_BUY, sym, volume, price)
-        margin = float(margin) if margin else 0.0
-        acc = mt5.account_info()
-        used = float(acc.margin) if acc else 0.0
-        limit = equity * self.cfg.get("max_margin_usage", 0.5)
-        if margin + used > limit:
-            logger.warning("Margin guard: need %.2f + used %.2f > limit %.2f",
-                           margin, used, limit)
+        if margin is None:
+            # API failure — fail safe: block the order rather than silently pass
+            logger.warning(
+                "Margin guard: order_calc_margin(%s, vol=%.2f, price=%.5f) returned None "
+                "(MT5 error: %s) – blocking order",
+                sym, volume, price,
+                mt5.last_error() if hasattr(mt5, "last_error") else "N/A",
+            )
             return False
+        margin = float(margin)
+        acc = mt5.account_info()
+        used      = float(acc.margin)       if acc else 0.0
+        free      = float(acc.margin_free)  if acc else 0.0
+        limit     = equity * self.cfg.get("max_margin_usage", 0.5)
+
+        # Guard 1 – configured margin-usage ceiling
+        if margin + used > limit:
+            logger.warning(
+                "Margin guard: need=%.2f + used=%.2f > limit=%.2f (%.0f%% of equity=%.2f)",
+                margin, used, limit,
+                self.cfg.get("max_margin_usage", 0.5) * 100, equity,
+            )
+            return False
+
+        # Guard 2 – broker's actual free margin (prevents retcode=10026)
+        if margin > free:
+            logger.warning(
+                "Margin guard: required=%.2f > broker free_margin=%.2f (vol=%.2f, price=%.5f) "
+                "– would cause NO_MONEY (10026)",
+                margin, free, volume, price,
+            )
+            return False
+
         return True
 
     def _spread_ok(self, info, tick, atr: float = 0.0) -> bool:
@@ -1360,6 +1934,20 @@ class StandaloneAIBot:
                         spread_price, (spread_price / atr) * 100.0, atr, max_spread_atr_ratio * 100.0)
             return False
         return True
+
+    def _get_filling_type(self, symbol: str) -> int:
+        """Resolve a supported filling type for the broker symbol."""
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            return getattr(mt5, "ORDER_FILLING_IOC", 1)
+        filling_mode = getattr(info, "filling_mode", 0)
+        # Bit 1 (value 2) = SYMBOL_FILLING_IOC
+        if filling_mode & 2:
+            return getattr(mt5, "ORDER_FILLING_IOC", 1)
+        # Bit 0 (value 1) = SYMBOL_FILLING_FOK
+        elif filling_mode & 1:
+            return getattr(mt5, "ORDER_FILLING_FOK", 0)
+        return getattr(mt5, "ORDER_FILLING_RETURN", 2)
 
     # --------------------------------------------------------------
     def _send_order(self, direction: int, equity: float, m15p: pd.DataFrame, ai_conf: float = 0.0) -> bool:
@@ -1408,19 +1996,24 @@ class StandaloneAIBot:
         if not self._margin_ok(price, volume, equity):
             return False
 
+        digits = getattr(info, "digits", 2) or 2
+        price = round(float(price), digits)
+        sl = round(float(sl), digits)
+        tp = round(float(tp), digits)
+
         req = {
             "action":       mt5.TRADE_ACTION_DEAL,
             "symbol":       sym,
             "volume":       float(volume),
             "type":         mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL,
-            "price":        float(price),
-            "sl":           float(sl),
-            "tp":           float(tp),
+            "price":        price,
+            "sl":           sl,
+            "tp":           tp,
             "deviation":    self.cfg.get("deviation", 20),
             "magic":        self.cfg.get("magic_number", 888999),
             "comment":      f"AI {'BUY' if direction == 1 else 'SELL'}",
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._get_filling_type(sym),
         }
         if self.cfg.get("dry_run"):
             logger.info("[DRY-RUN] %s vol=%.2f sl=%.5f tp=%.5f",
@@ -1442,12 +2035,44 @@ class StandaloneAIBot:
                                              mt5.TRADE_RETCODE_PRICE_OFF):
                 tick = mt5.symbol_info_tick(sym)
                 if tick:
-                    price = tick.ask if direction == 1 else tick.bid
-                    req["price"] = float(price)
+                    price = round(float(tick.ask if direction == 1 else tick.bid), digits)
+                    req["price"] = price
                 time.sleep(0.3)
                 continue
-            logger.error("Order failed: retcode=%s",
-                         result.retcode if result else "None")
+
+            # Fallback filling modes on invalid fill or None
+            invalid_fill_code = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030)
+            if (result and result.retcode == invalid_fill_code) or (result is None and attempt == 0):
+                fallback_success = False
+                for alt_fill in (getattr(mt5, "ORDER_FILLING_RETURN", 2),
+                                 getattr(mt5, "ORDER_FILLING_FOK", 0),
+                                 getattr(mt5, "ORDER_FILLING_IOC", 1)):
+                    if alt_fill != req["type_filling"]:
+                        req["type_filling"] = alt_fill
+                        alt_res = mt5.order_send(req)
+                        if alt_res and alt_res.retcode == mt5.TRADE_RETCODE_DONE:
+                            self.trades_today += 1
+                            msg = (f"✅ {'BUY' if direction==1 else 'SELL'} {sym} "
+                                   f"vol={volume:.2f} @ {price:.5f}  SL={sl:.5f}  TP={tp:.5f}")
+                            logger.info(msg)
+                            self.notifier.send(msg)
+                            return True
+
+            retcode_str = result.retcode if result else "None"
+            last_err = mt5.last_error() if hasattr(mt5, "last_error") else "N/A"
+            NO_MONEY = getattr(mt5, "TRADE_RETCODE_NO_MONEY", 10026)
+            if result and result.retcode == NO_MONEY:
+                acc = mt5.account_info()
+                free = float(acc.margin_free) if acc else -1.0
+                logger.error(
+                    "Order failed: NO_MONEY (10026) – vol=%.2f price=%.5f free_margin=%.2f "
+                    "equity=%.2f mt5_error=%s  "
+                    "(Hint: _margin_ok should have blocked this — check order_calc_margin availability)",
+                    volume, price, free, equity, last_err,
+                )
+            else:
+                logger.error("Order failed: retcode=%s mt5_error=%s",
+                             retcode_str, last_err)
             break
         return False
 
@@ -1466,18 +2091,22 @@ class StandaloneAIBot:
         if tick is None:
             return False
         price = tick.bid if is_buy else tick.ask
+        info = mt5.symbol_info(pos.symbol)
+        digits = getattr(info, "digits", 2) or 2
+        price = round(float(price), digits)
+
         req = {
             "action":       mt5.TRADE_ACTION_DEAL,
             "symbol":       pos.symbol,
             "volume":       float(pos.volume),
             "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
             "position":     pos.ticket,
-            "price":        float(price),
+            "price":        price,
             "deviation":    self.cfg.get("deviation", 20),
-            "magic":        self.cfg.get("magic_number", 888999),
+            "magic":        getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
             "comment":      "close:" + reason[:24],
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._get_filling_type(pos.symbol),
         }
         for attempt in range(self.cfg.get("max_slippage_retries", 3)):
             result = mt5.order_send(req)
@@ -1496,12 +2125,36 @@ class StandaloneAIBot:
                                              mt5.TRADE_RETCODE_PRICE_OFF):
                 tick = mt5.symbol_info_tick(pos.symbol)
                 if tick:
-                    price = tick.bid if is_buy else tick.ask
-                    req["price"] = float(price)
+                    price = round(float(tick.bid if is_buy else tick.ask), digits)
+                    req["price"] = price
                 time.sleep(0.3)
                 continue
-            logger.error("Close failed ticket=%s retcode=%s",
-                         pos.ticket, result.retcode if result else "None")
+
+            # Fallback filling modes on invalid fill or None
+            invalid_fill_code = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030)
+            if (result and result.retcode == invalid_fill_code) or (result is None and attempt == 0):
+                fallback_success = False
+                for alt_fill in (getattr(mt5, "ORDER_FILLING_RETURN", 2),
+                                 getattr(mt5, "ORDER_FILLING_FOK", 0),
+                                 getattr(mt5, "ORDER_FILLING_IOC", 1)):
+                    if alt_fill != req["type_filling"]:
+                        req["type_filling"] = alt_fill
+                        alt_res = mt5.order_send(req)
+                        if alt_res and alt_res.retcode == mt5.TRADE_RETCODE_DONE:
+                            pnl = pos.profit + pos.swap
+                            msg = (f"🔒 CLOSE {pos.symbol} ticket={pos.ticket} "
+                                   f"pnl={pnl:+.2f} reason={reason}")
+                            logger.info(msg)
+                            self.notifier.send(msg)
+                            self._peak_profit.pop(pos.ticket, None)
+                            self._partial_stages.pop(pos.ticket, None)
+                            self._record_trade_result(pnl)
+                            return True
+
+            retcode_str = result.retcode if result else "None"
+            last_err = mt5.last_error() if hasattr(mt5, "last_error") else "N/A"
+            logger.error("Close failed ticket=%s retcode=%s mt5_error=%s reason=%s",
+                         pos.ticket, retcode_str, last_err, reason)
             break
         return False
 
@@ -1510,37 +2163,70 @@ class StandaloneAIBot:
             self._close_position(pos, reason)
 
     # --------------------------------------------------------------
-    def _modify_sltp(self, pos, new_sl: float, new_tp: float) -> None:
+    def _modify_sltp(self, pos, new_sl: float, new_tp: float) -> bool:
         if self.cfg.get("dry_run"):
             logger.info("[DRY-RUN] Modify SLTP ticket=%s → SL:%.5f TP:%.5f", pos.ticket, new_sl, new_tp)
-            return
-        req = {
-            "action":   __import__("MetaTrader5").TRADE_ACTION_SLTP,
-            "symbol":   pos.symbol,
-            "position": pos.ticket,
-            "sl":       float(new_sl),
-            "tp":       float(new_tp),
-            "magic":    getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
-        }
-        result = __import__("MetaTrader5").order_send(req)
-        if result and result.retcode == __import__("MetaTrader5").TRADE_RETCODE_DONE:
-            logger.info("Modified SLTP ticket=%s → SL:%.5f TP:%.5f", pos.ticket, new_sl, new_tp)
+            return True
+        info = mt5.symbol_info(pos.symbol)
+        digits = getattr(info, "digits", 2) or 2
+        sl_val = round(float(new_sl), digits) if new_sl > 0 else 0.0
+        tp_val = round(float(new_tp), digits) if new_tp > 0 else 0.0
 
-    def _modify_sl(self, pos, new_sl: float) -> None:
-        if self.cfg.get("dry_run"):
-            logger.info("[DRY-RUN] Modify SL ticket=%s → %.5f", pos.ticket, new_sl)
-            return
+        stops_level = getattr(info, "trade_stops_level", 0) or 0
+        point = getattr(info, "point", 0.01) or 0.01
+        min_distance = stops_level * point
+        tick = mt5.symbol_info_tick(pos.symbol)
+        if tick and min_distance > 0:
+            is_buy = pos.type == mt5.ORDER_TYPE_BUY
+            cur_price = tick.bid if is_buy else tick.ask
+            if sl_val > 0 and abs(cur_price - sl_val) < min_distance:
+                sl_val = round(cur_price - min_distance if is_buy else cur_price + min_distance, digits)
+            if tp_val > 0 and abs(cur_price - tp_val) < min_distance:
+                tp_val = round(cur_price + min_distance if is_buy else cur_price - min_distance, digits)
+
         req = {
             "action":   mt5.TRADE_ACTION_SLTP,
             "symbol":   pos.symbol,
             "position": pos.ticket,
-            "sl":       float(new_sl),
-            "tp":       float(pos.tp),
+            "sl":       sl_val,
+            "tp":       tp_val,
             "magic":    getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
         }
         result = mt5.order_send(req)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info("Modified SL ticket=%s → %.5f", pos.ticket, new_sl)
+            logger.info("Modified SLTP ticket=%s → SL:%.5f TP:%.5f", pos.ticket, sl_val, tp_val)
+            return True
+        retcode_str = result.retcode if result else "None"
+        last_err = mt5.last_error() if hasattr(mt5, "last_error") else "N/A"
+        logger.error("Modify SLTP failed ticket=%s retcode=%s mt5_error=%s (SL=%.5f TP=%.5f)",
+                     pos.ticket, retcode_str, last_err, sl_val, tp_val)
+        return False
+
+    def _modify_sl(self, pos, new_sl: float) -> bool:
+        if self.cfg.get("dry_run"):
+            logger.info("[DRY-RUN] Modify SL ticket=%s → %.5f", pos.ticket, new_sl)
+            return True
+        info = mt5.symbol_info(pos.symbol)
+        digits = getattr(info, "digits", 2) or 2
+        sl_val = round(float(new_sl), digits)
+
+        req = {
+            "action":   mt5.TRADE_ACTION_SLTP,
+            "symbol":   pos.symbol,
+            "position": pos.ticket,
+            "sl":       sl_val,
+            "tp":       round(float(pos.tp), digits),
+            "magic":    getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
+        }
+        result = mt5.order_send(req)
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info("Modified SL ticket=%s → %.5f", pos.ticket, sl_val)
+            return True
+        retcode_str = result.retcode if result else "None"
+        last_err = mt5.last_error() if hasattr(mt5, "last_error") else "N/A"
+        logger.error("Modify SL failed ticket=%s retcode=%s mt5_error=%s (SL=%.5f)",
+                     pos.ticket, retcode_str, last_err, sl_val)
+        return False
 
     def _partial_close(self, pos, volume: float, stage: int) -> None:
         if self.cfg.get("dry_run"):
@@ -1553,18 +2239,21 @@ class StandaloneAIBot:
         if tick is None:
             return
         price = tick.bid if is_buy else tick.ask
+        info = mt5.symbol_info(pos.symbol)
+        digits = getattr(info, "digits", 2) or 2
+        price = round(float(price), digits)
         req = {
             "action":       mt5.TRADE_ACTION_DEAL,
             "symbol":       pos.symbol,
             "volume":       float(volume),
             "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
             "position":     pos.ticket,
-            "price":        float(price),
+            "price":        price,
             "deviation":    self.cfg.get("deviation", 20),
-            "magic":        self.cfg.get("magic_number", 888999),
+            "magic":        getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
             "comment":      f"partial{stage}",
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._get_filling_type(pos.symbol),
         }
         result = mt5.order_send(req)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -1572,8 +2261,10 @@ class StandaloneAIBot:
             logger.info("Partial close ticket=%s vol=%.2f stage=%d executed",
                         pos.ticket, volume, stage)
         else:
-            logger.error("Partial close failed: %s",
-                         result.retcode if result else "None")
+            retcode_str = result.retcode if result else "None"
+            last_err = mt5.last_error() if hasattr(mt5, "last_error") else "N/A"
+            logger.error("Partial close failed ticket=%s: retcode=%s mt5_error=%s",
+                         pos.ticket, retcode_str, last_err)
 
     # --------------------------------------------------------------
     def _h1_trend_flipped(self, h1p, direction: int) -> bool:
@@ -1621,7 +2312,7 @@ class StandaloneAIBot:
         # Prune tracking dicts for tickets that are no longer open, so they
         # don't grow unbounded over a long-running session.
         open_tickets = {pos.ticket for pos in positions}
-        for _tracked in (self._peak_profit, self._partial_stages):
+        for _tracked in (self._peak_profit, self._partial_stages, self._manual_sltp_failed):
             for ticket in list(_tracked.keys()):
                 if ticket not in open_tickets:
                     _tracked.pop(ticket, None)
@@ -1636,17 +2327,30 @@ class StandaloneAIBot:
                            else (pos.price_open - close_price))
             floating_pnl = pos.profit + pos.swap
 
-            # --- AI MANUAL TRADE PROTECTION (SL + TP) ---
-            if getattr(pos, "magic", 1) == 0 and self.cfg.get("ai_protect_manual_trades", True):
-                if pos.sl == 0.0 or pos.tp == 0.0:
-                    sl_dist = self.cfg.get("manual_trade_sl_atr", 2.0) * atr
-                    new_sl = pos.sl if pos.sl > 0 else (pos.price_open - sl_dist if direction == 1 else pos.price_open + sl_dist)
-                    
-                    tp_rr = self.cfg.get("tp_rr_ratio", 2.0)
-                    new_tp = pos.tp if pos.tp > 0 else (pos.price_open + (sl_dist * tp_rr) if direction == 1 else pos.price_open - (sl_dist * tp_rr))
-                    
-                    self._modify_sltp(pos, new_sl, new_tp)
-                    logger.info("[%s] 🧠 Applied AI SL (%.5f) and TP (%.5f) to manual trade #%d", self.cfg["symbol"], new_sl, new_tp, pos.ticket)
+            # --- MANUAL TRADE HANDLING ---
+            bot_magic = self.cfg.get("magic_number", 888999)
+            is_manual = (getattr(pos, "magic", 0) != bot_magic)
+            if is_manual:
+                if self.cfg.get("ai_protect_manual_trades", True):
+                    if pos.sl == 0.0 or pos.tp == 0.0:
+                        now = time.time()
+                        last_attempt = self._manual_sltp_failed.get(pos.ticket, 0)
+                        if now - last_attempt >= 30.0:  # Throttled retry on failure
+                            sl_dist = self.cfg.get("manual_trade_sl_atr", 2.0) * atr
+                            new_sl = pos.sl if pos.sl > 0 else (pos.price_open - sl_dist if direction == 1 else pos.price_open + sl_dist)
+                            tp_rr = self.cfg.get("tp_rr_ratio", 2.0)
+                            new_tp = pos.tp if pos.tp > 0 else (pos.price_open + (sl_dist * tp_rr) if direction == 1 else pos.price_open - (sl_dist * tp_rr))
+                            if self._modify_sltp(pos, new_sl, new_tp):
+                                logger.info("[%s] 🧠 Applied AI SL (%.5f) and TP (%.5f) to manual trade #%d",
+                                            self.cfg["symbol"], new_sl, new_tp, pos.ticket)
+                                self._manual_sltp_failed.pop(pos.ticket, None)
+                            else:
+                                self._manual_sltp_failed[pos.ticket] = now
+
+                # Protect Only / Observe Only: Never close manual positions with bot strategy signals!
+                # The manual trade is protected by the broker SL/TP set above.
+                if not self.cfg.get("manage_manual_trades_full", False):
+                    continue
 
             # --- INTELLIGENT AI EARLY EXIT (Don't wait for hard DD) ---
             last_dir = self.status.get("last_direction", 0)
@@ -1672,7 +2376,6 @@ class StandaloneAIBot:
                     continue
                     
             # --- TIME DECAY (Cut losers early) ---
-            import time
             current_time = time.time()
             if getattr(pos, "time", 0) > 0 and (current_time - pos.time) > self.cfg.get("cut_losing_after_hours", 12) * 3600:
                 if floating_pnl <= 0:
@@ -1813,7 +2516,11 @@ class StandaloneAIBot:
         positions = self._open_positions()
         if not positions:
             return
+        bot_magic = self.cfg.get("magic_number", 888999)
+        full_mgmt = self.cfg.get("manage_manual_trades_full", False)
         for p in positions:
+            if not full_mgmt and getattr(p, "magic", 0) != bot_magic:
+                continue
             if p.profit > 0:
                 self._close_position(p, reason, p.profit)
 
@@ -1824,7 +2531,11 @@ class StandaloneAIBot:
         threshold = self.cfg.get("opposite_signal_min_score", 65)
         if score < threshold:
             return
+        bot_magic = self.cfg.get("magic_number", 888999)
+        full_mgmt = self.cfg.get("manage_manual_trades_full", False)
         for pos in self._open_positions():
+            if not full_mgmt and getattr(pos, "magic", 0) != bot_magic:
+                continue
             pos_dir = 1 if pos.type == mt5.ORDER_TYPE_BUY else -1
             if pos_dir == -direction:
                 self._close_position(pos, "opposite signal")
