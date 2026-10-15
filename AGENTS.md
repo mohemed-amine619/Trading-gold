@@ -9,30 +9,38 @@ PowerShell tooling lives in `scripts/windows/`; see `README.md` and
 
 ## Repo state — read this first
 
-**This repo is mid-migration and only 9 files are git-tracked.** `git ls-files` returns only:
-`.gitignore`, `config.py`, `gui.py`, `position_dashboard.py`, `requirements.txt`, `run.py`, `build.bat`, `AI_Trading_Bot.spec`, `PositionDashboard.spec`.
+**All 132 files are git-tracked.** `run.py` is now ~3,160 lines. `git status`
+is clean apart from new location-layer work.
 
-Everything else — `core/`, `api/`, `tests/`, `alembic/`, `docs/`, `dashboard.html`, `.env.example`, `run_pro.py` — is **untracked**. Do not `git clean -fdx` or assume a fresh clone reproduces the app. `git status` shows ~35 entries; that is expected.
+Note `trading_bot.log` is a **log file**, not a database — the old
+"second shadow SQLite file" described below has been resolved: `run.py` now
+writes its `trades` table into the single configured database via
+`_get_sqlite_db_path()`, which is `data/trading.db`. There is one SQLite file.
 
-### Two parallel systems, do not confuse them
+### Two systems, do not confuse them
 
 | | Legacy monolith | Modular engine |
 |---|---|---|
-| Files | `run.py` (1840 lines), `run_pro.py` (1608, untracked) | `core/`, `api/` |
-| Imports `core/`? | **No** — zero `from core` imports | n/a |
-| Tests? | **None** — no test references either file | 63 tests, all passing |
+| Files | `run.py` (~3,160 lines) | `core/`, `api/` |
+| Imports `core/`? | **Yes, for market location only** — `core/market/location.py`, imported defensively at line ~108 | n/a |
+| Tests? | Integration-tested via a stubbed MT5 module | 458 tests, all passing |
 | Actually run today | Yes — this is the production bot | Not wired into any entrypoint |
 
 - **`run.py` is the live bot.** `gui.py:226` does `import run`; `fix_mt5.bat:17` runs `py run.py`.
-- **`run_pro.py` is a stale fork** — lines 1–782 are byte-identical to `run.py`, and `run.py` is a strict superset (`step()` extracted, `_modify_sltp`, multi-symbol manager, AI-confidence sizing). Never edit `run_pro.py`; port changes into `run.py`. Its docstring still says "Run with: `python run.py`".
-- `core/` + `api/` is the intended target architecture (`docs/ARCHITECTURE.md`), well tested but **not reachable from any entrypoint**. `core/settings.py:264 as_legacy_config()` exists to bridge them and is currently called by nothing but a test.
+- `run.py` now consumes the market-location layer (structure, S/R zones,
+  liquidity, range position) for its entry veto, stop placement and profit
+  target. Everything else — scoring, AI, risk sizing, management — is still
+  self-contained in `run.py`.
+- `core/trading/orchestrator.py` wires the *entire* `core/` stack and is tested
+  end-to-end, but is **not** an entrypoint. Two consumers of the same location
+  engine, not two implementations.
 
 ## Commands
 
 Run everything with `.venv/bin/python` — the repo has two virtualenvs and only `.venv` has pytest.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 217 passed
+.venv/bin/python -m pytest tests/ -q          # 458 passed
 .venv/bin/python -m pytest tests/unit/test_risk_engine.py -q   # single file
 .venv/bin/python -m pytest tests/unit -k approve -q            # single test by name
 ```
@@ -70,17 +78,37 @@ Do not hardcode gold assumptions. This is an explicit project mandate.
 - The legacy `core/database/models.py` `Symbol` table is still unpopulated — the new `core/instruments/` registry is the source of truth going forward. No consumer is wired into `run.py` yet.
 - Never claim an instrument is supported until a test demonstrates it.
 
-## Dead code — do not run these
+## Dead code — cleaned up
 
-These are one-shot, already-applied, **non-idempotent** scripts that rewrite source files in place. Re-running corrupts the tree:
+The one-shot, already-applied, **non-idempotent** patch scripts that used to sit
+at the repo root have been **removed**, together with the `run_pro.py` fork,
+`get-pip.py` and the dangerous root `test_mt5.py`:
 
-`modify_html.py`, `update_dashboard_settings.py`, `update_manager.py`, `update_status.py`, `patch_dashboard_controls.py`, `patch_dashboard_controls_2.py`, `patch_position_manager.py`, `manual_protect.py`
+`modify_html.py`, `update_dashboard_settings.py`, `update_manager.py`,
+`update_status.py`, `patch_dashboard_controls.py`,
+`patch_dashboard_controls_2.py`, `patch_position_manager.py`, `manual_protect.py`,
+`run_pro.py`, `get-pip.py`, `test_mt5.py`
 
-- **`update_manager.py:93-94` is the worst**: it slices `content[:idx]`, truncating `core/position/manager.py` and deleting ~154 lines including `get_total_floating_pnl`.
-- `patch_position_manager.py`'s regex target sits inside its own replacement, so re-application duplicates lines — visible damage already exists at `core/position/manager.py:55-59` (`trail_activate_rr` / `trail_distance_rr` assigned twice). Harmless (idempotent values) but a marker for this failure mode.
-- Make source edits directly with the edit tool, never by running a patcher.
+They rewrote source files in place and were actively dangerous:
+`update_manager.py:93-94` sliced `content[:idx]`, truncating
+`core/position/manager.py` and deleting ~154 lines including
+`get_total_floating_pnl`. `test_mt5.py` called `mt5.initialize()` at import, so
+on Windows (where MetaTrader5 *is* installed) collecting it would open the live
+terminal.
 
-Also dead: root `test_position_manager.py` (empty `unittest.TestCase`, collects 0 items — the real one is `tests/test_position_manager.py`), `dashboard/` (empty), `api/routers/` (empty `__init__.py`), `get-pip.py`. `create_tables.py` is superseded by Alembic but is harmless (`create_all`, idempotent).
+Also removed: the empty `api/routers/` package (imported by nothing), the empty
+`tests/e2e/` directory, and a stale byte-identical duplicate `trading.db` at the
+repo root. **The live database is `data/trading.db`** — that is what
+`_get_sqlite_db_path()` resolves and what `core/settings.py` defaults to. Only
+one SQLite file should exist; do not recreate a second at the root.
+
+`core/notifications/__init__.py` and `core/position/manager_orig.py` are empty
+but still present. Do not confuse an empty **package marker** with dead code —
+deleting any `__init__.py` breaks the package it anchors.
+
+**If any of the removed patchers reappear, do not run them.** Make source edits
+directly with the edit tool, never by running a script that rewrites files in
+place.
 
 ## Config duplication trap
 
@@ -153,6 +181,10 @@ core/
   mt5/                 adapter.py (MT5Adapter ABC, RealMT5Adapter, MockMT5Adapter)
                        types.py (dataclasses), connection.py (reconnect/backoff)
   market/              engine.py, pipeline.py, intelligence.py (regime classifier)
+                       swings.py (fractal pivots), structure.py (HH/HL, BOS/CHoCH)
+                       levels.py (scored S/R zones), liquidity.py (stop pools, sweeps)
+                       location.py (MarketLocation, entry_gate, structural_stop)
+                       series.py (shared resolve_atr)
   instruments/         model.py (InstrumentSpec/Registry), adapter.py (broker mapping)
   strategy/            base.py, ensemble.py, strategies.py
   ai/                  decision.py (LLM), provider.py
@@ -160,6 +192,8 @@ core/
   execution/engine.py  send_order w/ requote retry, modify_position, close_position
   position/            manager.py (reconcile/trailing/breakeven), trailing.py (pure funcs),
                        decision.py (PNLDecisionEngine), manager_orig.py (empty, delete)
+  trading/             orchestrator.py — candles → location → signal → gate → stop →
+                       target → risk → execution. THE MISSING WIRE (see below)
   backtesting/engine.py  notifications/ (EMPTY — 0 bytes)  events/log.py
 api/
   main.py              FastAPI app factory, lifespan inits async DB
@@ -168,13 +202,49 @@ api/
 
 Data flow (per `docs/ARCHITECTURE.md:275`): MarketEngine → StrategyEnsemble → RiskEngine.approve → ExecutionEngine → MT5Adapter → PositionManager → events/DB.
 
+### Market location — the "where is the market" layer (NEW)
+
+`core/market/location.py` is now the entry point for spatial reasoning.
+`analyse_location(df)` returns a `MarketLocation` carrying range position
+(premium/discount), Fibonacci, scored S/R zones, liquidity pools, and market
+structure. Two methods decide things:
+
+- **`entry_gate(direction)`** — a *veto*, not a scorer. Location can only remove
+  trades, never add them, which is why the existing EMA/RSI/MACD strategies
+  survive unchanged. **The rule is regime-aware**: strict premium/discount in a
+  ranging market; permitted *with* the trend; counter-trend only at the
+  counter-extreme. Do **not** make it strict everywhere — a confirmed uptrend
+  sits at the top of its own swing range by construction, so a strict rule
+  blocks nearly every trend trade and inverts the meaning of a new high.
+- **`structural_stop(entry, direction)`** — places the stop beyond the swing
+  that invalidates the idea, which is what `Signal.invalidation` could only
+  describe in prose. Returns `None` when no defensible stop exists; callers
+  must refuse rather than substitute.
+
+Hard rules, each guarded by a test:
+- No confirmed range ⇒ `UNDEFINED` ⇒ **block**. Never treat as neutral.
+- Price outside the range is a breakdown/breakout, **not** an extreme; position
+  is clamped to `[0,1]`.
+- Every tolerance is an **ATR multiple**, never a fixed point count — the
+  multi-asset mandate applies to all of this code.
+- Level/stop prices snap to the broker grid only when `trade_tick_size`/`point`
+  was supplied; otherwise they stay unrounded.
+
 Notable: `core/position/trailing.py` holds **pure functions** with no broker dependency — keep it pure, it's the easiest thing to test and is the safety-critical "never widen a stop" rule.
+
+### Wiring status — still not an entrypoint
+
+`core/trading/orchestrator.py` wires the whole stack and is tested end-to-end
+(candles → risk approval → order sent), but **`run.py` still imports nothing
+from `core/`** and remains the live bot. The location layer therefore does not
+yet affect a single real order. That gap is deliberate and documented, not
+overlooked — see `docs/PROJECT_STATUS.md` §0.0.
 
 ## Dashboard
 
 `dashboard.html` (94 KB, untracked) is served by `run.py:1633` from a **nested FastAPI app defined inside `if __name__ == "__main__"`** — it is not importable, so you cannot test it directly.
 
-- It expects `run.py`'s response shapes: `{status, markets, mode}`, `{positions}`, `{data}`, `{history}` (`dashboard.html:1050-1076`). `run_pro.py` serves different shapes → **`dashboard.html` is incompatible with `run_pro.py`.**
+- It expects `run.py`'s response shapes: `{status, markets, mode}`, `{positions}`, `{data}`, `{history}` (`dashboard.html:1050-1076`). The `markets` entries now also carry additive `locBias`, `locPosition`, `locRangeLow`, `locRangeHigh`, `locStructure`, `locSupport`, `locResistance` keys; the UI ignores unknown keys, so this is backward-compatible.
 - Routes `dashboard.html` calls that **nothing serves**: `/api/config/{section}` (only `api/config_router.py` has it, and that app is separate), `/api/emergency-stop` (it calls this but `run.py` exposes `/api/control`). Expect silent 404s.
 - `api/main.py` is a **second, separate FastAPI app** (`version="2.0"`) that also serves `dashboard.html`'s path space. Two apps, one port, no auth on either. `dashboard.html` effectively targets `run.py`.
 - CORS is `allow_origins=["*"]` with `allow_credentials=True` in both apps (`api/main.py:25-30`) — insecure; note it if touching auth.
@@ -182,10 +252,15 @@ Notable: `core/position/trailing.py` holds **pure functions** with no broker dep
 
 ## Database
 
-- `trading.db` (SQLite, WAL) is the `core/` DB per `core/settings.py:102`. **`trading.db` is NOT in `.gitignore`** — `.env`, `venv/`, `.venv/`, `__pycache__`, `logs/` are. A `git add .` will commit live account/trade data. Add it before committing.
-- Alembic is wired (`alembic.ini`, `alembic/env.py` reads `get_settings().database_url`). The first real migration now exists: `alembic/versions/aedbfe3f600c_initial_schema.py` (19 tables). Note `alembic/script.py.mako` was missing entirely and has been added — autogenerate failed before.
-- `run.py` writes trade history to a **second, shadow SQLite file `trading_bot.db`** via raw `sqlite3` (`run.py:875` — `CREATE TABLE IF NOT EXISTS trades`), completely bypassing SQLAlchemy and `core/database/models.py`. It's created lazily on the first closed trade, so `/api/history` (`run.py:1790`) returns `{"history": []}` from a bare `except` until then. Different filename from `trading.db`, and also not gitignored. Decide on one DB and delete the other — do not leave two divergent schemas.
-- On disk right now: `trading.db`, `trading.db-shm`, `trading.db-wal` are untracked and unignored. Treat all three as sensitive.
+- `run.py` writes trade history to the same configured database via raw
+  `sqlite3` (`CREATE TABLE IF NOT EXISTS trades`), bypassing SQLAlchemy and
+  `core/database/models.py`. The table is created lazily on the first closed
+  trade, so `/api/history` returns `{"history": []}` from a bare `except` until
+  then. The table therefore exists outside the Alembic-managed schema — a
+  known wart, but only one database file.
+- The live DB is `data/trading.db`. `*.db`, `*.db-shm` and `*.db-wal` are all in
+  `.gitignore`, so `git add .` will not commit trade data. Treat the file and
+  its WAL sidecars as sensitive regardless.
 - Sync session for the trading loop (`get_sync_db`), async for FastAPI (`get_async_db`). `get_db_dependency` commits and then the handler may commit again (`api/config_router.py:66`).
 
 ## Conventions

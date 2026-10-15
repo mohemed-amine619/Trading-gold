@@ -27,8 +27,7 @@ Scripts/
 # -----------------------------------------------------------------------------
 build/
 dist/
-*.spec.bak
-# Keep trading_bot.spec (it's part of the project)
+# Keep the hand-written .spec files (they are build config, not output)
 !trading_bot.spec
 
 # -----------------------------------------------------------------------------
@@ -36,7 +35,6 @@ dist/
 # -----------------------------------------------------------------------------
 *.egg
 *.egg-info/
-dist/
 .eggs/
 MANIFEST
 pip-wheel-metadata/
@@ -60,7 +58,6 @@ secrets.json
 # -----------------------------------------------------------------------------
 logs/
 *.log
-trading_bot.log
 
 # -----------------------------------------------------------------------------
 # OS artefacts
@@ -148,38 +145,16 @@ data/*.db-shm
 data/*.db-wal
 
 # -----------------------------------------------------------------------------
-# One-shot source patchers — DO NOT COMMIT, DO NOT RUN
-# -----------------------------------------------------------------------------
-# These are already-applied, non-idempotent scripts that rewrite source files
-# in place. Re-running them corrupts the tree (update_manager.py truncates
-# core/position/manager.py; patch_position_manager.py duplicates lines).
-# They are kept locally for reference only. See AGENTS.md "Dead code".
-modify_html.py
-update_dashboard_settings.py
-update_manager.py
-update_status.py
-patch_dashboard_controls.py
-patch_dashboard_controls_2.py
-patch_position_manager.py
-manual_protect.py
-
-# Stale fork of run.py (untracked; run.py is the live bot and a strict
-# superset). Local reference only.
-run_pro.py
+# NOTE: the one-shot source patchers (modify_html.py, update_manager.py,
+# patch_*.py, manual_protect.py), the run_pro.py fork and get-pip.py used to be
+# listed here. They have all been removed from the tree. If any reappear, do not
+# run them: they are non-idempotent and rewrite sources in place
+# (update_manager.py truncated core/position/manager.py by ~154 lines).
+# ---------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# Vendored installers / OS junk
+# Runtime logs (may contain account details) — covered by the *.log rule above.
 # -----------------------------------------------------------------------------
-get-pip.py
-Thumbs.db
-desktop.ini
-ehthumbs.db
-
-# -----------------------------------------------------------------------------
-# Runtime logs (may contain account details)
-# -----------------------------------------------------------------------------
-*.log
-logs/
 
 # -----------------------------------------------------------------------------
 # NOTE ON PyInstaller .spec files

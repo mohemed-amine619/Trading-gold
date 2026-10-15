@@ -95,6 +95,28 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 import requests
+
+# Market-location layer (core/market/*). Pure pandas, no broker SDK, so it is
+# safe to import here even though it lives under core/. It answers the
+# questions the indicator stack cannot: where is price inside its range, which
+# levels matter, which stops are resting, and what price invalidates the idea.
+#
+# Imported defensively. If this ever fails to import, the bot must still trade
+# exactly as it did before rather than refuse to start — a live bot that dies
+# at import is worse than one that trades without this refinement.
+try:
+    from core.market.location import analyse_location as _analyse_location
+    from core.market.location import LocationBias as _LocationBias
+    _LOCATION_AVAILABLE = True
+except Exception as _loc_import_error:  # pragma: no cover - defensive
+    _analyse_location = None
+    _LocationBias = None
+    _LOCATION_AVAILABLE = False
+    print(
+        f"WARNING: market location layer unavailable ({_loc_import_error!r}); "
+        f"falling back to ATR-only stops and no location gate."
+    )
+
 from sklearn.ensemble import (
     ExtraTreesClassifier,
     GradientBoostingClassifier,
@@ -309,6 +331,30 @@ CONFIG = {
     "adx_min": _profile_cfg("ADX_MIN", 18.0, 15.0),
     "adx_strong": _profile_cfg("ADX_STRONG", 30.0, 25.0),
     "use_session_filter": os.getenv("USE_SESSION_FILTER", "false").lower() in ("true", "1", "yes") if os.getenv("USE_SESSION_FILTER") is not None else False,
+
+    # --- market location ("where is the market") ---
+    # The indicator stack says WHAT to trade; this says WHERE. Both features
+    # default ON but are independently switchable, and both are fail-safe:
+    # if the location layer cannot produce an answer the bot falls back to its
+    # previous ATR-based behaviour instead of stopping.
+    #
+    # location_gate  : veto entries whose location is indefensible (e.g. buying
+    #                  a range top). Only ever *removes* trades, never adds one.
+    # location_stop  : place the stop beyond the swing that invalidates the
+    #                  idea instead of a blind sl_atr_mult multiple.
+    # location_target: aim the take-profit at resting liquidity when one exists
+    #                  in the trade's favour, else keep the fixed RR.
+    "location_gate": os.getenv("LOCATION_GATE", "true").lower() in ("true", "1", "yes"),
+    "location_stop": os.getenv("LOCATION_STOP", "true").lower() in ("true", "1", "yes"),
+    "location_target": os.getenv("LOCATION_TARGET", "true").lower() in ("true", "1", "yes"),
+    # Bounds on a structural stop, as ATR multiples. The floor keeps the stop
+    # out of bar noise; the ceiling stops a distant swing producing an
+    # un-sizably small position.
+    "location_stop_min_atr": _profile_cfg("LOCATION_STOP_MIN_ATR", 0.75, 0.75),
+    "location_stop_max_atr": _profile_cfg("LOCATION_STOP_MAX_ATR", 3.0, 2.5, scalper_val=2.0),
+    # How close to entry untaken opposing liquidity must be before it is worth
+    # flagging, as a fraction of the pool's distance in ATR.
+    "location_min_bars": int(os.getenv("LOCATION_MIN_BARS", "60")),
     
     # trade window (UTC)
     "london_start_utc": 7,  "london_end_utc": 16,
@@ -388,6 +434,29 @@ def _get_sqlite_db_path() -> str:
         return path
     return os.path.join("data", "trading.db")
 
+
+
+# ---------------------------------------------------------------------------
+# Market location (core/market/*)
+# ---------------------------------------------------------------------------
+
+def _valid_tick(value) -> Optional[float]:
+    """Coerce a broker increment to a positive float, or ``None``.
+
+    MT5 client objects are untrusted here: a stub, a mock, or a partially
+    initialised terminal can return something that is not a number, and that
+    value would otherwise flow into the price-snapping arithmetic. ``None``
+    means "unknown increment" and simply leaves prices unsnapped.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
 
 
 # ---------------------------------------------------------------------------
@@ -1631,6 +1700,72 @@ class StandaloneAIBot:
         self._h1p_cache: Optional[pd.DataFrame] = None
         self._reconnect_backoff = 5  # seconds, grows on repeated failures
 
+        # --- market location cache. Same rule as the indicator caches: the
+        # location can only change when a new bar closes, and recomputing it on
+        # every 0.5s loop tick would be pure waste. ---
+        self._location_cache = None
+        self._location_bar_time = None
+
+    # --------------------------------------------------------------
+    def _location_for(self, m15p: pd.DataFrame):
+        """
+        Market location for the latest closed bar, cached per bar.
+
+        Returns ``None`` whenever a location cannot be produced — unavailable
+        layer, insufficient history, malformed frame, or an internal error.
+        Callers must treat ``None`` as "no opinion" and fall back to their
+        previous behaviour. It is deliberately never a fabricated default:
+        guessing a location would veto real trades on invented data.
+
+        This method must never raise into the main loop. A live bot must not
+        die because an analysis helper had a bad bar.
+        """
+        if not _LOCATION_AVAILABLE or _analyse_location is None:
+            return None
+        if m15p is None or getattr(m15p, "empty", True):
+            return None
+
+        try:
+            bar_time = m15p.index[-1]
+        except Exception:
+            return None
+
+        if bar_time == self._location_bar_time and self._location_cache is not None:
+            return self._location_cache
+
+        min_bars = self.cfg.get("location_min_bars", 60)
+        if len(m15p) < min_bars:
+            return None
+
+        tick_size = None
+        try:
+            info = mt5.symbol_info(self.cfg["symbol"])
+            if info is not None:
+                raw = (getattr(info, "trade_tick_size", None)
+                       or getattr(info, "point", None))
+                # Broker metadata is untrusted: a stub or a partially
+                # initialised client can return a non-numeric object here, which
+                # would otherwise propagate into the snapping arithmetic and
+                # silently cost us the whole location read.
+                try:
+                    candidate = float(raw)
+                    tick_size = candidate if candidate > 0 else None
+                except (TypeError, ValueError):
+                    tick_size = None
+        except Exception:
+            tick_size = None
+
+        try:
+            location = _analyse_location(m15p, tick_size=tick_size)
+        except Exception as exc:
+            logger.warning("Location analysis failed for %s: %r — continuing without it",
+                           self.cfg["symbol"], exc)
+            return None
+
+        self._location_bar_time = bar_time
+        self._location_cache = location
+        return location
+
     # --------------------------------------------------------------
     def get_status(self) -> dict:
         """Thread-safe snapshot of the bot's current state, for GUIs/monitors."""
@@ -1858,7 +1993,64 @@ class StandaloneAIBot:
         if best_score < self.cfg.get("min_signal_score", 55):
             return 0, best_score, ai_conf, f"score {best_score:.0f} < threshold"
 
+        # --- market location gate -------------------------------------
+        # The scoring above answers "what". This answers "where", and can only
+        # ever *remove* a trade, never introduce one. It runs after the score
+        # gate so it never costs anything on a signal that was already weak.
+        if self.cfg.get("location_gate", True):
+            location = self._location_for(m15p)
+            if location is None:
+                # No location available. Deliberately NOT a veto: this layer is
+                # an enhancement on top of a working signal stack, and refusing
+                # to trade whenever it cannot form an opinion would turn a
+                # cold start or a missing dependency into a silent kill switch.
+                # The existing ADX/session/score gates remain in force.
+                logger.debug("[%s] Location unavailable — trading on indicator gates only",
+                             self.cfg["symbol"])
+            else:
+                self._publish_location_status(location)
+                if location.is_valid:
+                    gate = location.entry_gate(best_dir)
+                    for caution in gate.cautions:
+                        logger.info("[%s] Location caution: %s", self.cfg["symbol"], caution)
+                    if not gate.allowed:
+                        logger.info("[%s] Location VETO: %s", self.cfg["symbol"], gate.reason)
+                        return 0, best_score, ai_conf, f"location veto: {gate.reason}"
+                else:
+                    logger.debug("[%s] Location UNDEFINED (no confirmed range) — not vetoing",
+                                 self.cfg["symbol"])
+
         return best_dir, best_score, ai_conf, "signal"
+
+    # --------------------------------------------------------------
+    def _publish_location_status(self, location) -> None:
+        """Expose location on the status dict for the dashboard/GUI.
+
+        Purely additive: every key is new, and nothing existing is overwritten,
+        so a consumer that ignores location keeps working unchanged.
+
+        Wrapped defensively for the same reason as ``_location_for`` — this is
+        a cosmetic feature, and it must never be the thing that raises into the
+        main loop. On any problem the status is simply left untouched.
+        """
+        try:
+            payload = {
+                "loc_bias": location.bias.value,
+                "loc_position": location.range_position,
+                "loc_range_low": location.range_low,
+                "loc_range_high": location.range_high,
+                "loc_structure": location.structure.bias.value,
+                "loc_confidence": location.confidence,
+            }
+            res = location.nearest_resistance()
+            sup = location.nearest_support()
+            payload["loc_resistance"] = res.price if res else None
+            payload["loc_support"] = sup.price if sup else None
+            payload["loc_below_range"] = location.below_range
+            payload["loc_above_range"] = location.above_range
+            self._update_status(**payload)
+        except Exception as exc:
+            logger.debug("Location status publication skipped: %r", exc)
 
     # --------------------------------------------------------------
     def _open_positions(self):
@@ -1971,13 +2163,70 @@ class StandaloneAIBot:
 
         price = tick.ask if direction == 1 else tick.bid
 
+        # --- stop placement -------------------------------------------
+        # Default remains the ATR multiple this bot has always used. When the
+        # location layer can name the swing that invalidates the idea, that
+        # price is used instead: it is where the market itself says the thesis
+        # is wrong, which is a far better place than an arbitrary multiple.
+        #
+        # `structural_stop` returns None when it cannot place a defensible
+        # stop. That falls back to the ATR multiple rather than blocking the
+        # trade — but a None is never silently turned into a zero-distance or
+        # default stop.
         sl_dist = self.cfg["sl_atr_mult"] * atr
+        stop_source = "atr"
+        stop_note = ""
+
+        if self.cfg.get("location_stop", True) and atr > 0:
+            location = self._location_for(m15p)
+            if location is not None and location.is_valid:
+                plan = location.structural_stop(
+                    price,
+                    direction,
+                    min_atr_mult=self.cfg.get("location_stop_min_atr", 0.75),
+                    max_atr_mult=self.cfg.get("location_stop_max_atr", 3.0),
+                    tick_size=_valid_tick(getattr(info, "trade_tick_size", None)
+                                          or getattr(info, "point", None)),
+                )
+                if plan is not None:
+                    stop_source = "structure" if plan.structural else "volatility"
+                    stop_note = plan.reason
+                    if direction == 1:
+                        sl = plan.price
+                    else:
+                        sl = plan.price
+                    sl_dist = abs(price - sl)
+                # plan is None -> keep the ATR stop below
+
         if direction == 1:
-            sl = price - sl_dist
+            if stop_source == "atr":
+                sl = price - sl_dist
             tp = price + sl_dist * self.cfg["tp_rr_ratio"]
         else:
-            sl = price + sl_dist
+            if stop_source == "atr":
+                sl = price + sl_dist
             tp = price - sl_dist * self.cfg["tp_rr_ratio"]
+
+        # --- take profit: prefer resting liquidity in the trade's favour ---
+        # Buy-side liquidity (stops above swing highs) is the natural magnet
+        # for a long, and vice versa. Aiming there is more meaningful than a
+        # fixed RR — but only when a pool actually exists beyond entry, and
+        # only when the resulting RR still clears tp_rr_ratio. Anything less
+        # falls back to the fixed multiple rather than degrading the target.
+        if self.cfg.get("location_target", True):
+            location = self._location_for(m15p)
+            if location is not None and location.is_valid and location.atr:
+                pool = location.target_above() if direction == 1 else location.target_below()
+                if pool is not None:
+                    candidate = pool.price - direction * location.atr * 0.10
+                    rr_from_pool = abs(candidate - price) / max(sl_dist, 1e-10)
+                    if (candidate - price) * direction > 0 and rr_from_pool >= self.cfg["tp_rr_ratio"]:
+                        tp = candidate
+                        stop_note = (stop_note + "; " if stop_note else "") + \
+                                    f"TP at {pool.kind.value} liquidity pool {pool.price:.5f}"
+
+        if stop_note:
+            logger.info("[%s] Stop via %s: %s", self.cfg["symbol"], stop_source, stop_note)
 
         min_d = info.trade_stops_level * info.point
         if min_d > 0:
@@ -2689,6 +2938,8 @@ if __name__ == "__main__":
         markets = []
         for b in bots:
             st = b.get_status()
+            # `loc_*` keys are additive; dashboard.html reads the keys it knows
+            # and ignores the rest, so this is safe for the existing UI.
             markets.append({
                 "sym": b.cfg["symbol"],
                 "regime": getattr(b, "regime", "UNKNOWN") if hasattr(b, "regime") else "UNKNOWN",
@@ -2698,7 +2949,14 @@ if __name__ == "__main__":
                 "pos": st.get("open_positions", 0),
                 "pnl": 0,
                 "unc": 0.1,
-                "state": "PAUSED" if getattr(b, "paused", False) else "ACTIVE"
+                "state": "PAUSED" if getattr(b, "paused", False) else "ACTIVE",
+                "locBias": st.get("loc_bias"),
+                "locPosition": st.get("loc_position"),
+                "locRangeLow": st.get("loc_range_low"),
+                "locRangeHigh": st.get("loc_range_high"),
+                "locStructure": st.get("loc_structure"),
+                "locSupport": st.get("loc_support"),
+                "locResistance": st.get("loc_resistance"),
             })
             
         # Report the mode from the key that actually gates execution ("dry_run").

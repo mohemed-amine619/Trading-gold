@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**350 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**458 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -17,11 +17,117 @@
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 22 | Implemented and tested |
 | Risk, position, strategy, scalping & market | 78 | Implemented and tested |
+| **Market structure & location** | **70** | **New — implemented and tested** |
+| **Trading orchestrator (candles → orders)** | **19** | **New — implemented and tested** |
 | Manual trades isolation & order execution | 7 | Implemented and tested |
 | Other unit tests | 3 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
-`MockMT5Adapter`.
+`MockMT5Adapter` or an in-memory scripted fake.
+
+---
+
+## 0.0 NEW — MARKET STRUCTURE & LOCATION ("knowing where the market is")
+
+The bot previously had **no concept of location**. Its entire spatial model was
+`pipeline.py`'s `_high20` / `_low20` — a 20-bar rolling high/low, used nowhere.
+Strategies read one bar and compared it to an average, so a long entered at the
+top of a range into a wall of equal highs scored *identically* to one entered at
+a discounted swing low. `Signal.invalidation` was a hardcoded English string
+("Price drops below recent support…"), so the bot could describe why it was
+wrong but never name the price.
+
+### Added
+
+| Module | Responsibility |
+|---|---|
+| `core/market/swings.py` | Fractal swing detection. Confirmation enforced (trailing pivots are `confirmed=False` and may repaint); deterministic tie-breaking on plateaus. |
+| `core/market/structure.py` | Structural bias from HH/HL vs LH/LL; BOS vs CHoCH; breaks judged on **body close, not wick**. Causal bias derivation. |
+| `core/market/levels.py` | S/R as scored **zones**: ATR-derived clustering (multi-asset safe), strength from touches + recency + freshness + tightness; broken zones flip polarity. |
+| `core/market/liquidity.py` | Stop pools (equal highs/lows) as RESTING / SWEPT / MITIGATED. A wick that closes back beyond the zone is a stop run, not a breakout. |
+| `core/market/series.py` | Shared `resolve_atr` (was triplicated). |
+| `core/market/location.py` | `MarketLocation`: range position, premium/discount, Fibonacci, `entry_gate()`, `structural_stop()`. |
+| `core/trading/orchestrator.py` | Wires candles → location → signal → gate → stop → target → risk → execution. Returns a full audit trail. |
+
+### Defects found and fixed while building this
+
+1. **Premature premium/discount veto.** Premium/discount is a *ranging*
+   concept. Applied strictly to a trend it blocked nearly every trend trade —
+   a confirmed uptrend sits at the top of its own swing range by construction —
+   and it **inverted the meaning** of price above the range high, which in an
+   uptrend is strength, not weakness. The gate is now regime-aware: strict in
+   ranging markets, permitted with the trend, and counter-trend only at the
+   counter-extreme.
+2. **Latent crash in `core/strategy/strategies.py`.** `latest.get("ema200", close)`
+   returns `None` — not the fallback — when `pandas_ta` emits `None` during
+   warm-up. `close > ema50 > None` raised `TypeError`, so **any symbol with
+   under 200 bars of history crashed the entire ensemble** instead of
+   abstaining. Now routed through a `_num` helper.
+3. **Degenerate ATR could size a maximal position.** `structural_stop` will
+   return `None` rather than a near-zero stop; `calculate_lot_size` divides by
+   stop distance, so a collapsed stop is maximally dangerous, not conservative.
+4. **Snap could breach the ATR bounds.** Tick-snapping after the floor/ceiling
+   were applied produced stops at `0.749` ATR against a `0.75` floor and
+   `3.004` against a `3.0` ceiling. Both bounds are now re-asserted after
+   rounding.
+5. **Single-bar ATR.** Reading only the latest true range let one spike bar
+   redefine volatility; because every tolerance is an ATR multiple, that could
+   make a tradable range fail its width test and silently flip location to
+   `UNDEFINED`. Now smoothed over 14 bars.
+6. **Sweeps were never detected.** The stop-run bar forms its own pivot, so
+   scanning only past the swing cluster skipped the very bar that took the
+   stops; every pool read as RESTING forever. Also, the wick was dragging the
+   resting level upward.
+
+### Honesty guarantees (each has a test)
+
+- No confirmed range ⇒ `bias=UNDEFINED` and **trading is blocked**. Unknown
+  location is never treated as neutral.
+- Price outside the range is reported as a breakdown/breakout, **not** scored
+  as an extreme premium/discount, and position is clamped to `[0, 1]`.
+- No defensible stop ⇒ `None` ⇒ **no trade**. Never a default.
+- Missing broker metadata ⇒ **no position size** (never a guessed size).
+- Level prices snap to the broker grid only when `trade_tick_size`/`point` is
+  supplied; otherwise they stay unrounded.
+
+### Wiring status
+
+`run.py` **now imports `core/market/location.py`** (defensively — if the
+import fails, the bot logs a warning and trades exactly as before) and uses it
+for three things:
+
+| Config key | Default | Effect |
+|---|---|---|
+| `LOCATION_GATE` | `true` | veto entries whose location is indefensible |
+| `LOCATION_STOP` | `true` | stop beyond the invalidating swing instead of a blind ATR multiple |
+| `LOCATION_TARGET` | `true` | aim the take-profit at resting liquidity when one exists |
+| `LOCATION_STOP_MIN_ATR` | `0.75` | floor so the stop sits outside bar noise |
+| `LOCATION_STOP_MAX_ATR` | `3.0` | ceiling so a distant swing cannot shrink the position |
+
+Two deliberate differences from the standalone orchestrator:
+
+1. **`UNDEFINED` location does not veto in `run.py`.** In the orchestrator
+   location is the primary input, so unknown means abstain. In `run.py` it is an
+   enhancement on a signal stack that already works; vetoing on every cold start
+   would be a silent kill switch. The existing ADX/session/score gates stay in
+   force regardless.
+2. **Every failure path falls back to prior behaviour**, never to a stop. A
+   missing import, a short history frame, a malformed bar, or non-numeric broker
+   metadata all degrade to the original ATR-multiple stop.
+
+`core/trading/orchestrator.py` wires the *whole* `core/` stack and is tested
+end-to-end, but is still not an entrypoint.
+
+### Known gaps
+
+- The risk engine logs the *cause* of a sizing refusal ("incomplete broker
+  metadata") but its `reason` string surfaces only the derived symptom, which
+  costs diagnosability when a live trade is rejected.
+- The `trades` table `run.py` creates via raw `sqlite3` still lives outside the
+  Alembic-managed schema.
+- No backtest has been run against the location layer; the regime-aware gate in
+  particular should be validated on history before it is trusted with live
+  capital.
 
 ---
 
