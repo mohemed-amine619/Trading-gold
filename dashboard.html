@@ -840,8 +840,36 @@
                                 <input type="number" id="set-trail-atr" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="3.0" step="0.1">
                             </div>
                             <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">Take Profit R:R Ratio</label>
+                                    <span class="text-xs text-slate-500">Target reward vs risk</span>
+                                </div>
+                                <input type="number" id="set-tp-rr" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="2.0" step="0.1">
+                            </div>
+                            <div class="flex justify-between items-center">
                                 <div><label class="text-sm text-slate-300 block">Enable Breakeven</label></div>
                                 <input type="checkbox" id="set-enable-be" class="w-5 h-5 accent-accent" checked>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">Breakeven Trigger (ATR)</label>
+                                    <span class="text-xs text-slate-500">Lock profit when price moves</span>
+                                </div>
+                                <input type="number" id="set-be-trigger" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="0.35" step="0.05">
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">Profit Lock Activate (ATR)</label>
+                                    <span class="text-xs text-slate-500">Start giveback protection</span>
+                                </div>
+                                <input type="number" id="set-lock-activate" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="0.70" step="0.05">
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">Giveback Cut (%)</label>
+                                    <span class="text-xs text-slate-500">Close if peak drops by %</span>
+                                </div>
+                                <input type="number" id="set-giveback-pct" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="25" step="1">
                             </div>
                             <div class="flex justify-between items-center">
                                 <div><label class="text-sm text-slate-300 block">Manual Position Policy</label></div>
@@ -884,6 +912,13 @@
                                     <span class="text-xs text-slate-500">Min ADX for trend trades</span>
                                 </div>
                                 <input type="number" id="set-adx" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="20">
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">Strict Spatial Trap Veto</label>
+                                    <span class="text-xs text-slate-500">Block buying breakdown / selling breakout</span>
+                                </div>
+                                <input type="checkbox" id="set-strict-location-veto" class="w-5 h-5 accent-accent" checked>
                             </div>
                         </div>
                     </div>
@@ -1427,10 +1462,25 @@
                     if (document.getElementById('set-trail-atr')) document.getElementById('set-trail-atr').value = data.trail_atr_mult;
                     if (document.getElementById('pos-trail-atr')) document.getElementById('pos-trail-atr').value = data.trail_atr_mult;
                 }
+                if (data.tp_rr_ratio !== undefined && document.getElementById('set-tp-rr')) {
+                    document.getElementById('set-tp-rr').value = data.tp_rr_ratio;
+                }
                 if (data.enable_breakeven !== undefined) {
                     const beVal = Boolean(data.enable_breakeven);
                     if (document.getElementById('set-enable-be')) document.getElementById('set-enable-be').checked = beVal;
                     if (document.getElementById('pos-enable-be')) document.getElementById('pos-enable-be').checked = beVal;
+                }
+                if (data.breakeven_trigger_atr !== undefined && document.getElementById('set-be-trigger')) {
+                    document.getElementById('set-be-trigger').value = data.breakeven_trigger_atr;
+                }
+                if (data.profit_lock_activate_atr !== undefined && document.getElementById('set-lock-activate')) {
+                    document.getElementById('set-lock-activate').value = data.profit_lock_activate_atr;
+                }
+                if (data.profit_giveback_pct !== undefined && document.getElementById('set-giveback-pct')) {
+                    document.getElementById('set-giveback-pct').value = data.profit_giveback_pct;
+                }
+                if (data.strict_location_veto !== undefined && document.getElementById('set-strict-location-veto')) {
+                    document.getElementById('set-strict-location-veto').checked = Boolean(data.strict_location_veto);
                 }
                 if (data.default_manual_policy !== undefined) {
                     if (document.getElementById('set-manual-policy')) document.getElementById('set-manual-policy').value = data.default_manual_policy;
@@ -1493,7 +1543,12 @@
                 
                 sl_atr_mult: parseFloat(document.getElementById('set-sl-atr').value),
                 trail_atr_mult: parseFloat(document.getElementById('set-trail-atr').value),
+                tp_rr_ratio: parseFloat(document.getElementById('set-tp-rr') ? document.getElementById('set-tp-rr').value : 2.0),
                 enable_breakeven: document.getElementById('set-enable-be').checked,
+                breakeven_trigger_atr: parseFloat(document.getElementById('set-be-trigger') ? document.getElementById('set-be-trigger').value : 0.35),
+                profit_lock_activate_atr: parseFloat(document.getElementById('set-lock-activate') ? document.getElementById('set-lock-activate').value : 0.70),
+                profit_giveback_pct: parseFloat(document.getElementById('set-giveback-pct') ? document.getElementById('set-giveback-pct').value : 25),
+                strict_location_veto: document.getElementById('set-strict-location-veto') ? document.getElementById('set-strict-location-veto').checked : true,
                 default_manual_policy: document.getElementById('set-manual-policy').value,
                 
                 ai_enabled: document.getElementById('set-ai-enabled').checked,

@@ -45,11 +45,13 @@ class StubMT5:
     def __init__(self):
         self.price = 2650.0
         self.TRADE_ACTION_DEAL = 1
+        self.TRADE_ACTION_SLTP = 6
         self.ORDER_TYPE_BUY = 0
         self.ORDER_TYPE_SELL = 1
         self.ORDER_TIME_GTC = 0
         self.ORDER_FILLING_IOC = 1
         self.TRADE_RETCODE_DONE = 10009
+        self.TRADE_RETCODE_NO_CHANGES = 10025
         self.TIMEFRAME_M1 = 1
         self.TIMEFRAME_M5 = 5
         self.TIMEFRAME_M15 = 15
@@ -61,7 +63,8 @@ class StubMT5:
     def account_info(self): return _Acc()
     def order_calc_margin(self, *a, **k): return 100.0
     def positions_get(self, *a, **k): return []
-    def last_error(self): return 0
+    def order_send(self, req): return types.SimpleNamespace(retcode=self.TRADE_RETCODE_DONE)
+    def last_error(self): return (1, "Success")
 
 
 @pytest.fixture(scope="module")
@@ -312,3 +315,246 @@ def test_dashboard_api_config_sections(run_and_stub, monkeypatch):
     res_strat_get = client.get("/api/config/strategy")
     assert res_strat_get.status_code == 200
     assert "trend_min_score" in res_strat_get.json()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Modify SL/SLTP retcode 10025 & No-Change Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_modify_sl_skips_identical_sl(run_and_stub):
+    run_module, stub = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["dry_run"] = False
+    bot = run_module.StandaloneAIBot(cfg)
+
+    # Position already has SL at 2640.00
+    pos = types.SimpleNamespace(
+        symbol="XAUUSDm",
+        ticket=12345,
+        type=stub.ORDER_TYPE_BUY,
+        sl=2640.00,
+        tp=2680.00,
+        magic=888992
+    )
+
+    calls = []
+    stub.order_send = lambda req: calls.append(req) or types.SimpleNamespace(retcode=stub.TRADE_RETCODE_DONE)
+
+    # Modifying to the exact same SL should return True immediately with NO order_send
+    res = bot._modify_sl(pos, 2640.00)
+    assert res is True
+    assert len(calls) == 0, "Expected no order_send when SL is identical"
+
+
+def test_modify_sl_handles_retcode_10025(run_and_stub):
+    run_module, stub = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["dry_run"] = False
+    bot = run_module.StandaloneAIBot(cfg)
+
+    pos = types.SimpleNamespace(
+        symbol="XAUUSDm",
+        ticket=12345,
+        type=stub.ORDER_TYPE_BUY,
+        sl=2635.00,
+        tp=2680.00,
+        magic=888992
+    )
+
+    # Broker responds with TRADE_RETCODE_NO_CHANGES (10025)
+    stub.order_send = lambda req: types.SimpleNamespace(retcode=stub.TRADE_RETCODE_NO_CHANGES)
+
+    res = bot._modify_sl(pos, 2640.00)
+    assert res is True, "Expected True when broker returns 10025 NO_CHANGES"
+
+
+def test_modify_sltp_skips_identical_sltp(run_and_stub):
+    run_module, stub = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["dry_run"] = False
+    bot = run_module.StandaloneAIBot(cfg)
+
+    pos = types.SimpleNamespace(
+        symbol="XAUUSDm",
+        ticket=12345,
+        type=stub.ORDER_TYPE_BUY,
+        sl=2640.00,
+        tp=2680.00,
+        magic=888992
+    )
+
+    calls = []
+    stub.order_send = lambda req: calls.append(req) or types.SimpleNamespace(retcode=stub.TRADE_RETCODE_DONE)
+
+    res = bot._modify_sltp(pos, 2640.00, 2680.00)
+    assert res is True
+    assert len(calls) == 0, "Expected no order_send when SL and TP are unchanged"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Spatial Trap Veto Tests in _get_signal
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_spatial_trap_veto_breakdown_long(run_and_stub, monkeypatch):
+    run_module, _ = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["strict_location_veto"] = True
+    cfg["min_signal_score"] = 40
+    cfg["ai_confidence_threshold"] = 0.50
+    bot = run_module.StandaloneAIBot(cfg)
+
+    # Mock location where price is below range low (breakdown)
+    mock_loc = types.SimpleNamespace(
+        is_valid=True,
+        price=2630.0,
+        range_low=2635.0,
+        range_high=2660.0,
+        below_range=True,
+        above_range=False,
+        atr=2.0,
+        distance_to_resistance=lambda: 5.0,
+        distance_to_support=lambda: 10.0,
+        nearest_resistance=lambda: None,
+        nearest_support=lambda: None,
+        structure=types.SimpleNamespace(last_choch=None),
+        entry_gate=lambda d: types.SimpleNamespace(allowed=True, cautions=[], reason="ok")
+    )
+    monkeypatch.setattr(bot, "_location_for", lambda df: mock_loc)
+
+    # DataFrame with indicators
+    df = pd.DataFrame({
+        "open": [2630.0]*60, "high": [2632.0]*60, "low": [2628.0]*60, "close": [2630.0]*60,
+        "adx": [25.0]*60, "atr": [2.0]*60, "ema_fast": [2631.0]*60, "ema_slow": [2629.0]*60,
+        "volume": [1000]*60, "rsi": [55.0]*60
+    })
+
+    # Mock AI ensemble predict
+    bot.ai = types.SimpleNamespace(
+        update=lambda df: None,
+        predict=lambda df: types.SimpleNamespace(direction=1, confidence=0.65)
+    )
+
+    monkeypatch.setattr(run_module, "_session_ok", lambda cfg: True)
+    monkeypatch.setattr(run_module, "_score_direction", lambda *a, **k: 65.0)
+
+    direction, score, conf, reason = bot._get_signal(df, df, df)
+    assert direction == 0
+    assert "breakdown" in reason
+
+
+def test_spatial_trap_veto_brick_wall_overhead(run_and_stub, monkeypatch):
+    run_module, _ = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["strict_location_veto"] = True
+    cfg["min_signal_score"] = 40
+    cfg["ai_confidence_threshold"] = 0.50
+    bot = run_module.StandaloneAIBot(cfg)
+
+    # Mock location with strong resistance 0.20 ATR overhead
+    mock_res = types.SimpleNamespace(price=2640.40, strength=0.8)
+    mock_loc = types.SimpleNamespace(
+        is_valid=True,
+        price=2640.0,
+        range_low=2620.0,
+        range_high=2660.0,
+        below_range=False,
+        above_range=False,
+        atr=2.0,
+        distance_to_resistance=lambda: 0.40, # 0.20 ATR away!
+        distance_to_support=lambda: 10.0,
+        nearest_resistance=lambda: mock_res,
+        nearest_support=lambda: None,
+        structure=types.SimpleNamespace(last_choch=None),
+        entry_gate=lambda d: types.SimpleNamespace(allowed=True, cautions=[], reason="ok")
+    )
+    monkeypatch.setattr(bot, "_location_for", lambda df: mock_loc)
+
+    df = pd.DataFrame({
+        "open": [2640.0]*60, "high": [2642.0]*60, "low": [2638.0]*60, "close": [2640.0]*60,
+        "adx": [25.0]*60, "atr": [2.0]*60, "volume": [1000]*60, "rsi": [55.0]*60
+    })
+
+    bot.ai = types.SimpleNamespace(
+        update=lambda df: None,
+        predict=lambda df: types.SimpleNamespace(direction=1, confidence=0.65)
+    )
+
+    monkeypatch.setattr(run_module, "_session_ok", lambda cfg: True)
+    monkeypatch.setattr(run_module, "_score_direction", lambda *a, **k: 65.0)
+
+    direction, score, conf, reason = bot._get_signal(df, df, df)
+    assert direction == 0
+    assert "strong resistance" in reason
+
+
+def test_ai_confidence_gate_rejects_coin_flip(run_and_stub, monkeypatch):
+    run_module, _ = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["symbol"] = "BTCUSDm" # Non-gold symbol
+    cfg["min_signal_score"] = 45
+    cfg["ai_confidence_threshold"] = 0.55
+    bot = run_module.StandaloneAIBot(cfg)
+
+    df = pd.DataFrame({
+        "open": [82000.0]*60, "high": [82100.0]*60, "low": [81900.0]*60, "close": [82000.0]*60,
+        "adx": [25.0]*60, "atr": [50.0]*60, "volume": [1000]*60, "rsi": [55.0]*60
+    })
+
+    bot.ai = types.SimpleNamespace(
+        update=lambda df: None,
+        predict=lambda df: types.SimpleNamespace(direction=1, confidence=0.50) # 50% coin flip
+    )
+
+    monkeypatch.setattr(run_module, "_session_ok", lambda cfg: True)
+    monkeypatch.setattr(run_module, "_score_direction", lambda *a, **k: 58.0)
+
+    direction, score, conf, reason = bot._get_signal(df, df, df)
+    assert direction == 0
+    assert "AI conf" in reason
+
+
+def test_api_settings_syncs_profit_lock_and_spatial_veto(run_and_stub, monkeypatch):
+    run_module, _ = run_and_stub
+    from fastapi.testclient import TestClient
+
+    saved_env = {}
+    monkeypatch.setattr(run_module, "_update_env_file", lambda updates, env_path=".env": saved_env.update(updates) or True)
+
+    cfg = dict(run_module.CONFIG)
+    bot = run_module.StandaloneAIBot(cfg)
+    app = run_module.create_app([bot])
+    client = TestClient(app)
+
+    # 1. Test GET contains new keys
+    res_get = client.get("/api/settings")
+    assert res_get.status_code == 200
+    data = res_get.json()
+    assert "breakeven_trigger_atr" in data
+    assert "profit_lock_activate_atr" in data
+    assert "profit_giveback_pct" in data
+    assert "tp_rr_ratio" in data
+    assert "strict_location_veto" in data
+
+    # 2. Test POST updates both bot memory and .env updates
+    payload = {
+        "breakeven_trigger_atr": 0.40,
+        "profit_lock_activate_atr": 0.65,
+        "profit_giveback_pct": 25.0,
+        "tp_rr_ratio": 2.2,
+        "strict_location_veto": True
+    }
+    res_post = client.post("/api/settings", json=payload)
+    assert res_post.status_code == 200
+
+    assert bot.cfg["breakeven_trigger_atr"] == 0.40
+    assert bot.cfg["profit_lock_activate_atr"] == 0.65
+    assert bot.cfg["profit_giveback_pct"] == 0.25
+    assert bot.cfg["tp_rr_ratio"] == 2.2
+    assert bot.cfg["strict_location_veto"] is True
+
+    assert saved_env["BREAKEVEN_TRIGGER_ATR"] == "0.4"
+    assert saved_env["PROFIT_LOCK_ACTIVATE_ATR"] == "0.65"
+    assert saved_env["PROFIT_GIVEBACK_PCT"] == "0.25"
+    assert saved_env["TP_RR_RATIO"] == "2.2"
+    assert saved_env["STRICT_LOCATION_VETO"] == "true"
+

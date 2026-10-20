@@ -367,6 +367,7 @@ CONFIG = {
     # location_target: aim the take-profit at resting liquidity when one exists
     #                  in the trade's favour, else keep the fixed RR.
     "location_gate": os.getenv("LOCATION_GATE", "true").lower() in ("true", "1", "yes"),
+    "strict_location_veto": os.getenv("STRICT_LOCATION_VETO", "true").lower() in ("true", "1", "yes"),
     "location_stop": os.getenv("LOCATION_STOP", "true").lower() in ("true", "1", "yes"),
     "location_target": os.getenv("LOCATION_TARGET", "true").lower() in ("true", "1", "yes"),
     # Bounds on a structural stop, as ATR multiples. The floor keeps the stop
@@ -2111,6 +2112,12 @@ class StandaloneAIBot:
                     max_ratio = float(self.cfg.get("max_spread_atr_ratio", 0.18))
                     if spread_price / atr_val > max_ratio:
                         return 0, best_score, ai_conf, f"gold spread ({spread_price:.2f}) > {max_ratio*100:.0f}% ATR"
+        else:
+            # AI Confidence Gate (all non-gold symbols):
+            # 0.50 is pure noise / coin flip. Scalping requires real predictive conviction.
+            min_conf = float(self.cfg.get("ai_confidence_threshold", 0.55))
+            if ai_conf < min_conf:
+                return 0, best_score, ai_conf, f"AI conf {ai_conf:.2f} < threshold ({min_conf:.2f})"
 
         # --- market location gate -------------------------------------
         # The scoring above answers "what". This answers "where", and can only
@@ -2135,6 +2142,49 @@ class StandaloneAIBot:
                     if not gate.allowed:
                         logger.info("[%s] Location VETO: %s", self.cfg["symbol"], gate.reason)
                         return 0, best_score, ai_conf, f"location veto: {gate.reason}"
+
+                    # Strict spatial trap vetoes: never buy into breakdown, never sell into breakout,
+                    # never trade into a brick wall (< 0.35 ATR from strong S/R), and never trade
+                    # against a fresh CHoCH without exceptional confluence.
+                    if self.cfg.get("strict_location_veto", True):
+                        if best_dir == 1 and location.below_range:
+                            logger.info("[%s] Location VETO: price %.5f is below range low %.5f (breakdown trap)",
+                                        self.cfg["symbol"], location.price, location.range_low)
+                            return 0, best_score, ai_conf, "location veto: price below range low (breakdown)"
+
+                        if best_dir == -1 and location.above_range:
+                            logger.info("[%s] Location VETO: price %.5f is above range high %.5f (breakout trap)",
+                                        self.cfg["symbol"], location.price, location.range_high)
+                            return 0, best_score, ai_conf, "location veto: price above range high (breakout)"
+
+                        atr_loc = location.atr or float(m15p.iloc[-1].get("atr", 0.0))
+                        if atr_loc > 0:
+                            if best_dir == 1:
+                                dist_res = location.distance_to_resistance()
+                                res_lvl = location.nearest_resistance()
+                                if dist_res is not None and dist_res <= (atr_loc * 0.35):
+                                    if res_lvl is not None and getattr(res_lvl, "strength", 0.0) >= 0.50:
+                                        logger.info("[%s] Location VETO: strong resistance %.5f only %.2f ATR overhead",
+                                                    self.cfg["symbol"], res_lvl.price, dist_res / atr_loc)
+                                        return 0, best_score, ai_conf, f"location veto: strong resistance {dist_res / atr_loc:.2f} ATR overhead"
+                            elif best_dir == -1:
+                                dist_sup = location.distance_to_support()
+                                sup_lvl = location.nearest_support()
+                                if dist_sup is not None and dist_sup <= (atr_loc * 0.35):
+                                    if sup_lvl is not None and getattr(sup_lvl, "strength", 0.0) >= 0.50:
+                                        logger.info("[%s] Location VETO: strong support %.5f only %.2f ATR below",
+                                                    self.cfg["symbol"], sup_lvl.price, dist_sup / atr_loc)
+                                        return 0, best_score, ai_conf, f"location veto: strong support {dist_sup / atr_loc:.2f} ATR below"
+
+                        if location.structure and getattr(location.structure, "last_choch", None):
+                            last_choch = location.structure.last_choch
+                            if getattr(last_choch, "direction", 0) != best_dir and best_score < 62.0:
+                                choch_kind = getattr(getattr(last_choch, "kind", None), "value", "CHOCH")
+                                choch_lvl = getattr(last_choch, "level", 0.0)
+                                logger.info("[%s] Location VETO: fresh %s against %s (level %.5f, score %.1f < 62)",
+                                            self.cfg["symbol"], choch_kind,
+                                            "BUY" if best_dir == 1 else "SELL", choch_lvl, best_score)
+                                return 0, best_score, ai_conf, f"location veto: fresh {choch_kind} against trade"
                 else:
                     logger.debug("[%s] Location UNDEFINED (no confirmed range) — not vetoing",
                                  self.cfg["symbol"])
@@ -2552,6 +2602,12 @@ class StandaloneAIBot:
         digits = getattr(info, "digits", 2) or 2
         sl_val = round(float(new_sl), digits) if new_sl > 0 else 0.0
         tp_val = round(float(new_tp), digits) if new_tp > 0 else 0.0
+        current_sl = round(float(pos.sl), digits) if getattr(pos, "sl", 0.0) else 0.0
+        current_tp = round(float(pos.tp), digits) if getattr(pos, "tp", 0.0) else 0.0
+
+        # Avoid redundant order sends if both SL and TP are unchanged
+        if abs(current_sl - sl_val) <= 1e-6 and abs(current_tp - tp_val) <= 1e-6:
+            return True
 
         stops_level = getattr(info, "trade_stops_level", 0) or 0
         point = getattr(info, "point", 0.01) or 0.01
@@ -2574,8 +2630,11 @@ class StandaloneAIBot:
             "magic":    getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
         }
         result = mt5.order_send(req)
-        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info("Modified SLTP ticket=%s → SL:%.5f TP:%.5f", pos.ticket, sl_val, tp_val)
+        done_code = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
+        no_changes_code = getattr(mt5, "TRADE_RETCODE_NO_CHANGES", 10025)
+        if result and result.retcode in (done_code, no_changes_code):
+            if result.retcode == done_code:
+                logger.info("Modified SLTP ticket=%s → SL:%.5f TP:%.5f", pos.ticket, sl_val, tp_val)
             return True
         retcode_str = result.retcode if result else "None"
         last_err = mt5.last_error() if hasattr(mt5, "last_error") else "N/A"
@@ -2590,6 +2649,11 @@ class StandaloneAIBot:
         info = mt5.symbol_info(pos.symbol)
         digits = getattr(info, "digits", 2) or 2
         sl_val = round(float(new_sl), digits)
+        current_sl = round(float(pos.sl), digits) if getattr(pos, "sl", 0.0) else 0.0
+
+        # Avoid redundant order sends if SL is identical to current broker SL
+        if abs(current_sl - sl_val) <= 1e-6:
+            return True
 
         req = {
             "action":   mt5.TRADE_ACTION_SLTP,
@@ -2600,8 +2664,11 @@ class StandaloneAIBot:
             "magic":    getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
         }
         result = mt5.order_send(req)
-        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info("Modified SL ticket=%s → %.5f", pos.ticket, sl_val)
+        done_code = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
+        no_changes_code = getattr(mt5, "TRADE_RETCODE_NO_CHANGES", 10025)
+        if result and result.retcode in (done_code, no_changes_code):
+            if result.retcode == done_code:
+                logger.info("Modified SL ticket=%s → %.5f", pos.ticket, sl_val)
             return True
         retcode_str = result.retcode if result else "None"
         last_err = mt5.last_error() if hasattr(mt5, "last_error") else "N/A"
@@ -2708,6 +2775,10 @@ class StandaloneAIBot:
                            else (pos.price_open - close_price))
             floating_pnl = pos.profit + pos.swap
 
+            # Track peak profit reached for dynamic ratchets, giveback cuts and SL reasoning
+            peak = max(self._peak_profit.get(pos.ticket, 0.0), profit_move)
+            self._peak_profit[pos.ticket] = peak
+
             # --- MANUAL TRADE HANDLING ---
             bot_magic = self.cfg.get("magic_number", 888999)
             is_manual = (getattr(pos, "magic", 0) != bot_magic)
@@ -2785,18 +2856,20 @@ class StandaloneAIBot:
 
             # --- MARKET STRUCTURE TRAILING STOP ---
             if floating_pnl > 0 and self.cfg.get("structure_trailing", True):
+                info = mt5.symbol_info(pos.symbol)
+                min_step = (getattr(info, "point", 0.01) or 0.01) * 1.5
                 if direction == 1:  # BUY
                     recent_low = m15p['low'].iloc[-5:].min()
                     if recent_low > pos.sl and close_price > recent_low + (atr * 0.2):
                         new_sl = recent_low - (atr * 0.1)
-                        if new_sl > pos.sl and new_sl < close_price:
+                        if new_sl > pos.sl + min_step and new_sl < close_price:
                             self._modify_sl(pos, new_sl)
                 else:  # SELL
                     recent_high = m15p['high'].iloc[-5:].max()
                     if pos.sl == 0 or recent_high < pos.sl:
                         if close_price < recent_high - (atr * 0.2):
                             new_sl = recent_high + (atr * 0.1)
-                            if (pos.sl == 0 or new_sl < pos.sl) and new_sl > close_price:
+                            if (pos.sl == 0 or new_sl < pos.sl - min_step) and new_sl > close_price:
                                 self._modify_sl(pos, new_sl)
 
             # ---- POWER-UP (A): hard per-trade stop-loss, % of equity ---
@@ -2825,12 +2898,8 @@ class StandaloneAIBot:
                     continue
 
             # ---- POWER-UP (B): profit-lock / giveback close -------------
-            peak = self._peak_profit.get(pos.ticket, 0.0)
-            if profit_move > peak:
-                peak = profit_move
-                self._peak_profit[pos.ticket] = peak
-            lock_activate = self.cfg.get("profit_lock_activate_atr", 1.2) * atr
-            giveback_pct  = self.cfg.get("profit_giveback_pct", 0.35)
+            lock_activate = self.cfg.get("profit_lock_activate_atr", 0.70) * atr
+            giveback_pct  = self.cfg.get("profit_giveback_pct", 0.25)
             if peak >= lock_activate and profit_move <= peak * (1.0 - giveback_pct):
                 self._close_position(pos, "profit lock giveback")
                 continue
@@ -2839,7 +2908,7 @@ class StandaloneAIBot:
             be_buffer = self.cfg.get("breakeven_buffer_atr", 0.15) * atr
             be_sl = (pos.price_open + be_buffer) if direction == 1 else (pos.price_open - be_buffer)
             if self.cfg.get("enable_breakeven", True):
-                be_trigger = self.cfg.get("breakeven_trigger_atr", 0.4) * atr
+                be_trigger = self.cfg.get("breakeven_trigger_atr", 0.35) * atr
                 if profit_move >= be_trigger:
                     target_sl = be_sl
 
@@ -2855,14 +2924,15 @@ class StandaloneAIBot:
                     info = mt5.symbol_info(pos.symbol)
                     min_dist = (info.trade_stops_level * info.point) if info and info.trade_stops_level else (atr * 0.1)
                     min_dist = max(min_dist, atr * 0.05)
+                    min_step = (getattr(info, "point", 0.01) or 0.01) * 1.5
 
                     if direction == 1:
                         target_sl = min(target_sl, close_price - min_dist)
-                        if target_sl > pos.sl + 1e-9 and target_sl >= be_sl:
+                        if target_sl > pos.sl + min_step and target_sl >= be_sl:
                             self._modify_sl(pos, target_sl)
                     else:
                         target_sl = max(target_sl, close_price + min_dist)
-                        if (pos.sl == 0 or target_sl < pos.sl - 1e-9) and target_sl <= be_sl:
+                        if (pos.sl == 0 or target_sl < pos.sl - min_step) and target_sl <= be_sl:
                             self._modify_sl(pos, target_sl)
 
             # ---- trailing stop (accelerating, never falls below breakeven)
@@ -3210,7 +3280,13 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             "max_margin_usage": margin_pct,
             "sl_atr_mult": cfg.get("sl_atr_mult", 1.8),
             "trail_atr_mult": cfg.get("trail_atr_mult", 1.0),
+            "tp_rr_ratio": float(cfg.get("tp_rr_ratio", 2.0) or 2.0),
             "enable_breakeven": be_val > 0,
+            "breakeven_trigger_atr": float(cfg.get("breakeven_trigger_atr", 0.35) or 0.35),
+            "breakeven_buffer_atr": float(cfg.get("breakeven_buffer_atr", 0.15) or 0.15),
+            "profit_lock_activate_atr": float(cfg.get("profit_lock_activate_atr", 0.70) or 0.70),
+            "profit_giveback_pct": round(float(cfg.get("profit_giveback_pct", 0.25) or 0.25) * 100, 1) if float(cfg.get("profit_giveback_pct", 0.25) or 0.25) <= 1.0 else float(cfg.get("profit_giveback_pct", 25.0)),
+            "strict_location_veto": bool(cfg.get("strict_location_veto", True)),
             "default_manual_policy": cfg.get("default_manual_policy", "observe_only"),
             "ai_enabled": cfg.get("ai_enabled", True),
             "ai_confidence_threshold": cfg.get("ai_confidence_threshold", 0.55),
@@ -3247,6 +3323,51 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             for b in bots:
                 b.cfg["risk_per_trade"] = r
             env_updates["RISK_PER_TRADE"] = str(r)
+
+        # 2b. Scalp Profit Ratchets & Protection
+        if "breakeven_trigger_atr" in new_cfg and new_cfg["breakeven_trigger_atr"] is not None:
+            be_trig = float(new_cfg["breakeven_trigger_atr"])
+            CONFIG["breakeven_trigger_atr"] = be_trig
+            for b in bots:
+                b.cfg["breakeven_trigger_atr"] = be_trig
+            env_updates["BREAKEVEN_TRIGGER_ATR"] = str(be_trig)
+
+        if "breakeven_buffer_atr" in new_cfg and new_cfg["breakeven_buffer_atr"] is not None:
+            be_buf = float(new_cfg["breakeven_buffer_atr"])
+            CONFIG["breakeven_buffer_atr"] = be_buf
+            for b in bots:
+                b.cfg["breakeven_buffer_atr"] = be_buf
+            env_updates["BREAKEVEN_BUFFER_ATR"] = str(be_buf)
+
+        if "profit_lock_activate_atr" in new_cfg and new_cfg["profit_lock_activate_atr"] is not None:
+            pla = float(new_cfg["profit_lock_activate_atr"])
+            CONFIG["profit_lock_activate_atr"] = pla
+            for b in bots:
+                b.cfg["profit_lock_activate_atr"] = pla
+            env_updates["PROFIT_LOCK_ACTIVATE_ATR"] = str(pla)
+
+        if "profit_giveback_pct" in new_cfg and new_cfg["profit_giveback_pct"] is not None:
+            pgp = float(new_cfg["profit_giveback_pct"])
+            if pgp > 1.0:
+                pgp = pgp / 100.0
+            CONFIG["profit_giveback_pct"] = pgp
+            for b in bots:
+                b.cfg["profit_giveback_pct"] = pgp
+            env_updates["PROFIT_GIVEBACK_PCT"] = str(pgp)
+
+        if "tp_rr_ratio" in new_cfg and new_cfg["tp_rr_ratio"] is not None:
+            tpr = float(new_cfg["tp_rr_ratio"])
+            CONFIG["tp_rr_ratio"] = tpr
+            for b in bots:
+                b.cfg["tp_rr_ratio"] = tpr
+            env_updates["TP_RR_RATIO"] = str(tpr)
+
+        if "strict_location_veto" in new_cfg and new_cfg["strict_location_veto"] is not None:
+            slv = bool(new_cfg["strict_location_veto"])
+            CONFIG["strict_location_veto"] = slv
+            for b in bots:
+                b.cfg["strict_location_veto"] = slv
+            env_updates["STRICT_LOCATION_VETO"] = "true" if slv else "false"
 
         # 3. Max daily DD
         raw_dd = new_cfg.get("max_daily_drawdown_pct") if "max_daily_drawdown_pct" in new_cfg else new_cfg.get("max_daily_dd")
