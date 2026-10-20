@@ -943,6 +943,7 @@
             
             // Initial fetches
             fetchAll();
+            loadSettings();
 
             // Loops
             setInterval(fetchStatusAndPositions, 1000);
@@ -967,6 +968,9 @@
                     target.classList.remove('hidden');
                     if(targetId === 'tab-positions' || targetId === 'tab-history' || targetId === 'tab-logs') target.classList.add('flex');
                     
+                    if(targetId === 'tab-settings' || targetId === 'tab-risk' || targetId === 'tab-strategy') {
+                        loadSettings();
+                    }
                     if(targetId === 'tab-performance') renderCharts();
                 });
             });
@@ -1367,12 +1371,116 @@
             }
         }
 
+        async function loadSettings() {
+            try {
+                const data = await api('/api/settings');
+                if (!data) return;
+
+                // MT5 Connection
+                if (data.mt5_server !== undefined && document.getElementById('set-mt5-server')) {
+                    document.getElementById('set-mt5-server').value = data.mt5_server || '';
+                }
+                if (data.mt5_login !== undefined && document.getElementById('set-mt5-login')) {
+                    document.getElementById('set-mt5-login').value = data.mt5_login || '';
+                }
+                if (data.mt5_password !== undefined && document.getElementById('set-mt5-password')) {
+                    document.getElementById('set-mt5-password').value = data.mt5_password || '';
+                }
+                if (data.server_utc_offset_hours !== undefined && document.getElementById('set-mt5-offset')) {
+                    document.getElementById('set-mt5-offset').value = data.server_utc_offset_hours;
+                }
+
+                // Instruments & Timeframes
+                if (data.raw_symbols !== undefined && document.getElementById('set-symbols')) {
+                    document.getElementById('set-symbols').value = data.raw_symbols;
+                }
+                if (data.entry_timeframe !== undefined && document.getElementById('set-tf-entry')) {
+                    document.getElementById('set-tf-entry').value = data.entry_timeframe;
+                }
+                if (data.trading_mode !== undefined && document.getElementById('set-trading-mode')) {
+                    document.getElementById('set-trading-mode').value = data.trading_mode;
+                }
+
+                // Risk Settings
+                if (data.risk_per_trade !== undefined) {
+                    if (document.getElementById('set-risk-pct')) document.getElementById('set-risk-pct').value = data.risk_per_trade;
+                    if (document.getElementById('risk-per-trade')) document.getElementById('risk-per-trade').value = data.risk_per_trade;
+                }
+                if (data.max_daily_drawdown_pct !== undefined) {
+                    if (document.getElementById('set-dd-daily')) document.getElementById('set-dd-daily').value = data.max_daily_drawdown_pct;
+                    if (document.getElementById('risk-max-daily-loss')) document.getElementById('risk-max-daily-loss').value = data.max_daily_drawdown_pct;
+                    if (document.getElementById('risk-max-dd')) document.getElementById('risk-max-dd').value = data.max_daily_drawdown_pct;
+                }
+                if (data.max_open_positions !== undefined) {
+                    if (document.getElementById('set-max-pos')) document.getElementById('set-max-pos').value = data.max_open_positions;
+                    if (document.getElementById('risk-max-pos')) document.getElementById('risk-max-pos').value = data.max_open_positions;
+                }
+                if (data.max_margin_usage !== undefined && document.getElementById('set-max-margin')) {
+                    document.getElementById('set-max-margin').value = data.max_margin_usage;
+                }
+
+                // Position Protection
+                if (data.sl_atr_mult !== undefined && document.getElementById('set-sl-atr')) {
+                    document.getElementById('set-sl-atr').value = data.sl_atr_mult;
+                }
+                if (data.trail_atr_mult !== undefined) {
+                    if (document.getElementById('set-trail-atr')) document.getElementById('set-trail-atr').value = data.trail_atr_mult;
+                    if (document.getElementById('pos-trail-atr')) document.getElementById('pos-trail-atr').value = data.trail_atr_mult;
+                }
+                if (data.enable_breakeven !== undefined) {
+                    const beVal = Boolean(data.enable_breakeven);
+                    if (document.getElementById('set-enable-be')) document.getElementById('set-enable-be').checked = beVal;
+                    if (document.getElementById('pos-enable-be')) document.getElementById('pos-enable-be').checked = beVal;
+                }
+                if (data.default_manual_policy !== undefined) {
+                    if (document.getElementById('set-manual-policy')) document.getElementById('set-manual-policy').value = data.default_manual_policy;
+                    if (document.getElementById('pos-manual-policy')) document.getElementById('pos-manual-policy').value = data.default_manual_policy;
+                }
+
+                // AI & Filters
+                if (data.ai_enabled !== undefined && document.getElementById('set-ai-enabled')) {
+                    document.getElementById('set-ai-enabled').checked = Boolean(data.ai_enabled);
+                }
+                if (data.ai_confidence_threshold !== undefined && document.getElementById('set-ai-conf')) {
+                    document.getElementById('set-ai-conf').value = data.ai_confidence_threshold;
+                }
+                if (data.min_signal_score !== undefined) {
+                    if (document.getElementById('set-min-score')) document.getElementById('set-min-score').value = data.min_signal_score;
+                    if (document.getElementById('strat-trend-min-score')) document.getElementById('strat-trend-min-score').value = data.min_signal_score;
+                }
+                if (data.adx_trending_min !== undefined && document.getElementById('set-adx')) {
+                    document.getElementById('set-adx').value = data.adx_trending_min;
+                }
+
+                // Execution
+                if (data.deviation_points !== undefined && document.getElementById('set-slippage')) {
+                    document.getElementById('set-slippage').value = data.deviation_points;
+                }
+                if (data.max_requote_retries !== undefined && document.getElementById('set-requote-retries')) {
+                    document.getElementById('set-requote-retries').value = data.max_requote_retries;
+                }
+                if (data.magic_number !== undefined && document.getElementById('set-magic-number')) {
+                    document.getElementById('set-magic-number').value = data.magic_number;
+                }
+                if (data.telegram_bot_token !== undefined && document.getElementById('set-telegram')) {
+                    document.getElementById('set-telegram').value = data.telegram_bot_token || '';
+                }
+            } catch (err) {
+                console.warn("loadSettings error:", err);
+            }
+        }
+
+        function resetSettings() {
+            loadSettings();
+            alert("Settings reloaded from live bot configuration.");
+        }
+
         async function saveSettings() {
             const config = {
                 mt5_server: document.getElementById('set-mt5-server').value,
                 mt5_login: parseInt(document.getElementById('set-mt5-login').value) || 0,
                 mt5_password: document.getElementById('set-mt5-password').value,
-                server_utc_offset_hours: parseInt(document.getElementById('set-mt5-offset').value),
+                server_utc_offset_hours: parseInt(document.getElementById('set-mt5-offset').value) || 0,
                 
                 raw_symbols: document.getElementById('set-symbols').value,
                 trading_mode: document.getElementById('set-trading-mode').value,
@@ -1381,7 +1489,7 @@
                 risk_per_trade: parseFloat(document.getElementById('set-risk-pct').value),
                 max_daily_drawdown_pct: parseFloat(document.getElementById('set-dd-daily').value),
                 max_open_positions: parseInt(document.getElementById('set-max-pos').value),
-                max_margin_usage: parseFloat(document.getElementById('set-max-margin').value) / 100,
+                max_margin_usage: parseFloat(document.getElementById('set-max-margin').value),
                 
                 sl_atr_mult: parseFloat(document.getElementById('set-sl-atr').value),
                 trail_atr_mult: parseFloat(document.getElementById('set-trail-atr').value),
@@ -1407,18 +1515,17 @@
                 });
                 
                 if (res.ok) {
-                    alert("Settings successfully saved and applied to the bot!");
+                    alert("Settings successfully saved, applied to live bot, and written to .env!");
+                    await loadSettings();
                 } else {
                     const err = await res.json();
                     alert("Error saving settings: " + (err.detail || err.message || res.statusText));
                 }
             } catch (e) {
                 console.error("Save error:", e);
-                // Fallback simulating if server isn't available
-                alert("Settings payload constructed:\n" + JSON.stringify(config, null, 2) + "\n\n(Note: API backend connection failed, simulating success.)");
+                alert("Error saving settings: " + e.message);
             }
         }
-
         
         async function saveConfig(section) {
             let payload = {};
@@ -1428,6 +1535,7 @@
                     trend_fast_ma: parseInt(document.getElementById('strat-trend-fast-ma').value),
                     trend_slow_ma: parseInt(document.getElementById('strat-trend-slow-ma').value),
                     trend_atr: parseFloat(document.getElementById('strat-trend-atr-mult').value),
+                    trend_min_score: parseInt(document.getElementById('strat-trend-min-score').value),
                     mr_enabled: document.getElementById('strat-mr-enable').checked,
                     mr_rsi: parseInt(document.getElementById('strat-mr-rsi-period').value)
                 };
@@ -1451,12 +1559,14 @@
                 });
                 
                 if (res.ok) {
-                    alert(`${section} settings saved successfully!`);
+                    alert(`${section.toUpperCase()} settings saved and applied to bot!`);
+                    await loadSettings();
                 } else {
                     alert(`Error saving ${section} settings.`);
                 }
             } catch(e) {
                 console.error(e);
+                alert(`Error saving ${section} settings: ` + e.message);
             }
         }
         

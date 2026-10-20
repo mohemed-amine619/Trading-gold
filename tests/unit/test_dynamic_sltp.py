@@ -166,12 +166,13 @@ class MockSymbolInfo:
 
 
 class MockPosition:
-    def __init__(self, pos_type=0, price_open=2650.0, sl=2645.0, tp=2665.0, volume=0.1):
+    def __init__(self, pos_type=0, price_open=2650.0, sl=2645.0, tp=2665.0, volume=0.1, symbol="XAUUSDm"):
         self.type = pos_type        # 0 = BUY, 1 = SELL
         self.price_open = price_open
         self.sl = sl
         self.tp = tp
         self.volume = volume
+        self.symbol = symbol
 
 
 def test_dynamic_sltp_entry_buy():
@@ -311,3 +312,47 @@ def test_get_llm_provider_factory():
     assert isinstance(get_llm_provider("embedded"), EmbeddedReasoningProvider)
     assert isinstance(get_llm_provider("none"), EmbeddedReasoningProvider)
     assert isinstance(get_llm_provider("local_endpoint"), LocalEndpointProvider)
+
+
+def test_gold_volatility_stop_floor():
+    """Gold trades enforce a minimum SL ATR multiple of 1.6 to prevent noise stop-outs."""
+    reasoner = DynamicSLTPReasoner()
+    symbol_info = MockSymbolInfo()
+    entry_price = 2650.0
+    atr = 4.0
+    df = pd.DataFrame({"close": [2648.0, 2650.0], "high": [2649.0, 2651.0], "low": [2647.0, 2649.0]})
+
+    plan = reasoner.calculate_entry_sltp(
+        symbol="XAUUSDm",
+        direction=1,
+        entry_price=entry_price,
+        df=df,
+        atr=atr,
+        symbol_info=symbol_info,
+    )
+
+    assert plan.valid is True
+    # SL distance must be at least 1.6 * atr (1.6 * 4.0 = 6.4)
+    assert plan.sl_distance >= 1.6 * atr
+    assert "Gold volatility protection" in plan.reasoning
+
+
+def test_gold_peak_profit_giveback_defense():
+    """Gold scalps defend gains aggressively when profit pulls back from peak."""
+    reasoner = DynamicSLTPReasoner()
+    # Price reached peak 2655.0 (+5.0 = 1.25 ATR), now at 2653.0 (gave back 40%)
+    symbol_info = MockSymbolInfo(bid=2653.0, ask=2653.2)
+    pos = MockPosition(pos_type=0, price_open=2650.0, sl=2645.0, symbol="XAUUSDm")
+    df = pd.DataFrame({"close": [2650.0, 2653.0], "high": [2651.0, 2655.0], "low": [2649.0, 2650.0]})
+
+    adjustment = reasoner.evaluate_position_sltp(
+        position=pos,
+        df=df,
+        atr=4.0,
+        symbol_info=symbol_info,
+        peak_profit=5.0,
+    )
+
+    assert adjustment.action in ("TIGHTEN_SL", "SECURE_PROFIT", "MOVE_TO_BREAKEVEN")
+    assert adjustment.new_sl is not None
+    assert adjustment.new_sl > pos.sl

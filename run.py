@@ -78,7 +78,7 @@ else:
     load_dotenv()
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Windows consoles default to a legacy codepage (cp1252) that can't encode
 # emoji used in log/notification messages (✅ 🔒 🛡️ ...). Force UTF-8 on
@@ -234,38 +234,38 @@ def _parse_timeframe(tf_str: Optional[str], default_val: int) -> int:
         return default_val
     s = str(tf_str).strip().upper()
     mapping = {
-        "M1": getattr(mt5, "TIMEFRAME_M1", 1),
-        "M2": getattr(mt5, "TIMEFRAME_M2", 2),
-        "M3": getattr(mt5, "TIMEFRAME_M3", 3),
-        "M4": getattr(mt5, "TIMEFRAME_M4", 4),
-        "M5": getattr(mt5, "TIMEFRAME_M5", 5),
-        "M6": getattr(mt5, "TIMEFRAME_M6", 6),
-        "M10": getattr(mt5, "TIMEFRAME_M10", 10),
-        "M12": getattr(mt5, "TIMEFRAME_M12", 12),
-        "M15": getattr(mt5, "TIMEFRAME_M15", 15),
-        "M20": getattr(mt5, "TIMEFRAME_M20", 20),
-        "M30": getattr(mt5, "TIMEFRAME_M30", 30),
-        "H1": getattr(mt5, "TIMEFRAME_H1", 16385),
-        "H2": getattr(mt5, "TIMEFRAME_H2", 16386),
-        "H3": getattr(mt5, "TIMEFRAME_H3", 16387),
-        "H4": getattr(mt5, "TIMEFRAME_H4", 16388),
-        "H6": getattr(mt5, "TIMEFRAME_H6", 16390),
-        "H8": getattr(mt5, "TIMEFRAME_H8", 16392),
-        "H12": getattr(mt5, "TIMEFRAME_H12", 16396),
-        "D1": getattr(mt5, "TIMEFRAME_D1", 16408),
-        "W1": getattr(mt5, "TIMEFRAME_W1", 32769),
-        "MN1": getattr(mt5, "TIMEFRAME_MN1", 49153),
+        "M1": getattr(mt5, "TIMEFRAME_M1", 1) or 1,
+        "M2": getattr(mt5, "TIMEFRAME_M2", 2) or 2,
+        "M3": getattr(mt5, "TIMEFRAME_M3", 3) or 3,
+        "M4": getattr(mt5, "TIMEFRAME_M4", 4) or 4,
+        "M5": getattr(mt5, "TIMEFRAME_M5", 5) or 5,
+        "M6": getattr(mt5, "TIMEFRAME_M6", 6) or 6,
+        "M10": getattr(mt5, "TIMEFRAME_M10", 10) or 10,
+        "M12": getattr(mt5, "TIMEFRAME_M12", 12) or 12,
+        "M15": getattr(mt5, "TIMEFRAME_M15", 15) or 15,
+        "M20": getattr(mt5, "TIMEFRAME_M20", 20) or 20,
+        "M30": getattr(mt5, "TIMEFRAME_M30", 30) or 30,
+        "H1": getattr(mt5, "TIMEFRAME_H1", 16385) or 16385,
+        "H2": getattr(mt5, "TIMEFRAME_H2", 16386) or 16386,
+        "H3": getattr(mt5, "TIMEFRAME_H3", 16387) or 16387,
+        "H4": getattr(mt5, "TIMEFRAME_H4", 16388) or 16388,
+        "H6": getattr(mt5, "TIMEFRAME_H6", 16390) or 16390,
+        "H8": getattr(mt5, "TIMEFRAME_H8", 16392) or 16392,
+        "H12": getattr(mt5, "TIMEFRAME_H12", 16396) or 16396,
+        "D1": getattr(mt5, "TIMEFRAME_D1", 16408) or 16408,
+        "W1": getattr(mt5, "TIMEFRAME_W1", 32769) or 32769,
+        "MN1": getattr(mt5, "TIMEFRAME_MN1", 49153) or 49153,
     }
     return mapping.get(s, default_val)
 
 
 def _default_trend_tfs(primary_tf: int) -> tuple[int, int]:
     """Derive appropriate intermediate and macro trend timeframes from primary execution timeframe."""
-    m1 = getattr(mt5, "TIMEFRAME_M1", 1)
-    m5 = getattr(mt5, "TIMEFRAME_M5", 5)
-    m15 = getattr(mt5, "TIMEFRAME_M15", 15)
-    h1 = getattr(mt5, "TIMEFRAME_H1", 16385)
-    h4 = getattr(mt5, "TIMEFRAME_H4", 16388)
+    m1 = getattr(mt5, "TIMEFRAME_M1", 1) or 1
+    m5 = getattr(mt5, "TIMEFRAME_M5", 5) or 5
+    m15 = getattr(mt5, "TIMEFRAME_M15", 15) or 15
+    h1 = getattr(mt5, "TIMEFRAME_H1", 16385) or 16385
+    h4 = getattr(mt5, "TIMEFRAME_H4", 16388) or 16388
 
     if primary_tf == m1:
         return m5, m15
@@ -283,6 +283,15 @@ _primary_tf = _parse_timeframe(_primary_tf_str, getattr(mt5, "TIMEFRAME_M15", 15
 _def_h1_tf, _def_h4_tf = _default_trend_tfs(_primary_tf)
 _h1_tf = _parse_timeframe(os.getenv("TREND_TF"), _def_h1_tf)
 _h4_tf = _parse_timeframe(os.getenv("MACRO_TREND_TF"), _def_h4_tf)
+
+# Multi-timeframe trend protection:
+# Higher timeframes MUST be higher than the primary execution timeframe.
+if _h1_tf <= _primary_tf:
+    print(f"WARNING: TREND_TF ({_h1_tf}) <= primary timeframe ({_primary_tf}). Enforcing {_def_h1_tf} for trend analysis.")
+    _h1_tf = _def_h1_tf
+if _h4_tf <= _h1_tf:
+    print(f"WARNING: MACRO_TREND_TF ({_h4_tf}) <= intermediate trend ({_h1_tf}). Enforcing {_def_h4_tf} for macro trend.")
+    _h4_tf = _def_h4_tf
 
 CONFIG = {
     # --- connection ---
@@ -454,6 +463,41 @@ def _get_sqlite_db_path() -> str:
             path = path[2:]
         return path
     return os.path.join("data", "trading.db")
+
+
+def _update_env_file(updates: dict[str, Any], env_path: str = ".env") -> bool:
+    """Safely updates or appends KEY=VALUE lines in .env, preserving comments and formatting."""
+    try:
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+        updated_keys = set()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#") or "=" not in stripped:
+                new_lines.append(line)
+                continue
+            k = stripped.split("=", 1)[0].strip()
+            if k in updates:
+                new_lines.append(f"{k}={updates[k]}\n")
+                updated_keys.add(k)
+            else:
+                new_lines.append(line)
+
+        # Append keys that were not already in the file
+        for k, v in updates.items():
+            if k not in updated_keys and v is not None:
+                new_lines.append(f"{k}={v}\n")
+
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        return True
+    except Exception as exc:
+        logger.error("Failed to update env file %s: %s", env_path, exc)
+        return False
 
 
 
@@ -2034,6 +2078,40 @@ class StandaloneAIBot:
         if best_score < self.cfg.get("min_signal_score", 55):
             return 0, best_score, ai_conf, f"score {best_score:.0f} < threshold"
 
+        # --- Gold (XAUUSD) specific volatility and macro trend protection ---
+        sym_upper = str(self.cfg.get("symbol", "")).upper()
+        is_gold = "XAU" in sym_upper or "GOLD" in sym_upper
+        if is_gold:
+            # 1. Macro Trend Veto: Never scalp counter to established H4 trend
+            if h4p is not None and not h4p.empty and len(h4p) >= 20:
+                h4_opp = _trend_score(h4p, -best_dir)
+                if h4_opp >= 0.65:
+                    logger.info("[%s] Gold macro trend VETO: H4 opposes %s (score %.2f >= 0.65)",
+                                self.cfg["symbol"], "BUY" if best_dir == 1 else "SELL", h4_opp)
+                    return 0, best_score, ai_conf, f"gold macro veto: H4 opposes {'BUY' if best_dir == 1 else 'SELL'}"
+
+            # 2. Gold High-Confluence Minimum Score: Gold demands minimum 58 confluence
+            gold_min_score = float(self.cfg.get("gold_min_signal_score", 58.0))
+            if best_score < gold_min_score:
+                return 0, best_score, ai_conf, f"gold score {best_score:.0f} < threshold ({gold_min_score:.0f})"
+
+            # 3. Gold AI Confidence Gate: 0.50 is pure noise; Gold requires >= 0.55
+            gold_min_conf = float(self.cfg.get("gold_min_ai_conf", 0.55))
+            if ai_conf < gold_min_conf:
+                return 0, best_score, ai_conf, f"gold AI conf {ai_conf:.2f} < threshold ({gold_min_conf:.2f})"
+
+            # 4. Gold Spread Gate: Prevent entries during wide spread / roll-over
+            atr_val = float(m15p.iloc[-1].get("atr", 0.0))
+            if atr_val > 0:
+                sym_info = mt5.symbol_info(self.cfg["symbol"])
+                if sym_info:
+                    spread_pts = getattr(sym_info, "spread", 0) or 0
+                    point_val = getattr(sym_info, "point", 0.01) or 0.01
+                    spread_price = spread_pts * point_val
+                    max_ratio = float(self.cfg.get("max_spread_atr_ratio", 0.18))
+                    if spread_price / atr_val > max_ratio:
+                        return 0, best_score, ai_conf, f"gold spread ({spread_price:.2f}) > {max_ratio*100:.0f}% ATR"
+
         # --- market location gate -------------------------------------
         # The scoring above answers "what". This answers "where", and can only
         # ever *remove* a trade, never introduce one. It runs after the score
@@ -2959,21 +3037,11 @@ class StandaloneAIBot:
 import uvicorn
 from fastapi import FastAPI, Response, Request
 
-if __name__ == "__main__":
-    default_symbols = "XAUUSDm,EURUSDm,GBPUSDm" if _IS_AGGRESSIVE else CONFIG.get("symbol", "XAUUSDm")
-    symbols_str = os.getenv("TRADE_SYMBOLS", default_symbols)
-    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
-    if not symbols:
-        symbols = ["XAUUSDm"]
-        
-    bots = []
-    for sym in symbols:
-        sym_cfg = CONFIG.copy()
-        sym_cfg["symbol"] = sym
-        b = StandaloneAIBot(sym_cfg)
-        b.paused = False
-        bots.append(b)
-        
+def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
+    """Factory to create the FastAPI dashboard app, testable and decoupled."""
+    if bots is None:
+        bots = []
+
     app = FastAPI(title="AI Quant Platform Dashboard")
     
     @app.get("/")
@@ -3109,17 +3177,312 @@ if __name__ == "__main__":
 
     @app.get("/api/settings")
     def api_get_settings():
-        return bots[0].cfg if bots else {}
-        
+        cfg = bots[0].cfg if bots else CONFIG
+        sym_list = ", ".join([b.cfg.get("symbol", "") for b in bots if b.cfg.get("symbol")]) if bots else cfg.get("symbol", "XAUUSDm")
+        if not sym_list:
+            sym_list = cfg.get("symbol", "XAUUSDm")
+
+        tf_val = cfg.get("timeframe", 15)
+        tf_map_rev = {
+            1: "M1", 2: "M2", 3: "M3", 5: "M5", 10: "M10", 15: "M15", 30: "M30",
+            16385: "H1", 16388: "H4", 16408: "D1",
+        }
+        tf_str = tf_map_rev.get(tf_val, "M15")
+
+        risk_pct = round(float(cfg.get("risk_per_trade", 0.01)) * 100, 2)
+        dd_pct = round(float(cfg.get("max_daily_dd", 0.05)) * 100, 2)
+        margin_pct = round(float(cfg.get("max_margin_usage", 0.35)) * 100, 1)
+
+        be_val = float(cfg.get("breakeven_trigger_atr", 0.0) or 0.0)
+
+        res = {
+            **cfg,
+            "mt5_server": cfg.get("server", "") or "",
+            "mt5_login": cfg.get("account", 0) or 0,
+            "mt5_password": cfg.get("password", "") or "",
+            "server_utc_offset_hours": cfg.get("server_utc_offset_hours", 2),
+            "raw_symbols": sym_list,
+            "trading_mode": "paper" if cfg.get("dry_run", True) else "live",
+            "entry_timeframe": tf_str,
+            "risk_per_trade": risk_pct,
+            "max_daily_drawdown_pct": dd_pct,
+            "max_open_positions": cfg.get("max_open_pos", 3),
+            "max_margin_usage": margin_pct,
+            "sl_atr_mult": cfg.get("sl_atr_mult", 1.8),
+            "trail_atr_mult": cfg.get("trail_atr_mult", 1.0),
+            "enable_breakeven": be_val > 0,
+            "default_manual_policy": cfg.get("default_manual_policy", "observe_only"),
+            "ai_enabled": cfg.get("ai_enabled", True),
+            "ai_confidence_threshold": cfg.get("ai_confidence_threshold", 0.55),
+            "min_signal_score": cfg.get("min_signal_score", 58),
+            "adx_trending_min": cfg.get("adx_min", 18),
+            "deviation_points": cfg.get("max_slippage", 30),
+            "max_requote_retries": cfg.get("max_requote_retries", 5),
+            "magic_number": cfg.get("magic_number", 888992),
+            "telegram_bot_token": cfg.get("telegram_token", "") or cfg.get("telegram_bot_token", ""),
+        }
+        return res
+
     @app.post("/api/settings")
     async def api_post_settings(request: Request):
         new_cfg = await request.json()
+        env_updates = {}
+
+        # 1. Trading Mode
+        if "trading_mode" in new_cfg:
+            tm = str(new_cfg["trading_mode"]).lower().strip()
+            if tm in ("paper", "live", "backtest"):
+                is_dry = (tm != "live")
+                CONFIG["dry_run"] = is_dry
+                for b in bots:
+                    b.cfg["dry_run"] = is_dry
+                env_updates["TRADING_MODE"] = tm
+
+        # 2. Risk per trade
+        if "risk_per_trade" in new_cfg and new_cfg["risk_per_trade"] is not None:
+            r = float(new_cfg["risk_per_trade"])
+            if r > 0.05:
+                r = r / 100.0
+            CONFIG["risk_per_trade"] = r
+            for b in bots:
+                b.cfg["risk_per_trade"] = r
+            env_updates["RISK_PER_TRADE"] = str(r)
+
+        # 3. Max daily DD
+        raw_dd = new_cfg.get("max_daily_drawdown_pct") if "max_daily_drawdown_pct" in new_cfg else new_cfg.get("max_daily_dd")
+        if raw_dd is not None:
+            dd = float(raw_dd)
+            if dd > 0.05:
+                dd = dd / 100.0
+            CONFIG["max_daily_dd"] = dd
+            for b in bots:
+                b.cfg["max_daily_dd"] = dd
+            env_updates["MAX_DAILY_DD"] = str(dd)
+
+        # 4. Max open positions
+        raw_pos = new_cfg.get("max_open_positions") if "max_open_positions" in new_cfg else new_cfg.get("max_open_pos")
+        if raw_pos is not None:
+            p = int(raw_pos)
+            CONFIG["max_open_pos"] = p
+            for b in bots:
+                b.cfg["max_open_pos"] = p
+            env_updates["MAX_OPEN_POS"] = str(p)
+
+        # 5. Max margin usage
+        if "max_margin_usage" in new_cfg and new_cfg["max_margin_usage"] is not None:
+            m = float(new_cfg["max_margin_usage"])
+            if m > 1.0:
+                m = m / 100.0
+            CONFIG["max_margin_usage"] = m
+            for b in bots:
+                b.cfg["max_margin_usage"] = m
+            env_updates["MAX_MARGIN_USAGE"] = str(m)
+
+        # 6. SL ATR Mult
+        if "sl_atr_mult" in new_cfg and new_cfg["sl_atr_mult"] is not None:
+            sl = float(new_cfg["sl_atr_mult"])
+            CONFIG["sl_atr_mult"] = sl
+            for b in bots:
+                b.cfg["sl_atr_mult"] = sl
+            env_updates["SL_ATR_MULT"] = str(sl)
+
+        # 7. Trail ATR Mult
+        raw_trail = new_cfg.get("trail_atr_mult") if "trail_atr_mult" in new_cfg else new_cfg.get("trail_atr")
+        if raw_trail is not None:
+            tr = float(raw_trail)
+            CONFIG["trail_atr_mult"] = tr
+            for b in bots:
+                b.cfg["trail_atr_mult"] = tr
+            env_updates["TRAIL_ATR_MULT"] = str(tr)
+
+        # 8. Breakeven
+        if "enable_breakeven" in new_cfg and new_cfg["enable_breakeven"] is not None:
+            be_trig = 0.50 if bool(new_cfg["enable_breakeven"]) else 0.0
+            CONFIG["breakeven_trigger_atr"] = be_trig
+            for b in bots:
+                b.cfg["breakeven_trigger_atr"] = be_trig
+            env_updates["BREAKEVEN_TRIGGER_ATR"] = str(be_trig)
+
+        # 9. Timeframe
+        raw_tf = new_cfg.get("entry_timeframe") or new_cfg.get("timeframe")
+        if raw_tf:
+            tf_int = _parse_timeframe(str(raw_tf), 15)
+            CONFIG["timeframe"] = tf_int
+            for b in bots:
+                b.cfg["timeframe"] = tf_int
+            env_updates["TIMEFRAME"] = str(raw_tf).upper()
+
+        # 10. AI Knobs
+        if "ai_confidence_threshold" in new_cfg and new_cfg["ai_confidence_threshold"] is not None:
+            ai_c = float(new_cfg["ai_confidence_threshold"])
+            CONFIG["ai_confidence_threshold"] = ai_c
+            for b in bots:
+                b.cfg["ai_confidence_threshold"] = ai_c
+            env_updates["AI_CONFIDENCE_THRESHOLD"] = str(ai_c)
+
+        if "min_signal_score" in new_cfg and new_cfg["min_signal_score"] is not None:
+            score = int(new_cfg["min_signal_score"])
+            CONFIG["min_signal_score"] = score
+            for b in bots:
+                b.cfg["min_signal_score"] = score
+            env_updates["MIN_SIGNAL_SCORE"] = str(score)
+
+        raw_adx = new_cfg.get("adx_trending_min") if "adx_trending_min" in new_cfg else new_cfg.get("adx_min")
+        if raw_adx is not None:
+            adx = int(raw_adx)
+            CONFIG["adx_min"] = adx
+            for b in bots:
+                b.cfg["adx_min"] = adx
+            env_updates["ADX_MIN"] = str(adx)
+
+        # 11. Slippage / Deviation
+        raw_dev = new_cfg.get("deviation_points") if "deviation_points" in new_cfg else new_cfg.get("max_slippage")
+        if raw_dev is not None:
+            dev = int(raw_dev)
+            CONFIG["max_slippage"] = dev
+            for b in bots:
+                b.cfg["max_slippage"] = dev
+
+        # 12. Retries & Magic
+        if "max_requote_retries" in new_cfg and new_cfg["max_requote_retries"] is not None:
+            CONFIG["max_requote_retries"] = int(new_cfg["max_requote_retries"])
+            for b in bots:
+                b.cfg["max_requote_retries"] = int(new_cfg["max_requote_retries"])
+
+        if "magic_number" in new_cfg and new_cfg["magic_number"] is not None:
+            m_num = int(new_cfg["magic_number"])
+            CONFIG["magic_number"] = m_num
+            for b in bots:
+                b.cfg["magic_number"] = m_num
+            env_updates["MAGIC_NUMBER"] = str(m_num)
+
+        if "telegram_bot_token" in new_cfg and new_cfg["telegram_bot_token"] is not None:
+            t_tok = str(new_cfg["telegram_bot_token"])
+            CONFIG["telegram_token"] = t_tok
+            for b in bots:
+                b.cfg["telegram_token"] = t_tok
+            env_updates["TELEGRAM_TOKEN"] = t_tok
+
+        # 13. MT5 Credentials
+        if new_cfg.get("mt5_server"):
+            srv = str(new_cfg["mt5_server"])
+            CONFIG["server"] = srv
+            for b in bots:
+                b.cfg["server"] = srv
+            env_updates["MT5_SERVER"] = srv
+
+        if new_cfg.get("mt5_login"):
+            log_num = int(new_cfg["mt5_login"])
+            CONFIG["account"] = log_num
+            for b in bots:
+                b.cfg["account"] = log_num
+            env_updates["MT5_LOGIN"] = str(log_num)
+
+        if new_cfg.get("mt5_password"):
+            pw = str(new_cfg["mt5_password"])
+            CONFIG["password"] = pw
+            for b in bots:
+                b.cfg["password"] = pw
+            env_updates["MT5_PASSWORD"] = pw
+
+        if new_cfg.get("raw_symbols"):
+            syms = str(new_cfg["raw_symbols"]).strip()
+            env_updates["TRADE_SYMBOLS"] = syms
+
+        # 14. Update Reasoners
         for b in bots:
-            for k, v in new_cfg.items():
-                if k in b.cfg and k != "symbol":
+            if hasattr(b, "reasoner") and b.reasoner is not None:
+                b.reasoner.cfg.update(b.cfg)
+
+        # 15. Persist to .env
+        if env_updates:
+            _update_env_file(env_updates)
+
+        logger.info("Bot Settings Updated from Web UI & persisted to .env! Applied to all %d bot instances.", len(bots))
+        return {"status": "ok", "message": "Settings saved and applied successfully."}
+
+    @app.get("/api/config/{section}")
+    def api_get_config_section(section: str):
+        cfg = bots[0].cfg if bots else CONFIG
+        if section == "risk":
+            return {
+                "max_daily_loss": round(float(cfg.get("max_daily_dd", 0.05)) * 100, 2),
+                "max_dd": round(float(cfg.get("max_daily_dd", 0.05)) * 100, 2),
+                "risk_per_trade": round(float(cfg.get("risk_per_trade", 0.01)) * 100, 2),
+                "max_pos": cfg.get("max_open_pos", 3),
+                "manual_policy": cfg.get("default_manual_policy", "observe_only"),
+                "trail_atr": cfg.get("trail_atr_mult", 1.0),
+                "enable_be": float(cfg.get("breakeven_trigger_atr", 0.0) or 0.0) > 0,
+            }
+        elif section == "strategy":
+            return {
+                "trend_enabled": cfg.get("trend_strategy_enabled", True),
+                "trend_fast_ma": cfg.get("fast_ema", 10),
+                "trend_slow_ma": cfg.get("slow_ema", 50),
+                "trend_atr": cfg.get("sl_atr_mult", 1.8),
+                "trend_min_score": cfg.get("min_signal_score", 58),
+                "mr_enabled": cfg.get("mr_strategy_enabled", False),
+                "mr_rsi": cfg.get("rsi_period", 14),
+            }
+        return cfg
+
+    @app.post("/api/config/{section}")
+    async def api_post_config_section(section: str, request: Request):
+        payload = await request.json()
+        env_updates = {}
+        if section == "risk":
+            if "risk_per_trade" in payload and payload["risk_per_trade"] is not None:
+                r = float(payload["risk_per_trade"])
+                if r > 0.05:
+                    r = r / 100.0
+                CONFIG["risk_per_trade"] = r
+                env_updates["RISK_PER_TRADE"] = str(r)
+                for b in bots:
+                    b.cfg["risk_per_trade"] = r
+            if "max_daily_loss" in payload or "max_dd" in payload:
+                raw_dd = payload.get("max_daily_loss") if "max_daily_loss" in payload else payload.get("max_dd")
+                if raw_dd is not None:
+                    dd = float(raw_dd)
+                    if dd > 0.05:
+                        dd = dd / 100.0
+                    CONFIG["max_daily_dd"] = dd
+                    env_updates["MAX_DAILY_DD"] = str(dd)
+                    for b in bots:
+                        b.cfg["max_daily_dd"] = dd
+            if "max_pos" in payload and payload["max_pos"] is not None:
+                p = int(payload["max_pos"])
+                CONFIG["max_open_pos"] = p
+                env_updates["MAX_OPEN_POS"] = str(p)
+                for b in bots:
+                    b.cfg["max_open_pos"] = p
+            if "trail_atr" in payload and payload["trail_atr"] is not None:
+                tr = float(payload["trail_atr"])
+                CONFIG["trail_atr_mult"] = tr
+                env_updates["TRAIL_ATR_MULT"] = str(tr)
+                for b in bots:
+                    b.cfg["trail_atr_mult"] = tr
+            if "enable_be" in payload and payload["enable_be"] is not None:
+                be_val = 0.50 if bool(payload["enable_be"]) else 0.0
+                CONFIG["breakeven_trigger_atr"] = be_val
+                env_updates["BREAKEVEN_TRIGGER_ATR"] = str(be_val)
+                for b in bots:
+                    b.cfg["breakeven_trigger_atr"] = be_val
+            if "manual_policy" in payload:
+                CONFIG["default_manual_policy"] = str(payload["manual_policy"])
+                for b in bots:
+                    b.cfg["default_manual_policy"] = str(payload["manual_policy"])
+        elif section == "strategy":
+            for k, v in payload.items():
+                CONFIG[k] = v
+                for b in bots:
                     b.cfg[k] = v
-        logger.info("Bot Settings Updated from Web UI! Applied to all symbols.")
-        return {"status": "ok"}
+        for b in bots:
+            if hasattr(b, "reasoner") and b.reasoner is not None:
+                b.reasoner.cfg.update(b.cfg)
+        if env_updates:
+            _update_env_file(env_updates)
+        logger.info("Section '%s' configuration updated from Web UI & saved to .env", section)
+        return {"status": "success", "section": section}
         
     @app.post("/api/control")
     async def api_control(request: Request):
@@ -3176,20 +3539,40 @@ if __name__ == "__main__":
         except Exception:
             return {"history": []}
 
-    def _find_available_dashboard_port() -> int:
-        explicit = os.getenv("DASHBOARD_PORT")
-        if explicit:
-            return int(explicit)
-        import socket
-        for p in list(range(8000, 8015)) + [8080, 8081, 8082]:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("127.0.0.1", p))
-                    return p
-            except OSError:
-                continue
-        return 8000
+    return app
 
+
+def _find_available_dashboard_port() -> int:
+    explicit = os.getenv("DASHBOARD_PORT")
+    if explicit:
+        return int(explicit)
+    import socket
+    for p in list(range(8000, 8015)) + [8080, 8081, 8082]:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", p))
+                return p
+        except OSError:
+            continue
+    return 8000
+
+
+if __name__ == "__main__":
+    default_symbols = "XAUUSDm,EURUSDm,GBPUSDm" if _IS_AGGRESSIVE else CONFIG.get("symbol", "XAUUSDm")
+    symbols_str = os.getenv("TRADE_SYMBOLS", default_symbols)
+    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
+    if not symbols:
+        symbols = ["XAUUSDm"]
+
+    bots = []
+    for sym in symbols:
+        sym_cfg = CONFIG.copy()
+        sym_cfg["symbol"] = sym
+        b = StandaloneAIBot(sym_cfg)
+        b.paused = False
+        bots.append(b)
+
+    app = create_app(bots)
     dashboard_port = _find_available_dashboard_port()
 
     def run_dashboard():

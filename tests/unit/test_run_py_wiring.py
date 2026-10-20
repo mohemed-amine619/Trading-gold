@@ -74,6 +74,11 @@ class StubMT5:
         self.ORDER_TIME_GTC = 0
         self.ORDER_FILLING_IOC = 1
         self.TRADE_RETCODE_DONE = 10009
+        self.TIMEFRAME_M1 = 1
+        self.TIMEFRAME_M5 = 5
+        self.TIMEFRAME_M15 = 15
+        self.TIMEFRAME_H1 = 16385
+        self.TIMEFRAME_H4 = 16388
 
     def symbol_info(self, symbol): return _Info()
     def symbol_info_tick(self, symbol): return _Tick(self.price - 0.05, self.price + 0.05)
@@ -116,6 +121,7 @@ def run_and_stub():
     yield run_module_, stub
 
     sys.modules.pop("run", None)
+    sys.modules.pop("MetaTrader5", None)
     sys.modules["dotenv"] = importlib.import_module("dotenv")
     os.environ.clear()
     os.environ.update(snapshot)

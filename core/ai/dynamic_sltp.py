@@ -304,14 +304,20 @@ class DynamicSLTPReasoner:
         point = getattr(symbol_info, "point", 0.01) or 0.01
         stops_level = getattr(symbol_info, "trade_stops_level", 0) or 0
 
+        is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper()
         min_rr = float(self.cfg.get("tp_rr_ratio", 2.0))
-        sl_atr_mult = float(self.cfg.get("sl_atr_mult", 1.5))
-        min_atr = float(self.cfg.get("location_stop_min_atr", 0.75))
+        sl_atr_mult = float(self.cfg.get("sl_atr_mult", 1.8 if is_gold else 1.5))
+        min_atr = float(self.cfg.get("location_stop_min_atr", 1.6 if is_gold else 0.75))
         max_atr = float(self.cfg.get("location_stop_max_atr", 3.0))
+        if is_gold:
+            min_atr = max(min_atr, 1.6)
+            sl_atr_mult = max(sl_atr_mult, 1.8)
 
         sl_source = "atr_fallback"
         tp_source = "atr_target"
         reasoning_parts = []
+        if is_gold:
+            reasoning_parts.append("Gold volatility protection: enforced minimum 1.6 ATR stop buffer")
 
         # 1. Structural Stop Loss Determination
         sl_price = entry_price - (sl_atr_mult * atr) if direction == 1 else entry_price + (sl_atr_mult * atr)
@@ -451,9 +457,13 @@ class DynamicSLTPReasoner:
         action = "HOLD"
         reason = "Position structure intact."
 
+        sym_name = str(getattr(position, "symbol", "") or self.cfg.get("symbol", ""))
+        is_gold = "XAU" in sym_name.upper() or "GOLD" in sym_name.upper()
+
         # Stage 1: Fast Breakeven Ratchet (Scalping-friendly)
-        # In scalping mode, breakeven triggers early (e.g. 0.35 - 0.40 ATR)
-        be_trigger = float(self.cfg.get("breakeven_trigger_atr", 0.40)) * atr
+        # In scalping mode, breakeven triggers early (e.g. 0.35 - 0.45 ATR)
+        default_be_trigger = 0.45 if is_gold else 0.40
+        be_trigger = float(self.cfg.get("breakeven_trigger_atr", default_be_trigger)) * atr
         be_buffer = float(self.cfg.get("breakeven_buffer_atr", 0.15)) * atr
         be_price = open_price + be_buffer if direction == 1 else open_price - be_buffer
 
@@ -516,8 +526,10 @@ class DynamicSLTPReasoner:
                     reason = "Opposing rejection pinbar formed; tightened SL immediately to secure profits."
 
         # Stage 5: Giveback from Peak Protection
-        lock_activate = float(self.cfg.get("profit_lock_activate_atr", 1.2)) * atr
-        giveback_threshold = float(self.cfg.get("profit_giveback_pct", 0.35))
+        default_lock_activate = 1.0 if is_gold else 1.2
+        lock_activate = float(self.cfg.get("profit_lock_activate_atr", default_lock_activate)) * atr
+        default_giveback = 0.30 if is_gold else 0.35
+        giveback_threshold = float(self.cfg.get("profit_giveback_pct", default_giveback))
         if actual_peak >= lock_activate and giveback_pct >= giveback_threshold:
             # Price gave back significant profit from peak; aggressively defend remainder
             defend_sl = current_price - (atr * 0.15) if direction == 1 else current_price + (atr * 0.15)
