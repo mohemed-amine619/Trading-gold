@@ -386,3 +386,30 @@ class TestDashboardContract:
         for key in ("loc_bias", "loc_position", "loc_structure",
                     "loc_range_low", "loc_range_high"):
             assert key in st, f"missing location key: {key}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic AI SL/TP Reasoning Contract
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDynamicAISLTP:
+    def test_dynamic_sltp_reasoner_initialization(self, run_and_stub):
+        run_module, _ = run_and_stub
+        bot = build_bot(run_module)
+        reasoner = bot._get_sltp_reasoner()
+        assert reasoner is not None
+        assert reasoner.provider is not None
+
+    def test_dynamic_sltp_entry_logs_reasoning(self, run_and_stub, caplog):
+        run_module, stub = run_and_stub
+        bot = build_bot(run_module, dynamic_sltp_enabled=True, location_stop=True)
+        frame = run_module._prepare(uptrend_frame(), bot.cfg)
+        stub.price = 202.0
+
+        with caplog.at_level(logging.INFO, logger="run"):
+            assert bot._send_order(1, 10_000.0, frame, ai_conf=0.8) is True
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("AI Dynamic SL/TP" in m for m in messages), (
+            "dynamic_sltp_enabled=True but AI Dynamic SL/TP was never logged"
+        )

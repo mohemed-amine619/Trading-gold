@@ -25,6 +25,8 @@ class LLMProvider(str, Enum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     OLLAMA = "ollama"
+    LOCAL_ENDPOINT = "local_endpoint"
+    EMBEDDED = "embedded"
     NONE = "none"
 
 
@@ -171,6 +173,12 @@ class Settings(BaseSettings):
     anthropic_model: str = Field(default="claude-3-5-sonnet-20241022")
     ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="")
+    local_llm_url: str = Field(default="http://localhost:1234/v1")
+    local_llm_model: str = Field(default="local-model")
+    local_llm_api_key: str = Field(default="lm-studio")
+    local_llm_timeout: float = Field(default=3.0)
+    dynamic_sltp_enabled: bool = Field(default=True)
+    scalp_micro_trailing: bool = Field(default=True)
 
     @property
     def llm_enabled(self) -> bool:
@@ -494,6 +502,13 @@ class Settings(BaseSettings):
             "cut_losing_after_hours": self.cut_losing_after_hours,
             "max_spread_points": self.max_spread_points,
             "max_spread_atr_ratio": self.max_spread_atr_ratio,
+            "llm_provider": self.llm_provider.value,
+            "local_llm_url": self.local_llm_url,
+            "local_llm_model": self.local_llm_model,
+            "local_llm_api_key": self.local_llm_api_key,
+            "local_llm_timeout": self.local_llm_timeout,
+            "dynamic_sltp_enabled": self.dynamic_sltp_enabled,
+            "scalp_micro_trailing": self.scalp_micro_trailing,
         }
 
 

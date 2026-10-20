@@ -117,6 +117,19 @@ except Exception as _loc_import_error:  # pragma: no cover - defensive
         f"falling back to ATR-only stops and no location gate."
     )
 
+try:
+    from core.ai.dynamic_sltp import DynamicSLTPReasoner as _DynamicSLTPReasoner
+    from core.ai.provider import get_llm_provider as _get_llm_provider
+    _DYNAMIC_SLTP_AVAILABLE = True
+except Exception as _sltp_import_error:  # pragma: no cover - defensive
+    _DynamicSLTPReasoner = None
+    _get_llm_provider = None
+    _DYNAMIC_SLTP_AVAILABLE = False
+    print(
+        f"WARNING: dynamic SL/TP reasoning layer unavailable ({_sltp_import_error!r}); "
+        f"falling back to standard stops."
+    )
+
 from sklearn.ensemble import (
     ExtraTreesClassifier,
     GradientBoostingClassifier,
@@ -395,6 +408,14 @@ CONFIG = {
     "max_trades_per_day": _profile_cfg("MAX_TRADES_PER_DAY", 15, 60, val_type=int),
     "magic_number":     int(os.getenv("MAGIC_NUMBER", 888999)),
     "deviation":        20,
+
+    # --- dynamic AI reasoning & SL/TP ---
+    "dynamic_sltp_enabled":    os.getenv("DYNAMIC_SLTP_ENABLED", "true").lower() in ("1", "true", "yes"),
+    "llm_provider":            os.getenv("LLM_PROVIDER", "embedded"),
+    "local_llm_url":           os.getenv("LOCAL_LLM_URL", "http://localhost:1234/v1"),
+    "local_llm_model":         os.getenv("LOCAL_LLM_MODEL", "local-model"),
+    "local_llm_timeout":       float(os.getenv("LOCAL_LLM_TIMEOUT", "3.0")),
+    "scalp_micro_trailing":    os.getenv("SCALP_MICRO_TRAILING", "true").lower() in ("1", "true", "yes"),
 
     # --- manual trade management ---
     "ai_protect_manual_trades":  True,
@@ -1705,6 +1726,7 @@ class StandaloneAIBot:
         # every 0.5s loop tick would be pure waste. ---
         self._location_cache = None
         self._location_bar_time = None
+        self._sltp_reasoner = None
 
     # --------------------------------------------------------------
     def _location_for(self, m15p: pd.DataFrame):
@@ -1765,6 +1787,25 @@ class StandaloneAIBot:
         self._location_bar_time = bar_time
         self._location_cache = location
         return location
+
+    def _get_sltp_reasoner(self):
+        """Lazy initializer for the DynamicSLTPReasoner engine."""
+        if self._sltp_reasoner is None and _DYNAMIC_SLTP_AVAILABLE:
+            try:
+                provider = _get_llm_provider(
+                    provider_name=self.cfg.get("llm_provider", "embedded"),
+                    base_url=self.cfg.get("local_llm_url", "http://localhost:1234/v1"),
+                    model=self.cfg.get("local_llm_model", ""),
+                    timeout=float(self.cfg.get("local_llm_timeout", 3.0)),
+                )
+                self._sltp_reasoner = _DynamicSLTPReasoner(provider=provider, config=self.cfg)
+                logger.info("[%s] Dynamic AI SL/TP Reasoner initialized (provider=%s)",
+                            self.cfg.get("symbol", ""), self.cfg.get("llm_provider", "embedded"))
+            except Exception as exc:
+                logger.warning("[%s] Failed to initialize DynamicSLTPReasoner: %r",
+                               self.cfg.get("symbol", ""), exc)
+                self._sltp_reasoner = None
+        return self._sltp_reasoner
 
     # --------------------------------------------------------------
     def get_status(self) -> dict:
@@ -2176,54 +2217,67 @@ class StandaloneAIBot:
         sl_dist = self.cfg["sl_atr_mult"] * atr
         stop_source = "atr"
         stop_note = ""
+        sltp_done = False
 
-        if self.cfg.get("location_stop", True) and atr > 0:
-            location = self._location_for(m15p)
-            if location is not None and location.is_valid:
-                plan = location.structural_stop(
-                    price,
-                    direction,
-                    min_atr_mult=self.cfg.get("location_stop_min_atr", 0.75),
-                    max_atr_mult=self.cfg.get("location_stop_max_atr", 3.0),
-                    tick_size=_valid_tick(getattr(info, "trade_tick_size", None)
-                                          or getattr(info, "point", None)),
+        # --- DYNAMIC AI REASONING FOR ENTRY SL/TP ---
+        if self.cfg.get("dynamic_sltp_enabled", True) and self.cfg.get("location_stop", True) and _DYNAMIC_SLTP_AVAILABLE and atr > 0:
+            reasoner = self._get_sltp_reasoner()
+            if reasoner is not None:
+                location = self._location_for(m15p) if _LOCATION_AVAILABLE else None
+                plan = reasoner.calculate_entry_sltp(
+                    sym, direction, price, m15p, atr,
+                    location=location, symbol_info=info
                 )
-                if plan is not None:
-                    stop_source = "structure" if plan.structural else "volatility"
-                    stop_note = plan.reason
-                    if direction == 1:
-                        sl = plan.price
-                    else:
-                        sl = plan.price
-                    sl_dist = abs(price - sl)
-                # plan is None -> keep the ATR stop below
+                if plan is not None and plan.valid:
+                    sl = plan.sl_price
+                    tp = plan.tp_price
+                    sl_dist = plan.sl_distance
+                    stop_source = plan.sl_source
+                    stop_note = plan.reasoning
+                    sltp_done = True
+                    logger.info("[%s] AI Dynamic SL/TP: SL=%.5f TP=%.5f (R:R=%.2f) | %s",
+                                sym, sl, tp, plan.rr_ratio, plan.reasoning)
 
-        if direction == 1:
-            if stop_source == "atr":
-                sl = price - sl_dist
-            tp = price + sl_dist * self.cfg["tp_rr_ratio"]
-        else:
-            if stop_source == "atr":
-                sl = price + sl_dist
-            tp = price - sl_dist * self.cfg["tp_rr_ratio"]
+        if not sltp_done:
+            if self.cfg.get("location_stop", True) and atr > 0:
+                location = self._location_for(m15p)
+                if location is not None and location.is_valid:
+                    plan = location.structural_stop(
+                        price,
+                        direction,
+                        min_atr_mult=self.cfg.get("location_stop_min_atr", 0.75),
+                        max_atr_mult=self.cfg.get("location_stop_max_atr", 3.0),
+                        tick_size=_valid_tick(getattr(info, "trade_tick_size", None)
+                                              or getattr(info, "point", None)),
+                    )
+                    if plan is not None:
+                        stop_source = "structure" if plan.structural else "volatility"
+                        stop_note = plan.reason
+                        sl = plan.price
+                        sl_dist = abs(price - sl)
+                    # plan is None -> keep the ATR stop below
 
-        # --- take profit: prefer resting liquidity in the trade's favour ---
-        # Buy-side liquidity (stops above swing highs) is the natural magnet
-        # for a long, and vice versa. Aiming there is more meaningful than a
-        # fixed RR — but only when a pool actually exists beyond entry, and
-        # only when the resulting RR still clears tp_rr_ratio. Anything less
-        # falls back to the fixed multiple rather than degrading the target.
-        if self.cfg.get("location_target", True):
-            location = self._location_for(m15p)
-            if location is not None and location.is_valid and location.atr:
-                pool = location.target_above() if direction == 1 else location.target_below()
-                if pool is not None:
-                    candidate = pool.price - direction * location.atr * 0.10
-                    rr_from_pool = abs(candidate - price) / max(sl_dist, 1e-10)
-                    if (candidate - price) * direction > 0 and rr_from_pool >= self.cfg["tp_rr_ratio"]:
-                        tp = candidate
-                        stop_note = (stop_note + "; " if stop_note else "") + \
-                                    f"TP at {pool.kind.value} liquidity pool {pool.price:.5f}"
+            if direction == 1:
+                if stop_source == "atr":
+                    sl = price - sl_dist
+                tp = price + sl_dist * self.cfg["tp_rr_ratio"]
+            else:
+                if stop_source == "atr":
+                    sl = price + sl_dist
+                tp = price - sl_dist * self.cfg["tp_rr_ratio"]
+
+            # --- take profit: prefer resting liquidity in the trade's favour ---
+            if self.cfg.get("location_target", True):
+                location = self._location_for(m15p)
+                if location is not None and location.is_valid and location.atr:
+                    pool = location.target_above() if direction == 1 else location.target_below()
+                    if pool is not None:
+                        candidate = pool.price - direction * location.atr * 0.10
+                        rr_from_pool = abs(candidate - price) / max(sl_dist, 1e-10)
+                        if (candidate - price) * direction > 0 and rr_from_pool >= self.cfg["tp_rr_ratio"]:
+                            tp = candidate
+                            stop_note = (stop_note + "; " if stop_note else "") + \
+                                        f"TP at {pool.kind.value} liquidity pool {pool.price:.5f}"
 
         if stop_note:
             logger.info("[%s] Stop via %s: %s", self.cfg["symbol"], stop_source, stop_note)
@@ -2630,6 +2684,26 @@ class StandaloneAIBot:
                 if floating_pnl <= 0:
                     self._close_position(pos, "TIME_DECAY", floating_pnl)
                     continue
+
+            # --- DYNAMIC AI SL/TP RATCHET (One-Way Market Reasoner) ---
+            if self.cfg.get("dynamic_sltp_enabled", True) and _DYNAMIC_SLTP_AVAILABLE and floating_pnl > 0:
+                reasoner = self._get_sltp_reasoner()
+                if reasoner is not None:
+                    loc = self._location_for(m15p) if _LOCATION_AVAILABLE else None
+                    sym_info = mt5.symbol_info(pos.symbol)
+                    adj = reasoner.evaluate_position_sltp(
+                        pos, m15p, atr, location=loc, symbol_info=sym_info,
+                        peak_profit=self._peak_profit.get(pos.ticket, 0.0)
+                    )
+                    if adj.new_sl is not None:
+                        if direction == 1 and adj.new_sl > pos.sl + 1e-9 and adj.new_sl < close_price:
+                            logger.info("[%s] AI Dynamic SL (%s): %.5f -> %.5f (%s)",
+                                        pos.symbol, adj.action, pos.sl, adj.new_sl, adj.reasoning)
+                            self._modify_sl(pos, adj.new_sl)
+                        elif direction == -1 and (pos.sl == 0 or adj.new_sl < pos.sl - 1e-9) and adj.new_sl > close_price:
+                            logger.info("[%s] AI Dynamic SL (%s): %.5f -> %.5f (%s)",
+                                        pos.symbol, adj.action, pos.sl, adj.new_sl, adj.reasoning)
+                            self._modify_sl(pos, adj.new_sl)
 
             # --- MARKET STRUCTURE TRAILING STOP ---
             if floating_pnl > 0 and self.cfg.get("structure_trailing", True):

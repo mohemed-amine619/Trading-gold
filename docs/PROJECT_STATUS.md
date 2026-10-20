@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**473 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**486 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -17,8 +17,9 @@
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 22 | Implemented and tested |
 | Risk, position, strategy, scalping & market | 78 | Implemented and tested |
-| **Market structure & location** | **70** | **New — implemented and tested** |
-| **Trading orchestrator (candles → orders)** | **19** | **New — implemented and tested** |
+| **Market structure & location** | **70** | Implemented and tested |
+| **Trading orchestrator (candles → orders)** | **19** | Implemented and tested |
+| **Dynamic AI SL/TP Reasoning & Embedded LLM** | **13** | **New — implemented and tested** |
 | Manual trades isolation & order execution | 7 | Implemented and tested |
 | Other unit tests | 3 | Implemented and tested |
 
@@ -128,6 +129,29 @@ end-to-end, but is still not an entrypoint.
 - No backtest has been run against the location layer; the regime-aware gate in
   particular should be validated on history before it is trusted with live
   capital.
+
+---
+
+## 0.0.1 NEW — DYNAMIC AI SL/TP & EMBEDDED REASONING MODEL
+
+The bot previously relied on static ATR multipliers or fixed R:R multiples for
+stop-loss and take-profit, with no understanding of live market conditions,
+liquidity magnets, or dynamic trade adaptation.
+
+### Added
+
+| Module | Responsibility |
+|---|---|
+| `core/ai/provider.py` | Self-contained `EmbeddedReasoningProvider` (runs locally in pure Python with zero external model dependencies), plus `LocalEndpointProvider` (OpenAI-compatible) and `OllamaProvider`. |
+| `core/ai/dynamic_sltp.py` | `DynamicSLTPReasoner`: dynamic entry SL/TP (anchored to structural invalidation swings and liquidity pool magnets) + dynamic position ratcheting. |
+| `SLTPSafetyGuard` | Mathematical safety invariants: **Never Loosen SL** (one-way ratchet), ATR floor/ceiling bounds, broker stops level compliance, half-up tick grid price snapping. |
+| `run.py` & `core/settings.py` | Defensively wired into live bot order submission (`_send_order`) and continuous position management (`_manage_positions`). |
+
+### Guarded Invariants
+
+1. **Never loosen SL**: A BUY stop can only ratchet upward; a SELL stop can only ratchet downward. Any loosening suggestion is rejected immediately.
+2. **Deterministic execution**: The embedded model runs in sub-millisecond time and requires no external servers, API keys, or GPU setup.
+3. **Fail-safe fallback**: If any AI layer is disabled or unavailable, the bot falls back seamlessly to structural stops and standard trailing without interrupting live trading.
 
 ---
 
