@@ -558,3 +558,89 @@ def test_api_settings_syncs_profit_lock_and_spatial_veto(run_and_stub, monkeypat
     assert saved_env["TP_RR_RATIO"] == "2.2"
     assert saved_env["STRICT_LOCATION_VETO"] == "true"
 
+
+def test_llm_critic_veto_in_get_signal(run_and_stub, monkeypatch):
+    """When LLM critic vetoes trade candidate (trap/exhaustion), bot rejects signal."""
+    run_module, _ = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["symbol"] = "XAUUSDm"
+    cfg["min_signal_score"] = 50
+    cfg["gold_min_signal_score"] = 50
+    cfg["llm_critic_enabled"] = True
+    bot = run_module.StandaloneAIBot(cfg)
+    bot.ai = types.SimpleNamespace(
+        update=lambda df: None,
+        predict=lambda df: types.SimpleNamespace(direction=1, confidence=0.70)
+    )
+
+    df = pd.DataFrame({
+        "open": [2640.0]*60, "high": [2645.0]*60, "low": [2638.0]*60, "close": [2642.0]*60,
+        "adx": [25.0]*60, "atr": [4.0]*60, "volume": [1000]*60, "rsi": [60.0]*60
+    })
+
+    monkeypatch.setattr(run_module, "_session_ok", lambda cfg: True)
+    monkeypatch.setattr(run_module, "_score_direction", lambda *a, **k: 65.0)
+
+    # Mock reasoner with Veto
+    class MockCritique:
+        approved = False
+        decision = "PASS"
+        confidence = 35.0
+        reasoning = "Overextended into key liquidity pool, high reversal probability"
+        risk_assessment = "Unfavorable"
+
+    class MockReasoner:
+        def evaluate_trade_candidate(self, **kwargs):
+            return MockCritique()
+
+    bot._sltp_reasoner = MockReasoner()
+
+    direction, score, conf, reason = bot._get_signal(df, df, df)
+    assert direction == 0
+    assert "LLM critic veto" in reason
+    assert "reversal probability" in reason
+
+
+def test_api_settings_llm_controls_roundtrip(run_and_stub, monkeypatch):
+    """Dashboard API GET and POST synchronize LLM critic toggle, provider, URL, and model."""
+    run_module, _ = run_and_stub
+    from fastapi.testclient import TestClient
+
+    saved_env = {}
+    monkeypatch.setattr(run_module, "_update_env_file", lambda updates, env_path=".env": saved_env.update(updates) or True)
+
+    cfg = dict(run_module.CONFIG)
+    bot = run_module.StandaloneAIBot(cfg)
+    app = run_module.create_app([bot])
+    client = TestClient(app)
+
+    # 1. Test GET returns LLM fields
+    res_get = client.get("/api/settings")
+    assert res_get.status_code == 200
+    data = res_get.json()
+    assert "llm_critic_enabled" in data
+    assert "llm_provider" in data
+    assert "local_llm_url" in data
+    assert "local_llm_model" in data
+
+    # 2. Test POST updates LLM config
+    payload = {
+        "llm_critic_enabled": True,
+        "llm_provider": "openai_compatible",
+        "local_llm_url": "https://api.groq.com/openai/v1",
+        "local_llm_model": "llama-3.3-70b-versatile"
+    }
+    res_post = client.post("/api/settings", json=payload)
+    assert res_post.status_code == 200
+
+    assert bot.cfg["llm_critic_enabled"] is True
+    assert bot.cfg["llm_provider"] == "openai_compatible"
+    assert bot.cfg["local_llm_url"] == "https://api.groq.com/openai/v1"
+    assert bot.cfg["local_llm_model"] == "llama-3.3-70b-versatile"
+
+    assert saved_env["LLM_CRITIC_ENABLED"] == "true"
+    assert saved_env["LLM_PROVIDER"] == "openai_compatible"
+    assert saved_env["LOCAL_LLM_URL"] == "https://api.groq.com/openai/v1"
+    assert saved_env["LOCAL_LLM_MODEL"] == "llama-3.3-70b-versatile"
+
+

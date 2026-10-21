@@ -421,9 +421,11 @@ CONFIG = {
 
     # --- dynamic AI reasoning & SL/TP ---
     "dynamic_sltp_enabled":    os.getenv("DYNAMIC_SLTP_ENABLED", "true").lower() in ("1", "true", "yes"),
+    "llm_critic_enabled":      os.getenv("LLM_CRITIC_ENABLED", "true").lower() in ("1", "true", "yes"),
     "llm_provider":            os.getenv("LLM_PROVIDER", "embedded"),
     "local_llm_url":           os.getenv("LOCAL_LLM_URL", "http://localhost:1234/v1"),
     "local_llm_model":         os.getenv("LOCAL_LLM_MODEL", "local-model"),
+    "local_llm_api_key":       os.getenv("LOCAL_LLM_API_KEY", "") or os.getenv("LLM_API_KEY", ""),
     "local_llm_timeout":       float(os.getenv("LOCAL_LLM_TIMEOUT", "3.0")),
     "scalp_micro_trailing":    os.getenv("SCALP_MICRO_TRAILING", "true").lower() in ("1", "true", "yes"),
 
@@ -1842,6 +1844,7 @@ class StandaloneAIBot:
                     base_url=self.cfg.get("local_llm_url", "http://localhost:1234/v1"),
                     model=self.cfg.get("local_llm_model", ""),
                     timeout=float(self.cfg.get("local_llm_timeout", 3.0)),
+                    api_key=self.cfg.get("local_llm_api_key", ""),
                 )
                 self._sltp_reasoner = _DynamicSLTPReasoner(provider=provider, config=self.cfg)
                 logger.info("[%s] Dynamic AI SL/TP Reasoner initialized (provider=%s)",
@@ -2188,6 +2191,31 @@ class StandaloneAIBot:
                 else:
                     logger.debug("[%s] Location UNDEFINED (no confirmed range) — not vetoing",
                                  self.cfg["symbol"])
+
+        # --- LLM TRADER & ADVERSARIAL RISK CRITIC ---
+        # Subject the candidate signal to the LLM quantitative council for final trap detection
+        if self.cfg.get("llm_critic_enabled", True) and _DYNAMIC_SLTP_AVAILABLE and best_dir != 0:
+            reasoner = self._get_sltp_reasoner()
+            if reasoner is not None and hasattr(reasoner, "evaluate_trade_candidate"):
+                critique = reasoner.evaluate_trade_candidate(
+                    symbol=self.cfg["symbol"],
+                    direction=best_dir,
+                    score=best_score,
+                    ai_conf=ai_conf,
+                    df=m15p,
+                    h1_df=h1p,
+                    h4_df=h4p,
+                    location=self._location_for(m15p) if _LOCATION_AVAILABLE else None,
+                )
+                if not critique.approved:
+                    logger.info("[%s] 🧠 LLM Trader Critic VETO: %s (Confidence: %.1f)",
+                                self.cfg["symbol"], critique.reasoning, critique.confidence)
+                    return 0, best_score, ai_conf, f"LLM critic veto: {critique.reasoning}"
+                else:
+                    logger.info("[%s] 🧠 LLM Trader Confirmed: %s (Risk: %s)",
+                                self.cfg["symbol"], critique.reasoning, critique.risk_assessment)
+                    if critique.confidence > 0:
+                        ai_conf = max(ai_conf, min(0.95, critique.confidence / 100.0))
 
         return best_dir, best_score, ai_conf, "signal"
 
@@ -3287,6 +3315,10 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             "profit_lock_activate_atr": float(cfg.get("profit_lock_activate_atr", 0.70) or 0.70),
             "profit_giveback_pct": round(float(cfg.get("profit_giveback_pct", 0.25) or 0.25) * 100, 1) if float(cfg.get("profit_giveback_pct", 0.25) or 0.25) <= 1.0 else float(cfg.get("profit_giveback_pct", 25.0)),
             "strict_location_veto": bool(cfg.get("strict_location_veto", True)),
+            "llm_critic_enabled": bool(cfg.get("llm_critic_enabled", True)),
+            "llm_provider": str(cfg.get("llm_provider", "embedded")),
+            "local_llm_url": str(cfg.get("local_llm_url", "http://localhost:1234/v1")),
+            "local_llm_model": str(cfg.get("local_llm_model", "local-model")),
             "default_manual_policy": cfg.get("default_manual_policy", "observe_only"),
             "ai_enabled": cfg.get("ai_enabled", True),
             "ai_confidence_threshold": cfg.get("ai_confidence_threshold", 0.55),
@@ -3368,6 +3400,38 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             for b in bots:
                 b.cfg["strict_location_veto"] = slv
             env_updates["STRICT_LOCATION_VETO"] = "true" if slv else "false"
+
+        # 2c. LLM Trader & Model Selection
+        if "llm_critic_enabled" in new_cfg and new_cfg["llm_critic_enabled"] is not None:
+            lce = bool(new_cfg["llm_critic_enabled"])
+            CONFIG["llm_critic_enabled"] = lce
+            for b in bots:
+                b.cfg["llm_critic_enabled"] = lce
+            env_updates["LLM_CRITIC_ENABLED"] = "true" if lce else "false"
+
+        if "llm_provider" in new_cfg and new_cfg["llm_provider"]:
+            llm_p = str(new_cfg["llm_provider"]).strip().lower()
+            CONFIG["llm_provider"] = llm_p
+            for b in bots:
+                b.cfg["llm_provider"] = llm_p
+                b._sltp_reasoner = None
+            env_updates["LLM_PROVIDER"] = llm_p
+
+        if "local_llm_url" in new_cfg and new_cfg["local_llm_url"]:
+            llm_u = str(new_cfg["local_llm_url"]).strip()
+            CONFIG["local_llm_url"] = llm_u
+            for b in bots:
+                b.cfg["local_llm_url"] = llm_u
+                b._sltp_reasoner = None
+            env_updates["LOCAL_LLM_URL"] = llm_u
+
+        if "local_llm_model" in new_cfg and new_cfg["local_llm_model"]:
+            llm_m = str(new_cfg["local_llm_model"]).strip()
+            CONFIG["local_llm_model"] = llm_m
+            for b in bots:
+                b.cfg["local_llm_model"] = llm_m
+                b._sltp_reasoner = None
+            env_updates["LOCAL_LLM_MODEL"] = llm_m
 
         # 3. Max daily DD
         raw_dd = new_cfg.get("max_daily_drawdown_pct") if "max_daily_drawdown_pct" in new_cfg else new_cfg.get("max_daily_dd")

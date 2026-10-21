@@ -266,6 +266,60 @@ class OllamaProvider(LLMProvider):
             return self.fallback.generate(prompt, system_prompt, json_mode=json_mode)
 
 
+class OpenAICompatibleProvider(LLMProvider):
+    """
+    Connects to any OpenAI-compatible HTTP API:
+    - Cloud: OpenAI, DeepSeek, Groq, Mistral, Together, OpenRouter
+    - Local: LM Studio, vLLM, LocalAI, Ollama (/v1)
+    """
+
+    def __init__(
+        self,
+        base_url: str = "https://api.openai.com/v1",
+        model: str = "gpt-4o-mini",
+        api_key: str = "",
+        timeout: float = 4.0,
+        fallback_provider: Optional[LLMProvider] = None,
+    ):
+        self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self.model = model or "gpt-4o-mini"
+        self.api_key = api_key or "local"
+        self.timeout = timeout
+        self.fallback = fallback_provider or EmbeddedReasoningProvider()
+
+    def generate(self, prompt: str, system_prompt: str, json_mode: bool = False) -> str:
+        endpoint = f"{self.base_url}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
+        try:
+            resp = requests.post(endpoint, json=payload, headers=headers, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            if json_mode:
+                return _clean_json_markdown(content)
+            return content
+        except Exception as exc:
+            logger.warning(
+                "OpenAICompatibleProvider failed at %s (%s). Falling back to embedded AI.",
+                endpoint, exc
+            )
+            return self.fallback.generate(prompt, system_prompt, json_mode=json_mode)
+
+
 def _clean_json_markdown(raw: str) -> str:
     """Strip markdown code block wrappers (```json ... ```) from LLM responses."""
     cleaned = raw.strip()
@@ -280,15 +334,18 @@ def get_llm_provider(
     base_url: str = "http://localhost:1234/v1",
     model: str = "",
     timeout: float = 3.0,
+    api_key: str = "",
 ) -> LLMProvider:
     """Factory helper to obtain the configured LLM provider."""
     p = str(provider_name).strip().lower()
     if p in ("embedded", "builtin", "internal", "none"):
         return EmbeddedReasoningProvider()
     if p in ("local_endpoint", "local", "lmstudio", "vllm"):
-        return LocalEndpointProvider(base_url=base_url, model=model or "local-model", timeout=timeout)
+        return LocalEndpointProvider(base_url=base_url, model=model or "local-model", timeout=timeout, api_key=api_key)
     if p in ("ollama",):
         return OllamaProvider(base_url=base_url or "http://localhost:11434", model=model or "llama3.2", timeout=timeout)
+    if p in ("openai", "openai_compatible", "deepseek", "groq", "cloud"):
+        return OpenAICompatibleProvider(base_url=base_url or "https://api.openai.com/v1", model=model or "gpt-4o-mini", api_key=api_key, timeout=timeout)
     if p in ("mock", "test"):
         return MockLLMProvider()
     return EmbeddedReasoningProvider()

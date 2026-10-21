@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**486 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**507 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -19,9 +19,9 @@
 | Risk, position, strategy, scalping & market | 78 | Implemented and tested |
 | **Market structure & location** | **70** | Implemented and tested |
 | **Trading orchestrator (candles → orders)** | **19** | Implemented and tested |
-| **Dynamic AI SL/TP Reasoning & Embedded LLM** | **13** | **New — implemented and tested** |
+| **Dynamic AI SL/TP Reasoning & LLM Trader Council** | **19** | **New — implemented and tested** |
 | Manual trades isolation & order execution | 7 | Implemented and tested |
-| Other unit tests | 3 | Implemented and tested |
+| Other unit tests | 56 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter` or an in-memory scripted fake.

@@ -14,6 +14,7 @@ Strict mathematical safety invariants are enforced at all times:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field
@@ -110,6 +111,16 @@ class PositionAdjustmentPlan:
     reasoning: str = ""
     confidence: float = 0.8
     executed: bool = False
+
+
+@dataclass
+class TradeCritiqueResult:
+    """Quantitative decision from the LLM Market Analyst and Risk Critic."""
+    approved: bool
+    confidence: float
+    decision: str              # "BUY", "SELL", "PASS"
+    reasoning: str
+    risk_assessment: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -352,14 +363,36 @@ class DynamicSLTPReasoner:
                     tp_source = f"ai_liquidity_pool_{pool.kind.value}"
                     reasoning_parts.append(f"TP targeted 0.15 ATR before resting liquidity at {pool.price:.4f} (R:R {candidate_rr:.2f})")
 
-        # 3. Microstructure Scalping Refinement
-        # In scalping mode, check if spread-to-ATR is tight
+        # 3. Microstructure Scalping Refinement & LLM Consultation
         spread_pts = getattr(symbol_info, "spread", 0) or 0
         spread_val = spread_pts * point
-        if atr > 0:
-            spread_ratio = spread_val / atr
-            if spread_ratio < 0.10:
-                reasoning_parts.append("Low spread friction (<10% ATR) enhances scalp precision.")
+        spread_ratio = (spread_val / atr) if atr > 0 else 0.0
+        if atr > 0 and spread_ratio < 0.10:
+            reasoning_parts.append("Low spread friction (<10% ATR) enhances scalp precision.")
+
+        prompt = (
+            f"Symbol: {symbol}\n"
+            f"Direction: {'BUY' if direction == 1 else 'SELL'}\n"
+            f"Entry Price: {entry_price:.5f}\n"
+            f"ATR: {atr:.5f}\n"
+            f"Proposed Structural SL: {sl_price:.5f}\n"
+            f"Proposed Target TP: {tp_price:.5f}\n"
+            f"Spread Points: {spread_pts}\n"
+            "Task: Evaluate entry SL/TP validity and output JSON."
+        )
+        system_prompt = (
+            "You are an Elite Institutional Quant Trader and Execution Architect. "
+            "Evaluate the proposed entry SL/TP levels against market structure and liquidity. "
+            "Output JSON: {\"decision\": \"CONFIRM\"|\"PASS\", \"confidence\": float, "
+            "\"sl_type\": str, \"tp_type\": str, \"reasoning\": str, \"risk_assessment\": str}"
+        )
+        try:
+            raw_ai = self.provider.generate(prompt, system_prompt, json_mode=True)
+            ai_data = json.loads(raw_ai)
+            if ai_data.get("reasoning"):
+                reasoning_parts.append(f"AI: {ai_data['reasoning']}")
+        except Exception as e:
+            logger.debug("[%s] LLM query in calculate_entry_sltp: %s", symbol, e)
 
         # 4. Pass through Safety Guardrails
         validated = self.guard.validate_entry_sltp(
@@ -572,3 +605,82 @@ class DynamicSLTPReasoner:
             reasoning=reason,
             confidence=0.85,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 3. Pre-Trade LLM Critic & Institutional Trade Validation
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def evaluate_trade_candidate(
+        self,
+        symbol: str,
+        direction: int,
+        score: float,
+        ai_conf: float,
+        df: pd.DataFrame,
+        h1_df: Optional[pd.DataFrame] = None,
+        h4_df: Optional[pd.DataFrame] = None,
+        location: Any = None,
+    ) -> TradeCritiqueResult:
+        """
+        Adversarial LLM Risk Critic.
+        Evaluates a candidate trade setup using spatial location, higher timeframe
+        context, volatility, and orderflow to validate edge or veto traps.
+        """
+        dir_str = "BUY" if direction == 1 else "SELL"
+        last_bar = df.iloc[-1] if not df.empty else {}
+        atr = float(last_bar.get("atr", 0.0))
+        adx = float(last_bar.get("adx", 0.0))
+        rsi = float(last_bar.get("rsi", 50.0))
+
+        context_lines = [
+            f"Symbol: {symbol}",
+            f"Technical Signal: {dir_str} (Confluence Score: {score:.1f}, ML Base Conf: {ai_conf:.2f})",
+            f"Execution Microstructure: ADX={adx:.1f}, RSI={rsi:.1f}, ATR={atr:.5f}",
+        ]
+        if location is not None and getattr(location, "is_valid", False):
+            context_lines.append(f"Dealing Range: {location.range_low:.5f} - {location.range_high:.5f}")
+            context_lines.append(f"Range Location: {location.bias.value} ({location.range_position:.1%} of range)")
+            if location.nearest_resistance():
+                context_lines.append(f"Overhead Resistance: {location.nearest_resistance().price:.5f} (Strength: {location.nearest_resistance().strength:.2f})")
+            if location.nearest_support():
+                context_lines.append(f"Underlying Support: {location.nearest_support().price:.5f} (Strength: {location.nearest_support().strength:.2f})")
+            if location.structure and getattr(location.structure, "last_choch", None):
+                context_lines.append(f"Last Structural Break: {location.structure.last_choch.kind.value} (Direction: {location.structure.last_choch.direction})")
+
+        prompt = (
+            "\n".join(context_lines) + "\n"
+            "Task: Act as Adversarial Risk Critic. Evaluate if this trade has genuine positive edge or is a trap. "
+            "Output JSON: {\"decision\": \"BUY\"|\"SELL\"|\"PASS\", \"confidence\": float, \"reasoning\": str, \"risk_assessment\": str}"
+        )
+        system_prompt = (
+            "You are an Elite Institutional Quant Trader and Risk Critic. "
+            "Review technical signal and market microstructure. Reject trades entering into traps or exhaustion. "
+            "Approve high-confluence continuation or valid reversal setups. "
+            "Must return valid JSON."
+        )
+
+        try:
+            raw = self.provider.generate(prompt, system_prompt, json_mode=True)
+            data = json.loads(raw)
+            decision = str(data.get("decision", "PASS")).upper().strip()
+            confidence = float(data.get("confidence", 80.0))
+            reasoning = str(data.get("reasoning", ""))
+            risk = str(data.get("risk_assessment", ""))
+
+            approved = (decision == dir_str)
+            return TradeCritiqueResult(
+                approved=approved,
+                confidence=confidence,
+                decision=decision,
+                reasoning=reasoning,
+                risk_assessment=risk,
+            )
+        except Exception as e:
+            logger.debug("[%s] LLM Trade Candidate Evaluation fallback: %s", symbol, e)
+            return TradeCritiqueResult(
+                approved=True,
+                confidence=ai_conf * 100.0,
+                decision=dir_str,
+                reasoning="Approved via technical confluence (AI fallback).",
+                risk_assessment="Standard risk parameters.",
+            )

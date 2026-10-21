@@ -356,3 +356,115 @@ def test_gold_peak_profit_giveback_defense():
     assert adjustment.action in ("TIGHTEN_SL", "SECURE_PROFIT", "MOVE_TO_BREAKEVEN")
     assert adjustment.new_sl is not None
     assert adjustment.new_sl > pos.sl
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. LLM Trader Council & OpenAICompatibleProvider Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_openai_compatible_provider_mock(monkeypatch):
+    """OpenAICompatibleProvider formats requests and parses responses correctly."""
+    from core.ai.provider import OpenAICompatibleProvider, get_llm_provider
+
+    provider = get_llm_provider("openai_compatible", base_url="https://api.groq.com/openai/v1", model="llama-3.3-70b-versatile", api_key="test-key")
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.base_url == "https://api.groq.com/openai/v1"
+    assert provider.model == "llama-3.3-70b-versatile"
+    assert provider.api_key == "test-key"
+
+    # Mock requests.post
+    class MockResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {
+                "choices": [{
+                    "message": {
+                        "content": '{"decision": "BUY", "confidence": 88.0, "reasoning": "Strong order flow", "risk_assessment": "Low"}'
+                    }
+                }]
+            }
+
+    import requests
+    monkeypatch.setattr(requests, "post", lambda url, json, headers, timeout: MockResponse())
+
+    res = provider.generate("Analyze setup", "You are quant", json_mode=True)
+    assert '"decision": "BUY"' in res
+    assert '"confidence": 88.0' in res
+
+
+def test_openai_compatible_provider_fallback_on_network_error(monkeypatch):
+    """When remote LLM times out or fails, fallback to embedded reasoning safely."""
+    from core.ai.provider import OpenAICompatibleProvider
+
+    provider = OpenAICompatibleProvider(base_url="http://invalid-llm-host:1234/v1")
+
+    import requests
+    def mock_post_fail(*a, **k):
+        raise requests.ConnectionError("Connection refused")
+
+    monkeypatch.setattr(requests, "post", mock_post_fail)
+
+    # Must NOT raise exception; returns embedded fallback
+    res = provider.generate("Evaluate SL/TP", "System Prompt", json_mode=True)
+    assert isinstance(res, str)
+    assert "decision" in res
+
+
+def test_evaluate_trade_candidate_critic_approval(monkeypatch):
+    """DynamicSLTPReasoner.evaluate_trade_candidate approves high confluence setups."""
+    from core.ai.dynamic_sltp import DynamicSLTPReasoner
+    from core.ai.provider import MockLLMProvider
+
+    class ConfirmingLLM(MockLLMProvider):
+        def generate(self, prompt, system_prompt, json_mode=False):
+            return '{"decision": "BUY", "confidence": 92.5, "reasoning": "Clear liquidity sweep at support", "risk_assessment": "Favorable 1:2.5 RR"}'
+
+    reasoner = DynamicSLTPReasoner(provider=ConfirmingLLM())
+    df = pd.DataFrame({
+        "open": [2640.0, 2642.0], "high": [2645.0, 2646.0],
+        "low": [2639.0, 2641.0], "close": [2642.0, 2645.0],
+        "rsi": [55.0, 58.0], "adx": [24.0, 26.0], "atr": [4.0, 4.0]
+    })
+
+    critique = reasoner.evaluate_trade_candidate(
+        symbol="XAUUSDm",
+        direction=1,
+        score=72.0,
+        ai_conf=0.65,
+        df=df,
+    )
+
+    assert critique.approved is True
+    assert critique.decision == "BUY"
+    assert critique.confidence == 92.5
+    assert "liquidity sweep" in critique.reasoning
+
+
+def test_evaluate_trade_candidate_critic_veto(monkeypatch):
+    """DynamicSLTPReasoner.evaluate_trade_candidate vetoes setups when LLM critic detects trap."""
+    from core.ai.dynamic_sltp import DynamicSLTPReasoner
+    from core.ai.provider import MockLLMProvider
+
+    class VetoingLLM(MockLLMProvider):
+        def generate(self, prompt, system_prompt, json_mode=False):
+            return '{"decision": "PASS", "confidence": 40.0, "reasoning": "Heavy overhead order block resistance, exhaustion detected", "risk_assessment": "High trap risk"}'
+
+    reasoner = DynamicSLTPReasoner(provider=VetoingLLM())
+    df = pd.DataFrame({
+        "open": [2640.0, 2642.0], "high": [2645.0, 2646.0],
+        "low": [2639.0, 2641.0], "close": [2642.0, 2645.0],
+        "rsi": [78.0, 82.0], "adx": [15.0, 14.0], "atr": [4.0, 4.0]
+    })
+
+    critique = reasoner.evaluate_trade_candidate(
+        symbol="XAUUSDm",
+        direction=1,
+        score=68.0,
+        ai_conf=0.60,
+        df=df,
+    )
+
+    assert critique.approved is False
+    assert critique.decision == "PASS"
+    assert "exhaustion detected" in critique.reasoning
+

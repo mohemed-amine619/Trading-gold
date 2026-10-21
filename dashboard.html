@@ -920,6 +920,37 @@
                                 </div>
                                 <input type="checkbox" id="set-strict-location-veto" class="w-5 h-5 accent-accent" checked>
                             </div>
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">LLM Trader & Risk Critic</label>
+                                    <span class="text-xs text-slate-500">Adversarial quant trade council</span>
+                                </div>
+                                <input type="checkbox" id="set-llm-critic" class="w-5 h-5 accent-accent" checked>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">LLM Provider</label>
+                                    <span class="text-xs text-slate-500">Embedded, Local, or Cloud</span>
+                                </div>
+                                <select id="set-llm-provider" class="w-40 bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent">
+                                    <option value="embedded" selected>Embedded (Zero Setup)</option>
+                                    <option value="local_endpoint">LM Studio / vLLM</option>
+                                    <option value="ollama">Ollama</option>
+                                    <option value="openai_compatible">OpenAI / Groq / DeepSeek</option>
+                                </select>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">LLM Endpoint URL</label>
+                                </div>
+                                <input type="text" id="set-llm-url" class="w-48 bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="http://localhost:1234/v1">
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <label class="text-sm text-slate-300 block">LLM Model Name</label>
+                                </div>
+                                <input type="text" id="set-llm-model" class="w-48 bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="local-model">
+                            </div>
                         </div>
                     </div>
 
@@ -1501,6 +1532,18 @@
                 if (data.adx_trending_min !== undefined && document.getElementById('set-adx')) {
                     document.getElementById('set-adx').value = data.adx_trending_min;
                 }
+                if (data.llm_critic_enabled !== undefined && document.getElementById('set-llm-critic')) {
+                    document.getElementById('set-llm-critic').checked = Boolean(data.llm_critic_enabled);
+                }
+                if (data.llm_provider !== undefined && document.getElementById('set-llm-provider')) {
+                    document.getElementById('set-llm-provider').value = data.llm_provider;
+                }
+                if (data.local_llm_url !== undefined && document.getElementById('set-llm-url')) {
+                    document.getElementById('set-llm-url').value = data.local_llm_url;
+                }
+                if (data.local_llm_model !== undefined && document.getElementById('set-llm-model')) {
+                    document.getElementById('set-llm-model').value = data.local_llm_model;
+                }
 
                 // Execution
                 if (data.deviation_points !== undefined && document.getElementById('set-slippage')) {
@@ -1555,6 +1598,10 @@
                 ai_confidence_threshold: parseFloat(document.getElementById('set-ai-conf').value),
                 min_signal_score: parseInt(document.getElementById('set-min-score').value),
                 adx_trending_min: parseInt(document.getElementById('set-adx').value),
+                llm_critic_enabled: document.getElementById('set-llm-critic') ? document.getElementById('set-llm-critic').checked : true,
+                llm_provider: document.getElementById('set-llm-provider') ? document.getElementById('set-llm-provider').value : "embedded",
+                local_llm_url: document.getElementById('set-llm-url') ? document.getElementById('set-llm-url').value : "http://localhost:1234/v1",
+                local_llm_model: document.getElementById('set-llm-model') ? document.getElementById('set-llm-model').value : "local-model",
                 
                 deviation_points: parseInt(document.getElementById('set-slippage').value),
                 max_requote_retries: parseInt(document.getElementById('set-requote-retries').value),
