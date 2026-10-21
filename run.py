@@ -1840,16 +1840,25 @@ class StandaloneAIBot:
         """Lazy initializer for the DynamicSLTPReasoner engine."""
         if self._sltp_reasoner is None and _DYNAMIC_SLTP_AVAILABLE:
             try:
+                p_name = self.cfg.get("llm_provider", "embedded")
+                b_url = self.cfg.get("local_llm_url", "http://localhost:1234/v1")
                 provider = _get_llm_provider(
-                    provider_name=self.cfg.get("llm_provider", "embedded"),
-                    base_url=self.cfg.get("local_llm_url", "http://localhost:1234/v1"),
+                    provider_name=p_name,
+                    base_url=b_url,
                     model=self.cfg.get("local_llm_model", ""),
                     timeout=float(self.cfg.get("local_llm_timeout", 3.0)),
                     api_key=self.cfg.get("local_llm_api_key", ""),
                 )
                 self._sltp_reasoner = _DynamicSLTPReasoner(provider=provider, config=self.cfg)
-                logger.info("[%s] Dynamic AI SL/TP Reasoner initialized (provider=%s)",
-                            self.cfg.get("symbol", ""), self.cfg.get("llm_provider", "embedded"))
+                logger.info("[%s] Dynamic AI SL/TP Reasoner initialized (provider=%s, url=%s)",
+                            self.cfg.get("symbol", ""), p_name, b_url)
+                if p_name in ("local_endpoint", "local", "lmstudio", "vllm", "ollama", "openai_compatible"):
+                    try:
+                        provider.generate("ping", "Reply with {\"status\":\"ok\"}", json_mode=True)
+                        logger.info("[%s] 🧠 Local LLM connected successfully at %s", self.cfg.get("symbol", ""), b_url)
+                    except Exception as ping_err:
+                        logger.warning("[%s] ⚠️ LLM ping to %s failed: %s (embedded fallback active)",
+                                       self.cfg.get("symbol", ""), b_url, ping_err)
             except Exception as exc:
                 logger.warning("[%s] Failed to initialize DynamicSLTPReasoner: %r",
                                self.cfg.get("symbol", ""), exc)
@@ -3124,6 +3133,8 @@ class StandaloneAIBot:
         self.running = True
         logger.info("=== AI Bot STARTED | symbol=%s | dry_run=%s ===",
                     self.cfg["symbol"], self.cfg.get("dry_run", False))
+        if self.cfg.get("dynamic_sltp_enabled", True) and _DYNAMIC_SLTP_AVAILABLE:
+            self._get_sltp_reasoner()
         if hasattr(self, 'notifier') and hasattr(self.notifier, 'send'):
             self.notifier.send(f"🤖 AI Bot started | {self.cfg['symbol']}")
 
@@ -3728,6 +3739,46 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
         for b in bots:
             b.paused = False
         return {"status": "trading_resumed", "message": "Trading resumed."}
+
+    @app.post("/api/llm/test")
+    async def api_test_llm(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cfg = bots[0].cfg if bots else CONFIG
+        provider_name = body.get("provider") or cfg.get("llm_provider", "embedded")
+        base_url = body.get("url") or cfg.get("local_llm_url", "http://localhost:1234/v1")
+        model = body.get("model") or cfg.get("local_llm_model", "local-model")
+        api_key = cfg.get("local_llm_api_key", "")
+
+        start = time.time()
+        try:
+            p = _get_llm_provider(
+                provider_name=provider_name,
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                timeout=4.0
+            )
+            test_prompt = "Reply with JSON: {\"status\": \"ok\", \"analyst\": \"ready\"}"
+            sys_prompt = "You are an AI Quant Critic. Respond in valid JSON."
+            resp = p.generate(test_prompt, sys_prompt, json_mode=True)
+            latency_ms = round((time.time() - start) * 1000, 1)
+            return {
+                "ok": True,
+                "provider": provider_name,
+                "url": base_url,
+                "latency_ms": latency_ms,
+                "response": resp[:200]
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "provider": provider_name,
+                "url": base_url,
+                "error": str(exc)
+            }
         
     @app.get("/api/history")
     def api_history():

@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**508 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**509 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|

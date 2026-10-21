@@ -951,6 +951,12 @@
                                 </div>
                                 <input type="text" id="set-llm-model" class="w-48 bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="local-model">
                             </div>
+                            <div class="flex justify-between items-center pt-2">
+                                <button type="button" onclick="testLLMConnection()" id="btn-test-llm" class="px-3 py-1.5 rounded bg-accent/20 border border-accent/40 text-accent text-xs font-semibold hover:bg-accent/30 transition flex items-center gap-1.5">
+                                    <i class="ph ph-plugs-connected"></i> Test LLM Connection
+                                </button>
+                                <span id="llm-test-result" class="text-xs text-slate-400"></span>
+                            </div>
                         </div>
                     </div>
 
@@ -1560,6 +1566,38 @@
                 }
             } catch (err) {
                 console.warn("loadSettings error:", err);
+            }
+        }
+
+        async function testLLMConnection() {
+            const btn = document.getElementById('btn-test-llm');
+            const resSpan = document.getElementById('llm-test-result');
+            btn.disabled = true;
+            resSpan.className = "text-xs text-amber-400";
+            resSpan.innerText = "Pinging LLM...";
+            try {
+                const res = await fetch('/api/llm/test', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        provider: document.getElementById('set-llm-provider').value,
+                        url: document.getElementById('set-llm-url').value,
+                        model: document.getElementById('set-llm-model').value
+                    })
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    resSpan.className = "text-xs text-profit font-semibold";
+                    resSpan.innerText = `Connected! (${data.latency_ms}ms)`;
+                } else {
+                    resSpan.className = "text-xs text-loss font-semibold";
+                    resSpan.innerText = `Failed: ${data.error || 'No response'}`;
+                }
+            } catch(e) {
+                resSpan.className = "text-xs text-loss";
+                resSpan.innerText = "Error: " + e.message;
+            } finally {
+                btn.disabled = false;
             }
         }
 

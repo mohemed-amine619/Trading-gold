@@ -687,3 +687,24 @@ def test_api_settings_llm_controls_roundtrip(run_and_stub, monkeypatch):
     assert saved_env["LOCAL_LLM_MODEL"] == "llama-3.3-70b-versatile"
 
 
+def test_api_llm_test_endpoint(run_and_stub):
+    """Test /api/llm/test returns connection status and latency."""
+    run_module, _ = run_and_stub
+    from fastapi.testclient import TestClient
+
+    cfg = dict(run_module.CONFIG)
+    bot = run_module.StandaloneAIBot(cfg)
+    app = run_module.create_app([bot])
+    client = TestClient(app)
+
+    # Test with embedded provider (always succeeds)
+    payload = {"provider": "embedded", "url": "http://localhost:1235/v1", "model": "test-model"}
+    res = client.post("/api/llm/test", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert "latency_ms" in data
+    assert data["provider"] == "embedded"
+
+
+
