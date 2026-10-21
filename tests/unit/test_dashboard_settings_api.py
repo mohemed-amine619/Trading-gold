@@ -391,6 +391,49 @@ def test_modify_sltp_skips_identical_sltp(run_and_stub):
     assert len(calls) == 0, "Expected no order_send when SL and TP are unchanged"
 
 
+def test_close_position_sanitizes_comment_and_recovers_from_err_neg2(run_and_stub):
+    """Ensure _close_position formats comments cleanly and handles MT5 -2 invalid comment error."""
+    run_module, stub = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["dry_run"] = False
+    bot = run_module.StandaloneAIBot(cfg)
+
+    pos = types.SimpleNamespace(
+        symbol="XAUUSDm",
+        ticket=2095561400,
+        volume=0.01,
+        type=stub.ORDER_TYPE_BUY,
+        profit=5.0,
+        swap=0.0,
+        magic=888992
+    )
+
+    calls = []
+    def mock_order_send(req):
+        calls.append(dict(req))
+        # First call with complex comment triggers -2 error
+        if "(" in req.get("comment", "") or ":" in req.get("comment", "") or len(req.get("comment", "")) > 25:
+            run_module.mt5.last_error = lambda: (-2, 'Invalid "comment" argument')
+            return None
+        run_module.mt5.last_error = lambda: (1, 'Success')
+        return types.SimpleNamespace(retcode=run_module.mt5.TRADE_RETCODE_DONE)
+
+    run_module.mt5.order_send = mock_order_send
+
+    reason = "Scalp Rejection Exit (Opposite Pinbar)"
+    res = bot._close_position(pos, reason)
+
+    assert res is True
+    assert len(calls) >= 1
+    # Check that initial comment was sanitized (no colons, no parentheses, short)
+    first_comment = calls[0]["comment"]
+    assert ":" not in first_comment
+    assert "(" not in first_comment
+    assert ")" not in first_comment
+    assert len(first_comment) <= 20
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Spatial Trap Veto Tests in _get_signal
 # ─────────────────────────────────────────────────────────────────────────────

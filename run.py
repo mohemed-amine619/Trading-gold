@@ -66,6 +66,7 @@ POWER-UP CHANGES (new in this version):
 
 import logging
 import math
+import re
 import sys
 import threading
 import time
@@ -2554,6 +2555,10 @@ class StandaloneAIBot:
         digits = getattr(info, "digits", 2) or 2
         price = round(float(price), digits)
 
+        # MT5 comments must be concise, ASCII alphanumeric only (no colons, parentheses, or trailing symbols)
+        clean_tag = re.sub(r'[^a-zA-Z0-9_]', '', str(reason).replace(" ", "_"))[:16]
+        comment_str = f"cls_{clean_tag}"[:20] if clean_tag else "close_pos"
+
         req = {
             "action":       mt5.TRADE_ACTION_DEAL,
             "symbol":       pos.symbol,
@@ -2563,7 +2568,7 @@ class StandaloneAIBot:
             "price":        price,
             "deviation":    self.cfg.get("deviation", 20),
             "magic":        getattr(pos, "magic", self.cfg.get("magic_number", 888999)),
-            "comment":      "close:" + reason[:24],
+            "comment":      comment_str,
             "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": self._get_filling_type(pos.symbol),
         }
@@ -2579,6 +2584,23 @@ class StandaloneAIBot:
                 self._partial_stages.pop(pos.ticket, None)
                 self._record_trade_result(pnl)
                 return True
+
+            # If MT5 Python binding rejected comment specifically (err -2), retry with minimal "close"
+            if result is None:
+                last_err = mt5.last_error() if hasattr(mt5, "last_error") else ()
+                if last_err and isinstance(last_err, tuple) and len(last_err) > 0 and last_err[0] == -2 and req.get("comment") != "close":
+                    req["comment"] = "close"
+                    result = mt5.order_send(req)
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        pnl = pos.profit + pos.swap
+                        msg = (f"🔒 CLOSE {pos.symbol} ticket={pos.ticket} "
+                               f"pnl={pnl:+.2f} reason={reason}")
+                        logger.info(msg)
+                        self.notifier.send(msg)
+                        self._peak_profit.pop(pos.ticket, None)
+                        self._partial_stages.pop(pos.ticket, None)
+                        self._record_trade_result(pnl)
+                        return True
             if result and result.retcode in (mt5.TRADE_RETCODE_REQUOTE,
                                              mt5.TRADE_RETCODE_PRICE_CHANGED,
                                              mt5.TRADE_RETCODE_PRICE_OFF):
