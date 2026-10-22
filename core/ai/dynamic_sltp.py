@@ -28,6 +28,63 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LLM System Prompts (Adversarial Quant Critic)
+# ─────────────────────────────────────────────────────────────────────────────
+
+QUANT_CRITIC_SYSTEM_PROMPT = """You are the Chief Quantitative Strategist and Adversarial Risk Critic for an institutional high-frequency algorithmic fund specializing in Gold (XAUUSD) and FX.
+
+Your sole objective is to evaluate trade candidates and dynamically calibrate Stop Loss (SL) and Take Profit (TP) levels to maximize Risk:Reward, eliminate retail bull/bear traps, and protect firm capital.
+
+OPERATIONAL PRINCIPLES:
+1. ADVERSARIAL SKEPTICISM: Assume every technical breakout or momentum surge is a potential retail trap until proven backed by institutional order flow and macro structure.
+2. MARKET LOCATION DISCIPLINE:
+   - BUY entries are ONLY permitted in DISCOUNT (0%-40% of the active swing range) or following confirmed bullish market structure break (BOS). Never buy directly into major resistance overhead ("brick wall").
+   - SELL entries are ONLY permitted in PREMIUM (60%-100% of the active swing range) or following confirmed bearish change of character (CHoCH). Never sell directly into major resting demand pools.
+3. LIQUIDITY POOL AWARENESS:
+   - Stop Losses MUST be placed beyond structural invalidation levels (swing high/low pivots) plus ATR buffer to prevent spread noise stop-outs.
+   - Take Profits MUST target resting liquidity pools (equal highs/lows) or high-volume nodes with a minimum 1:2.0 Risk-to-Reward ratio.
+4. SPREAD & FRICTION MANAGEMENT:
+   - Account for broker spread friction. Reject scalp setups if spread exceeds 15% of the average candle volatility (ATR).
+5. CAPITAL PRESERVATION:
+   - When market conditions are ambiguous, overextended, or exhibiting momentum exhaustion/pinbar rejection, issue a capital preservation VETO ("PASS").
+
+OUTPUT MANDATE:
+You MUST ALWAYS respond with valid, parseable JSON ONLY. Never output markdown conversational text outside the JSON object.
+
+JSON SCHEMA:
+{
+  "decision": "BUY" | "SELL" | "PASS",
+  "confidence": 85.0,
+  "sl_type": "ai_structure" | "ai_liquidity" | "ai_volatility",
+  "tp_type": "ai_liquidity_pool" | "fixed_rr",
+  "reasoning": "Concise institutional market rationale explaining why the trade is accepted or vetoed.",
+  "risk_assessment": "Summary of primary risk factors (e.g., overhead order block, spread friction, trend alignment)."
+}"""
+
+ENTRY_SLTP_SYSTEM_PROMPT = """You are the Chief Quantitative Strategist and Adversarial Risk Critic for an institutional high-frequency algorithmic fund specializing in Gold (XAUUSD) and FX.
+
+Evaluate the proposed entry SL/TP levels against market structure, liquidity pools, and volatility.
+
+OPERATIONAL PRINCIPLES:
+1. Stop Losses MUST sit beyond structural invalidation (swing high/low pivots) plus an ATR buffer — never inside spread noise.
+2. Take Profits MUST target resting liquidity pools (equal highs/lows) or high-volume nodes with a minimum 1:2.0 Risk-to-Reward ratio.
+3. Reject (PASS) setups where spread friction exceeds 15% of ATR or the SL/TP geometry invites a retail trap stop-out.
+
+OUTPUT MANDATE:
+You MUST ALWAYS respond with valid, parseable JSON ONLY. Never output markdown conversational text outside the JSON object.
+
+JSON SCHEMA:
+{
+  "decision": "CONFIRM" | "PASS",
+  "confidence": 85.0,
+  "sl_type": "ai_structure" | "ai_liquidity" | "ai_volatility",
+  "tp_type": "ai_liquidity_pool" | "fixed_rr",
+  "reasoning": "Concise institutional rationale for the SL/TP geometry.",
+  "risk_assessment": "Summary of primary risk factors."
+}"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Data Structures
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -317,18 +374,18 @@ class DynamicSLTPReasoner:
 
         is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper()
         min_rr = float(self.cfg.get("tp_rr_ratio", 2.0))
-        sl_atr_mult = float(self.cfg.get("sl_atr_mult", 1.8 if is_gold else 1.5))
-        min_atr = float(self.cfg.get("location_stop_min_atr", 1.6 if is_gold else 0.75))
-        max_atr = float(self.cfg.get("location_stop_max_atr", 3.0))
+        sl_atr_mult = float(self.cfg.get("sl_atr_mult", 2.2 if is_gold else 1.8))
+        min_atr = float(self.cfg.get("location_stop_min_atr", 1.8 if is_gold else 1.0))
+        max_atr = float(self.cfg.get("location_stop_max_atr", 3.2))
         if is_gold:
-            min_atr = max(min_atr, 1.6)
-            sl_atr_mult = max(sl_atr_mult, 1.8)
+            min_atr = max(min_atr, 1.8)
+            sl_atr_mult = max(sl_atr_mult, 2.0)
 
         sl_source = "atr_fallback"
         tp_source = "atr_target"
         reasoning_parts = []
         if is_gold:
-            reasoning_parts.append("Gold volatility protection: enforced minimum 1.6 ATR stop buffer")
+            reasoning_parts.append("Gold volatility protection: enforced minimum 1.8 ATR stop buffer for correction resilience")
 
         # 1. Structural Stop Loss Determination
         sl_price = entry_price - (sl_atr_mult * atr) if direction == 1 else entry_price + (sl_atr_mult * atr)
@@ -380,14 +437,8 @@ class DynamicSLTPReasoner:
             f"Spread Points: {spread_pts}\n"
             "Task: Evaluate entry SL/TP validity and output JSON."
         )
-        system_prompt = (
-            "You are an Elite Institutional Quant Trader and Execution Architect. "
-            "Evaluate the proposed entry SL/TP levels against market structure and liquidity. "
-            "Output JSON: {\"decision\": \"CONFIRM\"|\"PASS\", \"confidence\": float, "
-            "\"sl_type\": str, \"tp_type\": str, \"reasoning\": str, \"risk_assessment\": str}"
-        )
         try:
-            raw_ai = self.provider.generate(prompt, system_prompt, json_mode=True)
+            raw_ai = self.provider.generate(prompt, ENTRY_SLTP_SYSTEM_PROMPT, json_mode=True)
             ai_data = json.loads(raw_ai)
             if ai_data.get("reasoning"):
                 reasoning_parts.append(f"AI: {ai_data['reasoning']}")
@@ -575,6 +626,28 @@ class DynamicSLTPReasoner:
                 action = "TIGHTEN_SL"
                 reason = f"Profit giveback ({giveback_pct*100:.0f}% from peak); ratcheting defensive stop."
 
+        # Stage 6: Anti-Choke Correction Buffer
+        # Enforce minimum separation from live market price so normal pullbacks do not clip SL
+        min_separation = float(self.cfg.get("min_sl_separation_atr", 0.55 if is_gold else 0.45)) * atr
+        if direction == 1 and candidate_sl > current_price - min_separation:
+            buffered_sl = current_price - min_separation
+            if buffered_sl > current_sl:
+                candidate_sl = buffered_sl
+                reason += f" (clamped with {min_separation/atr:.2f} ATR correction buffer)"
+            else:
+                candidate_sl = current_sl
+                action = "HOLD"
+                reason = "Correction buffer enforced: held SL to prevent premature exit on pullback."
+        elif direction == -1 and candidate_sl < current_price + min_separation and candidate_sl > 0:
+            buffered_sl = current_price + min_separation
+            if current_sl == 0.0 or buffered_sl < current_sl:
+                candidate_sl = buffered_sl
+                reason += f" (clamped with {min_separation/atr:.2f} ATR correction buffer)"
+            else:
+                candidate_sl = current_sl
+                action = "HOLD"
+                reason = "Correction buffer enforced: held SL to prevent premature exit on pullback."
+
         # Pass through Safety Guard (Absolute Never-Loosen Gate)
         final_sl = None
         if candidate_sl != current_sl:
@@ -652,15 +725,8 @@ class DynamicSLTPReasoner:
             "Task: Act as Adversarial Risk Critic. Evaluate if this trade has genuine positive edge or is a trap. "
             "Output JSON: {\"decision\": \"BUY\"|\"SELL\"|\"PASS\", \"confidence\": float, \"reasoning\": str, \"risk_assessment\": str}"
         )
-        system_prompt = (
-            "You are an Elite Institutional Quant Trader and Risk Critic. "
-            "Review technical signal and market microstructure. Reject trades entering into traps or exhaustion. "
-            "Approve high-confluence continuation or valid reversal setups. "
-            "Must return valid JSON."
-        )
-
         try:
-            raw = self.provider.generate(prompt, system_prompt, json_mode=True)
+            raw = self.provider.generate(prompt, QUANT_CRITIC_SYSTEM_PROMPT, json_mode=True)
             data = json.loads(raw)
             decision = str(data.get("decision", "PASS")).upper().strip()
             confidence = float(data.get("confidence", 80.0))

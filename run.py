@@ -403,7 +403,7 @@ CONFIG = {
     "max_open_pos":            _profile_cfg("MAX_OPEN_POS", 3, 5, val_type=int),
     "max_daily_dd":            _profile_cfg("MAX_DAILY_DD", 0.03, 0.05),
     
-    # --- breakeven / progressive profit lock ---
+    # --- breakeven / progressive profit lock (with correction breathing room) ---
     "enable_breakeven":        True,
     "breakeven_trigger_atr":   _profile_cfg("BREAKEVEN_TRIGGER_ATR", 0.4, 0.3, scalper_val=0.3),
     "breakeven_buffer_atr":    float(os.getenv("BREAKEVEN_BUFFER_ATR", "0.15")),
@@ -411,7 +411,7 @@ CONFIG = {
     "enable_partial_close":    True,
     "partial_close_trigger_atr": _profile_cfg("PARTIAL_CLOSE_TRIGGER_ATR", 1.2, 0.9, scalper_val=0.8),
     "profit_lock_activate_atr": _profile_cfg("PROFIT_LOCK_ACTIVATE_ATR", 1.0, 0.8, scalper_val=0.7),
-    "profit_giveback_pct":     _profile_cfg("PROFIT_GIVEBACK_PCT", 0.30, 0.25),
+    "profit_giveback_pct":     _profile_cfg("PROFIT_GIVEBACK_PCT", 0.45, 0.45),
     "max_spread_atr_ratio":    _profile_cfg("MAX_SPREAD_ATR_RATIO", 0.40, 0.25, scalper_val=0.20),
     
     # --- system ---
@@ -743,6 +743,10 @@ FEATURE_COLS: List[str] = [
     # Volatility regime
     "atr_vs_20d",           # current ATR / 20-bar mean ATR
     "bb_vs_kc_ratio",       # BB width / KC width (squeeze compression)
+    # Institutional orderflow & spatial conviction
+    "range_pos_20",         # range discount/premium (0=support, 1=resistance)
+    "ema_stack",            # multi-EMA ribbon alignment conviction
+    "vol_thrust",           # volume-weighted directional thrust
 ]
 
 _EP = 1e-10
@@ -985,6 +989,15 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     atr_mean20 = atr_col.rolling(20).mean()
     df["atr_vs_20d"] = atr_col / (atr_mean20 + _EP)
 
+    # 7. Institutional orderflow & spatial conviction
+    rng_20 = (h20 - l20).clip(lower=_EP)
+    df["range_pos_20"] = ((close - l20) / rng_20).clip(0.0, 1.0)
+    e9_s = df.get("dist_ema9", pd.Series(0.0, index=df.index))
+    e21_s = df.get("dist_ema21", pd.Series(0.0, index=df.index))
+    e50_s = df.get("dist_ema50", pd.Series(0.0, index=df.index))
+    df["ema_stack"] = ((e9_s > 0).astype(float) + (e21_s > 0).astype(float) + (e50_s > 0).astype(float) - 1.5) / 1.5
+    df["vol_thrust"] = ((close - open_) / hl) * df.get("vol_ratio", pd.Series(1.0, index=df.index))
+
     return df
 
 
@@ -1169,9 +1182,15 @@ class AIEnsemble:
         atr = df.get("atr", pd.Series(0.0, index=df.index))
         threshold = 0.40  # ATR multiples — tune via ATR_LABEL_MULT env var if needed
 
-        # Best & worst close over next 3 bars (forward-looking)
-        fwd_max = cl.shift(-1).combine(cl.shift(-2), max).combine(cl.shift(-3), max)
-        fwd_min = cl.shift(-1).combine(cl.shift(-2), min).combine(cl.shift(-3), min)
+        # Best & worst close over next 5 bars (forward-looking horizon allowing correction absorption)
+        fwd_max = (cl.shift(-1).combine(cl.shift(-2), max)
+                               .combine(cl.shift(-3), max)
+                               .combine(cl.shift(-4), max)
+                               .combine(cl.shift(-5), max))
+        fwd_min = (cl.shift(-1).combine(cl.shift(-2), min)
+                               .combine(cl.shift(-3), min)
+                               .combine(cl.shift(-4), min)
+                               .combine(cl.shift(-5), min))
 
         move_up   = (fwd_max - cl) / (atr + _EP)
         move_down = (cl - fwd_min) / (atr + _EP)
@@ -1183,7 +1202,7 @@ class AIEnsemble:
         target[(move_up >= threshold) & (move_down >= threshold)] = float("nan")
 
         df["_target"] = target
-        df = df.iloc[:-3].copy()   # drop last 3 rows (no forward data)
+        df = df.iloc[:-5].copy()   # drop last 5 rows (no forward data)
         avail = [c for c in FEATURE_COLS if c in df.columns]
         df_clean = df[avail + ["_target"]].dropna()
         if len(df_clean) < _MIN_TRAIN:
@@ -2880,7 +2899,8 @@ class StandaloneAIBot:
                     continue
 
             # Scenario C: Scalp Rejection Exit (Lock in profit when opposite pinbar forms)
-            if profit_move >= 0.35 * atr and floating_pnl > 0:
+            rejection_min_atr = self.cfg.get("rejection_exit_min_atr", 1.25)
+            if profit_move >= rejection_min_atr * atr and floating_pnl > 0:
                 opp_pinbar = bool(last.get("bear_pinbar", False)) if direction == 1 else bool(last.get("bull_pinbar", False))
                 if opp_pinbar:
                     self._close_position(pos, "Scalp Rejection Exit (Opposite Pinbar)", floating_pnl)
@@ -2917,10 +2937,14 @@ class StandaloneAIBot:
             if floating_pnl > 0 and self.cfg.get("structure_trailing", True):
                 info = mt5.symbol_info(pos.symbol)
                 min_step = (getattr(info, "point", 0.01) or 0.01) * 1.5
+                is_gold = "XAU" in pos.symbol.upper() or "GOLD" in pos.symbol.upper()
+                min_separation = float(self.cfg.get("min_sl_separation_atr", 0.55 if is_gold else 0.45)) * atr
                 if direction == 1:  # BUY
                     recent_low = m15p['low'].iloc[-5:].min()
                     if recent_low > pos.sl and close_price > recent_low + (atr * 0.2):
                         new_sl = recent_low - (atr * 0.1)
+                        # Ensure breathing room from current price to prevent correction clip
+                        new_sl = min(new_sl, close_price - min_separation)
                         if new_sl > pos.sl + min_step and new_sl < close_price:
                             self._modify_sl(pos, new_sl)
                 else:  # SELL
@@ -2928,6 +2952,8 @@ class StandaloneAIBot:
                     if pos.sl == 0 or recent_high < pos.sl:
                         if close_price < recent_high - (atr * 0.2):
                             new_sl = recent_high + (atr * 0.1)
+                            # Ensure breathing room from current price to prevent correction clip
+                            new_sl = max(new_sl, close_price + min_separation)
                             if (pos.sl == 0 or new_sl < pos.sl - min_step) and new_sl > close_price:
                                 self._modify_sl(pos, new_sl)
 
@@ -2957,8 +2983,8 @@ class StandaloneAIBot:
                     continue
 
             # ---- POWER-UP (B): profit-lock / giveback close -------------
-            lock_activate = self.cfg.get("profit_lock_activate_atr", 0.70) * atr
-            giveback_pct  = self.cfg.get("profit_giveback_pct", 0.25)
+            lock_activate = self.cfg.get("profit_lock_activate_atr", 1.0) * atr
+            giveback_pct  = self.cfg.get("profit_giveback_pct", 0.45)
             if peak >= lock_activate and profit_move <= peak * (1.0 - giveback_pct):
                 self._close_position(pos, "profit lock giveback")
                 continue
@@ -2967,7 +2993,7 @@ class StandaloneAIBot:
             be_buffer = self.cfg.get("breakeven_buffer_atr", 0.15) * atr
             be_sl = (pos.price_open + be_buffer) if direction == 1 else (pos.price_open - be_buffer)
             if self.cfg.get("enable_breakeven", True):
-                be_trigger = self.cfg.get("breakeven_trigger_atr", 0.35) * atr
+                be_trigger = self.cfg.get("breakeven_trigger_atr", 0.40) * atr
                 if profit_move >= be_trigger:
                     target_sl = be_sl
 
@@ -2979,10 +3005,11 @@ class StandaloneAIBot:
                         progressive_sl = (pos.price_open + locked_gain) if direction == 1 else (pos.price_open - locked_gain)
                         target_sl = max(target_sl, progressive_sl) if direction == 1 else min(target_sl, progressive_sl)
 
-                    # Ensure minimum distance from current price to respect broker stops level
+                    # Ensure minimum distance from current price to respect broker stops level and anti-choke buffer
                     info = mt5.symbol_info(pos.symbol)
                     min_dist = (info.trade_stops_level * info.point) if info and info.trade_stops_level else (atr * 0.1)
-                    min_dist = max(min_dist, atr * 0.05)
+                    is_gold = "XAU" in pos.symbol.upper() or "GOLD" in pos.symbol.upper()
+                    min_dist = max(min_dist, atr * 0.55 if is_gold else atr * 0.40)
                     min_step = (getattr(info, "point", 0.01) or 0.01) * 1.5
 
                     if direction == 1:
@@ -3343,10 +3370,10 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             "trail_atr_mult": cfg.get("trail_atr_mult", 1.0),
             "tp_rr_ratio": float(cfg.get("tp_rr_ratio", 2.0) or 2.0),
             "enable_breakeven": be_val > 0,
-            "breakeven_trigger_atr": float(cfg.get("breakeven_trigger_atr", 0.35) or 0.35),
+            "breakeven_trigger_atr": float(cfg.get("breakeven_trigger_atr", 0.40) or 0.40),
             "breakeven_buffer_atr": float(cfg.get("breakeven_buffer_atr", 0.15) or 0.15),
-            "profit_lock_activate_atr": float(cfg.get("profit_lock_activate_atr", 0.70) or 0.70),
-            "profit_giveback_pct": round(float(cfg.get("profit_giveback_pct", 0.25) or 0.25) * 100, 1) if float(cfg.get("profit_giveback_pct", 0.25) or 0.25) <= 1.0 else float(cfg.get("profit_giveback_pct", 25.0)),
+            "profit_lock_activate_atr": float(cfg.get("profit_lock_activate_atr", 1.0) or 1.0),
+            "profit_giveback_pct": round(float(cfg.get("profit_giveback_pct", 0.45) or 0.45) * 100, 1) if float(cfg.get("profit_giveback_pct", 0.45) or 0.45) <= 1.0 else float(cfg.get("profit_giveback_pct", 45.0)),
             "strict_location_veto": bool(cfg.get("strict_location_veto", True)),
             "llm_critic_enabled": bool(cfg.get("llm_critic_enabled", True)),
             "llm_provider": str(cfg.get("llm_provider", "embedded")),
@@ -3515,11 +3542,12 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
 
         # 8. Breakeven
         if "enable_breakeven" in new_cfg and new_cfg["enable_breakeven"] is not None:
-            be_trig = 0.50 if bool(new_cfg["enable_breakeven"]) else 0.0
-            CONFIG["breakeven_trigger_atr"] = be_trig
-            for b in bots:
-                b.cfg["breakeven_trigger_atr"] = be_trig
-            env_updates["BREAKEVEN_TRIGGER_ATR"] = str(be_trig)
+            if "breakeven_trigger_atr" not in new_cfg or new_cfg["breakeven_trigger_atr"] is None:
+                be_trig = 0.50 if bool(new_cfg["enable_breakeven"]) else 0.0
+                CONFIG["breakeven_trigger_atr"] = be_trig
+                for b in bots:
+                    b.cfg["breakeven_trigger_atr"] = be_trig
+                env_updates["BREAKEVEN_TRIGGER_ATR"] = str(be_trig)
 
         # 9. Timeframe
         raw_tf = new_cfg.get("entry_timeframe") or new_cfg.get("timeframe")

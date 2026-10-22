@@ -855,21 +855,21 @@
                                     <label class="text-sm text-slate-300 block">Breakeven Trigger (ATR)</label>
                                     <span class="text-xs text-slate-500">Lock profit when price moves</span>
                                 </div>
-                                <input type="number" id="set-be-trigger" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="0.35" step="0.05">
+                                <input type="number" id="set-be-trigger" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="0.40" step="0.05">
                             </div>
                             <div class="flex justify-between items-center">
                                 <div>
                                     <label class="text-sm text-slate-300 block">Profit Lock Activate (ATR)</label>
                                     <span class="text-xs text-slate-500">Start giveback protection</span>
                                 </div>
-                                <input type="number" id="set-lock-activate" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="0.70" step="0.05">
+                                <input type="number" id="set-lock-activate" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="1.00" step="0.05">
                             </div>
                             <div class="flex justify-between items-center">
                                 <div>
                                     <label class="text-sm text-slate-300 block">Giveback Cut (%)</label>
                                     <span class="text-xs text-slate-500">Close if peak drops by %</span>
                                 </div>
-                                <input type="number" id="set-giveback-pct" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="25" step="1">
+                                <input type="number" id="set-giveback-pct" class="w-24 text-right bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent" value="45" step="1">
                             </div>
                             <div class="flex justify-between items-center">
                                 <div><label class="text-sm text-slate-300 block">Manual Position Policy</label></div>
@@ -1626,9 +1626,9 @@
                 trail_atr_mult: parseFloat(document.getElementById('set-trail-atr').value),
                 tp_rr_ratio: parseFloat(document.getElementById('set-tp-rr') ? document.getElementById('set-tp-rr').value : 2.0),
                 enable_breakeven: document.getElementById('set-enable-be').checked,
-                breakeven_trigger_atr: parseFloat(document.getElementById('set-be-trigger') ? document.getElementById('set-be-trigger').value : 0.35),
-                profit_lock_activate_atr: parseFloat(document.getElementById('set-lock-activate') ? document.getElementById('set-lock-activate').value : 0.70),
-                profit_giveback_pct: parseFloat(document.getElementById('set-giveback-pct') ? document.getElementById('set-giveback-pct').value : 25),
+                breakeven_trigger_atr: parseFloat(document.getElementById('set-be-trigger') ? document.getElementById('set-be-trigger').value : 0.40),
+                profit_lock_activate_atr: parseFloat(document.getElementById('set-lock-activate') ? document.getElementById('set-lock-activate').value : 1.00),
+                profit_giveback_pct: parseFloat(document.getElementById('set-giveback-pct') ? document.getElementById('set-giveback-pct').value : 45),
                 strict_location_veto: document.getElementById('set-strict-location-veto') ? document.getElementById('set-strict-location-veto').checked : true,
                 default_manual_policy: document.getElementById('set-manual-policy').value,
                 

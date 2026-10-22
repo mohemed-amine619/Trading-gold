@@ -1,7 +1,7 @@
 # PROJECT STATUS
 
 > **Target platform: native Windows 11.** No Docker, WSL, Linux host or VM is
-> required. Last updated: 2026-10-15.
+> required. Last updated: 2026-10-22.
 
 ## 0. TEST BASELINE
 
@@ -19,12 +19,29 @@
 | Risk, position, strategy, scalping & market | 78 | Implemented and tested |
 | **Market structure & location** | **70** | Implemented and tested |
 | **Trading orchestrator (candles → orders)** | **19** | Implemented and tested |
-| **Dynamic AI SL/TP Reasoning & LLM Trader Council** | **19** | **New — implemented and tested** |
+| **Dynamic AI SL/TP Reasoning & LLM Trader Council** | **19** | **Implemented and tested** |
 | Manual trades isolation & order execution | 7 | Implemented and tested |
 | Other unit tests | 56 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter` or an in-memory scripted fake.
+
+---
+
+## 0.00 NEW — ANTI-CHOKE CORRECTION BUFFER & 5-BAR FORWARD ML RESILIENCE
+
+### Problem Solved
+Previously, trades with accurate directional conviction were frequently stopped out prematurely during standard market pullbacks and candle wicks:
+1. **Choked Stop-Loss Tightening:** Progressive breakeven and market-structure trailing stops had `min_dist = max(min_dist, atr * 0.05)`, placing stops as close as 15 cents below current market price on Gold.
+2. **Aggressive Giveback Cuts:** Profit giveback triggered at 25% after only 0.7 ATR ($2.00 on Gold), closing winning positions on routine 38.2% Fibonacci pullbacks.
+3. **Premature Scalp Rejection Exits:** Opposite pinbar exits closed trades at only 0.35 ATR of profit movement.
+4. **Short Forward Horizon in ML Training:** 3-bar training horizon penalized trades that retraced for 1-2 bars before expanding toward the target.
+
+### Solution Implemented
+1. **Stage 6 Anti-Choke Correction Buffer:** `core/ai/dynamic_sltp.py` and `run.py` enforce a minimum clearance of `0.55 * atr` (Gold) / `0.45 * atr` (FX) between live market price and any candidate trailing stop loss, preserving natural breathing room while strictly preserving the never-loosen invariant.
+2. **5-Bar Forward ML Horizon:** Expanded training target in `AIEnsemble._build_xy` from 3 to 5 bars (25 minutes on M5), teaching the model to reward setups that absorb initial corrections.
+3. **Institutional Spatial Features:** Added `range_pos_20` (discount/premium relative positioning), `ema_stack` (ribbon conviction), and `vol_thrust` (volume-weighted directional impulse) to `FEATURE_COLS`.
+4. **Giveback & Rejection Resilience:** Increased giveback tolerance to 45% and raised scalp rejection pinbar exit threshold to 1.25 ATR so winning runners can mature.
 
 ---
 
