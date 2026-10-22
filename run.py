@@ -426,6 +426,8 @@ CONFIG = {
     "llm_provider":            os.getenv("LLM_PROVIDER", "embedded"),
     "local_llm_url":           os.getenv("LOCAL_LLM_URL", "http://localhost:1234/v1"),
     "local_llm_model":         os.getenv("LOCAL_LLM_MODEL", "local-model"),
+    "ollama_base_url":         os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+    "ollama_model":            os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
     "local_llm_api_key":       os.getenv("LOCAL_LLM_API_KEY", "") or os.getenv("LLM_API_KEY", ""),
     "local_llm_timeout":       float(os.getenv("LOCAL_LLM_TIMEOUT", "3.0")),
     "scalp_micro_trailing":    os.getenv("SCALP_MICRO_TRAILING", "true").lower() in ("1", "true", "yes"),
@@ -1860,11 +1862,16 @@ class StandaloneAIBot:
         if self._sltp_reasoner is None and _DYNAMIC_SLTP_AVAILABLE:
             try:
                 p_name = self.cfg.get("llm_provider", "embedded")
-                b_url = self.cfg.get("local_llm_url", "http://localhost:1234/v1")
+                if p_name == "ollama":
+                    b_url = self.cfg.get("ollama_base_url", "http://localhost:11434")
+                    model_name = self.cfg.get("ollama_model", "llama3.2:3b")
+                else:
+                    b_url = self.cfg.get("local_llm_url", "http://localhost:1234/v1")
+                    model_name = self.cfg.get("local_llm_model", "")
                 provider = _get_llm_provider(
                     provider_name=p_name,
                     base_url=b_url,
-                    model=self.cfg.get("local_llm_model", ""),
+                    model=model_name,
                     timeout=float(self.cfg.get("local_llm_timeout", 3.0)),
                     api_key=self.cfg.get("local_llm_api_key", ""),
                 )
@@ -3379,6 +3386,8 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             "llm_provider": str(cfg.get("llm_provider", "embedded")),
             "local_llm_url": str(cfg.get("local_llm_url", "http://localhost:1234/v1")),
             "local_llm_model": str(cfg.get("local_llm_model", "local-model")),
+            "ollama_base_url": str(cfg.get("ollama_base_url", "http://localhost:11434")),
+            "ollama_model": str(cfg.get("ollama_model", "llama3.2:3b")),
             "default_manual_policy": cfg.get("default_manual_policy", "observe_only"),
             "ai_enabled": cfg.get("ai_enabled", True),
             "ai_confidence_threshold": cfg.get("ai_confidence_threshold", 0.55),
@@ -3492,6 +3501,22 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
                 b.cfg["local_llm_model"] = llm_m
                 b._sltp_reasoner = None
             env_updates["LOCAL_LLM_MODEL"] = llm_m
+
+        if "ollama_base_url" in new_cfg and new_cfg["ollama_base_url"]:
+            ollama_u = str(new_cfg["ollama_base_url"]).strip()
+            CONFIG["ollama_base_url"] = ollama_u
+            for b in bots:
+                b.cfg["ollama_base_url"] = ollama_u
+                b._sltp_reasoner = None
+            env_updates["OLLAMA_BASE_URL"] = ollama_u
+
+        if "ollama_model" in new_cfg and new_cfg["ollama_model"]:
+            ollama_m = str(new_cfg["ollama_model"]).strip()
+            CONFIG["ollama_model"] = ollama_m
+            for b in bots:
+                b.cfg["ollama_model"] = ollama_m
+                b._sltp_reasoner = None
+            env_updates["OLLAMA_MODEL"] = ollama_m
 
         # 3. Max daily DD
         raw_dd = new_cfg.get("max_daily_drawdown_pct") if "max_daily_drawdown_pct" in new_cfg else new_cfg.get("max_daily_dd")
@@ -3776,8 +3801,12 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             body = {}
         cfg = bots[0].cfg if bots else CONFIG
         provider_name = body.get("provider") or cfg.get("llm_provider", "embedded")
-        base_url = body.get("url") or cfg.get("local_llm_url", "http://localhost:1234/v1")
-        model = body.get("model") or cfg.get("local_llm_model", "local-model")
+        if provider_name == "ollama":
+            base_url = body.get("url") or cfg.get("ollama_base_url", "http://localhost:11434")
+            model = body.get("model") or cfg.get("ollama_model", "llama3.2:3b")
+        else:
+            base_url = body.get("url") or cfg.get("local_llm_url", "http://localhost:1234/v1")
+            model = body.get("model") or cfg.get("local_llm_model", "local-model")
         api_key = cfg.get("local_llm_api_key", "")
 
         start = time.time()

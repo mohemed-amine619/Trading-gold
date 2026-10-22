@@ -230,12 +230,12 @@ class OllamaProvider(LLMProvider):
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        model: str = "llama3.2",
-        timeout: float = 3.0,
+        model: str = "llama3.2:3b",
+        timeout: float = 30.0,
         fallback_provider: Optional[LLMProvider] = None,
     ):
         self.base_url = base_url.rstrip("/")
-        self.model = model or "llama3.2"
+        self.model = model or "llama3.2:3b"
         self.timeout = timeout
         self.fallback = fallback_provider or EmbeddedReasoningProvider()
 
@@ -343,7 +343,8 @@ def get_llm_provider(
     if p in ("local_endpoint", "local", "lmstudio", "vllm"):
         return LocalEndpointProvider(base_url=base_url, model=model or "local-model", timeout=timeout, api_key=api_key)
     if p in ("ollama",):
-        return OllamaProvider(base_url=base_url or "http://localhost:11434", model=model or "llama3.2", timeout=timeout)
+        effective_timeout = timeout if (timeout and timeout >= 10) else 30.0
+        return OllamaProvider(base_url=base_url or "http://localhost:11434", model=model or "llama3.2:3b", timeout=effective_timeout)
     if p in ("openai", "openai_compatible", "deepseek", "groq", "cloud"):
         return OpenAICompatibleProvider(base_url=base_url or "https://api.openai.com/v1", model=model or "gpt-4o-mini", api_key=api_key, timeout=timeout)
     if p in ("mock", "test"):
