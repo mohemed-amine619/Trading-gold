@@ -244,20 +244,32 @@ if _IS_AGGRESSIVE:
     print("=" * 70)
 
 def _profile_cfg(env_var: str, balanced_val, aggressive_val, val_type=float, scalper_val=None):
+    """Resolve a parameter that has per-profile defaults.
+
+    An explicitly-set environment variable ALWAYS wins. An earlier version
+    tried to "upgrade" a value that happened to equal the balanced default into
+    the aggressive one, on the theory that it was left over from an older
+    ``.env``. That silently discarded deliberate settings: with
+    ``TRADING_PROFILE=money_printer``, ``ADX_MIN=18`` ran as 15 and
+    ``PARTIAL_CLOSE_TRIGGER_ATR=1.2`` ran as 0.9, while the dashboard reported
+    the value the operator had actually written. Guessing what someone meant is
+    worse than reading what they wrote, so the value is used verbatim.
+    """
     raw = os.getenv(env_var)
-    if raw is None or raw == "":
-        if _IS_SCALPER and scalper_val is not None:
-            return val_type(scalper_val)
-        return val_type(aggressive_val if _IS_AGGRESSIVE else balanced_val)
-    if _IS_AGGRESSIVE:
+    if raw is not None and raw != "":
         try:
-            if val_type(raw) == val_type(balanced_val):
-                if _IS_SCALPER and scalper_val is not None:
-                    return val_type(scalper_val)
-                return val_type(aggressive_val)
+            return val_type(raw)
         except (ValueError, TypeError):
-            pass
-    return val_type(raw)
+            # Fail loud but keep the bot importable: an unreadable value is a
+            # configuration mistake, not a reason to abandon the profile.
+            print(
+                f"WARNING: {env_var}={raw!r} is not a valid {val_type.__name__}; "
+                f"falling back to the {_PROFILE} profile default.",
+                file=sys.stderr,
+            )
+    if _IS_SCALPER and scalper_val is not None:
+        return val_type(scalper_val)
+    return val_type(aggressive_val if _IS_AGGRESSIVE else balanced_val)
 
 
 def _env_login() -> int | None:

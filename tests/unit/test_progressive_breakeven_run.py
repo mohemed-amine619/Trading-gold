@@ -367,3 +367,49 @@ def test_scalper_momentum_ribbon_bonus(run_module):
 
 
 
+
+
+def test_explicit_env_value_wins_over_profile_default(tmp_path, monkeypatch):
+    """A value written in .env must never be replaced by a profile default.
+
+    Regression: ``_profile_cfg`` treated "equals the balanced default" as
+    evidence that the variable was stale and substituted the aggressive value.
+    With ``TRADING_PROFILE=money_printer`` that silently turned ADX_MIN=18
+    into 15 and PARTIAL_CLOSE_TRIGGER_ATR=1.2 into 0.9, so the bot traded
+    different settings than the operator had configured.
+    """
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TRADING_PROFILE", "money_printer")
+    monkeypatch.setenv("ADX_MIN", "18")
+    monkeypatch.setenv("PARTIAL_CLOSE_TRIGGER_ATR", "1.2")
+    monkeypatch.setenv("RISK_PER_TRADE", "0.01")
+    monkeypatch.setenv("MAX_OPEN_POS", "3")
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+
+    assert mod._IS_AGGRESSIVE is True
+    assert mod.CONFIG["adx_min"] == 18.0
+    assert mod.CONFIG["partial_close_trigger_atr"] == 1.2
+    assert mod.CONFIG["risk_per_trade"] == 0.01
+    assert mod.CONFIG["max_open_pos"] == 3
+    sys.modules.pop("run", None)
+
+
+def test_profile_default_still_applies_when_env_is_absent(tmp_path, monkeypatch):
+    """Removing the variable must restore the profile default, not the balanced one."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TRADING_PROFILE", "money_printer")
+    for key in ("ADX_MIN", "PARTIAL_CLOSE_TRIGGER_ATR", "RISK_PER_TRADE", "MAX_OPEN_POS"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+
+    assert mod.CONFIG["adx_min"] == 15.0
+    assert mod.CONFIG["partial_close_trigger_atr"] == 0.9
+    assert mod.CONFIG["risk_per_trade"] == 0.015
+    assert mod.CONFIG["max_open_pos"] == 5
+    sys.modules.pop("run", None)
