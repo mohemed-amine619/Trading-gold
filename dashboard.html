@@ -984,6 +984,40 @@
                     </div>
 
                 </div>
+
+                <!-- Master Parameters — rendered from GET /api/config/schema.
+                     Every control here is declared in core/config/schema.py, so
+                     the UI cannot drift from what the backend accepts. The old
+                     hand-written cards above stay for continuity; this panel is
+                     the complete, authoritative surface. -->
+                <div class="glass-panel p-5 mt-6">
+                    <div class="flex flex-wrap justify-between items-center gap-3 mb-3 border-b border-bordercol pb-2">
+                        <h3 class="text-md font-semibold text-white flex items-center gap-2">
+                            <i class="ph ph-sliders-horizontal text-accent"></i> Master Parameters
+                            <span id="master-count" class="text-xs font-normal text-slate-500"></span>
+                        </h3>
+                        <div class="flex flex-wrap gap-2">
+                            <button onclick="loadMasterParams()" class="px-3 py-1.5 rounded bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700">Reload</button>
+                            <button onclick="resetRiskHalt()" class="px-3 py-1.5 rounded bg-orange-500/20 border border-orange-500/40 text-orange-300 text-xs font-semibold hover:bg-orange-500/30"><i class="ph ph-arrow-counter-clockwise"></i> Reset DD Halt</button>
+                            <button onclick="saveMasterParams()" class="px-3 py-1.5 rounded bg-accent text-white text-xs font-semibold hover:bg-blue-600">Apply All</button>
+                        </div>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-4">
+                        Validated server-side against a declared contract. An out-of-range value rejects the
+                        whole batch — nothing is half-applied. Switching paper → live asks for confirmation.
+                    </p>
+                    <div id="master-params" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                        <div class="text-sm text-slate-500">Loading schema…</div>
+                    </div>
+                    <div id="master-msg" class="text-xs mt-3"></div>
+                    <div class="mt-5 pt-4 border-t border-bordercol">
+                        <div class="flex justify-between items-center mb-2">
+                            <h4 class="text-sm font-semibold text-slate-300">Recent parameter changes</h4>
+                            <button onclick="loadConfigAudit()" class="text-xs text-accent hover:underline">Refresh</button>
+                        </div>
+                        <div id="config-audit" class="text-xs text-slate-400 space-y-1 max-h-40 overflow-y-auto"></div>
+                    </div>
+                </div>
             </div>
 
         </div>
@@ -1016,6 +1050,7 @@
             // Initial fetches
             fetchAll();
             loadSettings();
+            loadMasterParams();
 
             // Loops
             setInterval(fetchStatusAndPositions, 1000);
@@ -1040,6 +1075,7 @@
                     target.classList.remove('hidden');
                     if(targetId === 'tab-positions' || targetId === 'tab-history' || targetId === 'tab-logs') target.classList.add('flex');
                     
+                    if(targetId === 'tab-settings') loadMasterParams();
                     if(targetId === 'tab-settings' || targetId === 'tab-risk' || targetId === 'tab-strategy') {
                         loadSettings();
                     }
@@ -1101,10 +1137,25 @@
         }
 
         // Network Layer
+        const DASHBOARD_TOKEN_KEY = 'dashboardToken';
+        function dashboardToken() {
+            return localStorage.getItem(DASHBOARD_TOKEN_KEY) || '';
+        }
         async function api(endpoint, options = {}) {
             try {
-                
-                const res = await fetch(endpoint, options);
+                const opts = Object.assign({}, options);
+                const token = dashboardToken();
+                if (token) {
+                    opts.headers = Object.assign({}, opts.headers || {}, {'X-Dashboard-Token': token});
+                }
+                let res = await fetch(endpoint, opts);
+                if (res.status === 401) {
+                    const entered = prompt('This dashboard is write-protected. Enter DASHBOARD_TOKEN:');
+                    if (entered) {
+                        localStorage.setItem(DASHBOARD_TOKEN_KEY, entered.trim());
+                        return api(endpoint, options);
+                    }
+                }
                 if(!res.ok) throw new Error('HTTP ' + res.status);
                 updateConnStatus(true);
                 return await res.json();
@@ -1710,6 +1761,229 @@
             }
         }
         
+        // ------------------------------------------------------------------
+        // Master Parameters — schema-driven, single source of truth.
+        //
+        // core/config/schema.py declares every writable key, its bounds and
+        // whether it is dangerous. This panel renders whatever
+        // GET /api/config/schema returns, so adding a parameter on the Python
+        // side makes it appear here with no JavaScript change. Writes go to
+        // POST /api/config, which validates the whole batch server-side and
+        // rejects it atomically — this UI never invents its own bounds.
+        // ------------------------------------------------------------------
+        let masterSchema = null;
+
+        function masterInputId(key) {
+            return 'master-' + String(key).replace(/[^a-zA-Z0-9_-]/g, '_');
+        }
+
+        function esc(v) {
+            return String(v == null ? '' : v)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function masterField(spec) {
+            const id = masterInputId(spec.key);
+            const value = spec.value;
+            const attrs = `id="${id}" data-master-key="${esc(spec.key)}" data-master-kind="${esc(spec.kind)}"`;
+            const inputClass = 'w-full bg-slate-800 text-slate-200 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-accent';
+            let control = '';
+
+            if (spec.kind === 'bool') {
+                control = `<label class="flex items-center gap-2 cursor-pointer py-1">
+                    <input type="checkbox" ${attrs} class="w-4 h-4 accent-blue-500" ${value ? 'checked' : ''}>
+                    <span class="text-xs text-slate-400">${value ? 'enabled' : 'disabled'}</span>
+                </label>`;
+            } else if (spec.kind === 'enum' || spec.kind === 'timeframe') {
+                const fallback = spec.kind === 'timeframe' ? ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'] : [];
+                const choices = (spec.choices && spec.choices.length) ? spec.choices : fallback;
+                const opts = choices.map(c => `<option value="${esc(c)}" ${String(c) === String(value) ? 'selected' : ''}>${esc(c)}</option>`).join('');
+                control = `<select ${attrs} class="${inputClass}">${opts}</select>`;
+            } else if (spec.kind === 'str') {
+                control = `<input type="text" ${attrs} class="${inputClass}" value="${esc(value)}">`;
+            } else {
+                const step = spec.step != null ? spec.step : (spec.kind === 'int' ? 1 : 'any');
+                const min = spec.min != null ? `min="${spec.min}"` : '';
+                const max = spec.max != null ? `max="${spec.max}"` : '';
+                control = `<input type="number" ${attrs} class="${inputClass}" value="${esc(value)}" step="${step}" ${min} ${max}>`;
+            }
+
+            const badges = [];
+            if (spec.dangerous) badges.push('<span class="text-[10px] uppercase tracking-wide text-red-400 border border-red-500/40 rounded px-1">live</span>');
+            if (spec.requires_restart) badges.push('<span class="text-[10px] uppercase tracking-wide text-amber-400 border border-amber-500/40 rounded px-1">restart</span>');
+            if (spec.percent) badges.push('<span class="text-[10px] text-slate-500">fraction</span>');
+
+            const range = (spec.min != null || spec.max != null)
+                ? `<span class="text-[10px] text-slate-500">${spec.min != null ? spec.min : '-∞'} … ${spec.max != null ? spec.max : '∞'}</span>`
+                : '';
+
+            return `<div class="bg-slate-900/40 border border-bordercol rounded-lg p-3" title="${esc(spec.help)}">
+                <div class="flex items-start justify-between gap-2 mb-1">
+                    <label for="${id}" class="text-xs font-semibold text-slate-300 leading-tight">${esc(spec.label)}</label>
+                    <div class="flex items-center gap-1 shrink-0">${badges.join('')}</div>
+                </div>
+                ${control}
+                <div class="flex justify-between mt-1 gap-2">
+                    <code class="text-[10px] text-slate-600 truncate">${esc(spec.key)}</code>
+                    ${range}
+                </div>
+            </div>`;
+        }
+
+        function renderMasterParams() {
+            const host = document.getElementById('master-params');
+            const counter = document.getElementById('master-count');
+            if (!host) return;
+            if (!masterSchema || !masterSchema.available) {
+                host.innerHTML = '<div class="text-sm text-amber-400 md:col-span-2 xl:col-span-3">Config plane unavailable — this build is running without <code>core/config</code>. Edits here are disabled.</div>';
+                if (counter) counter.innerText = '';
+                return;
+            }
+            const groups = masterSchema.groups || [];
+            host.innerHTML = groups.map(group => `
+                <div class="md:col-span-2 xl:col-span-3">
+                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2 mt-1">${esc(group.name)}</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                        ${(group.params || []).map(masterField).join('')}
+                    </div>
+                </div>`).join('');
+            if (counter) counter.innerText = `${masterSchema.count} parameters`;
+        }
+
+        async function loadMasterParams() {
+            const host = document.getElementById('master-params');
+            if (host && !masterSchema) host.innerHTML = '<div class="text-sm text-slate-500">Loading schema…</div>';
+            const data = await api('/api/config/schema');
+            const msg = document.getElementById('master-msg');
+            if (!data) {
+                if (host) host.innerHTML = '<div class="text-sm text-loss md:col-span-2 xl:col-span-3">Could not reach <code>/api/config/schema</code>.</div>';
+                if (msg) { msg.className = 'text-xs mt-3 text-loss'; msg.innerText = 'Schema unavailable — the bot may still be starting.'; }
+                return;
+            }
+            masterSchema = data;
+            renderMasterParams();
+            loadConfigAudit();
+        }
+
+        function readMasterValue(el) {
+            const kind = el.dataset.masterKind;
+            if (kind === 'bool') return el.checked;
+            if (kind === 'int') {
+                const n = parseInt(el.value, 10);
+                return Number.isNaN(n) ? el.value : n;
+            }
+            if (kind === 'float') {
+                const n = parseFloat(el.value);
+                return Number.isNaN(n) ? el.value : n;
+            }
+            return el.value;
+        }
+
+        function masterMsg(text, tone) {
+            const msg = document.getElementById('master-msg');
+            if (!msg) return;
+            msg.className = 'text-xs mt-3 ' + (tone || 'text-slate-400');
+            msg.innerText = text;
+        }
+
+        async function saveMasterParams(confirmFlag) {
+            const host = document.getElementById('master-params');
+            if (!host) return;
+            const payload = {};
+            host.querySelectorAll('[data-master-key]').forEach(el => {
+                payload[el.dataset.masterKey] = readMasterValue(el);
+            });
+            if (confirmFlag) payload.confirm = true;
+
+            masterMsg('Saving…');
+            try {
+                const headers = {'Content-Type': 'application/json'};
+                const token = dashboardToken();
+                if (token) headers['X-Dashboard-Token'] = token;
+
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json().catch(() => ({}));
+
+                if (res.status === 401) {
+                    const entered = prompt('This dashboard is write-protected. Enter DASHBOARD_TOKEN:');
+                    if (entered) {
+                        localStorage.setItem(DASHBOARD_TOKEN_KEY, entered.trim());
+                        return saveMasterParams(confirmFlag);
+                    }
+                    masterMsg('Not authorized — nothing was applied.', 'text-loss');
+                    return;
+                }
+
+                if (res.status === 409 && data.detail && data.detail.requires_confirmation) {
+                    const list = data.detail.requires_confirmation.join(', ');
+                    if (confirm(`This changes the live blast radius (${list}). Continue?`)) {
+                        return saveMasterParams(true);
+                    }
+                    masterMsg('Cancelled — nothing was applied.', 'text-amber-400');
+                    return;
+                }
+
+                if (!res.ok) {
+                    const detail = data.detail;
+                    const errors = (detail && detail.errors) ? detail.errors : [detail || ('HTTP ' + res.status)];
+                    masterMsg(errors.join(' • '), 'text-loss');
+                    return;
+                }
+
+                const changed = Object.keys(data.changed || {});
+                let text = changed.length
+                    ? `Applied ${data.applied.length}, changed ${changed.length}: ${changed.join(', ')}`
+                    : 'Applied — no values changed.';
+                if (data.requires_restart && data.requires_restart.length) {
+                    text += ` Restart required for: ${data.requires_restart.join(', ')}`;
+                }
+                masterSchema = null;   // force a fresh read of the live values
+                await loadMasterParams();
+                masterMsg(text, 'text-profit');
+            } catch (e) {
+                masterMsg('Error: ' + e.message, 'text-loss');
+            }
+        }
+
+        async function resetRiskHalt() {
+            if (!confirm('Clear the total-drawdown halt and allow new entries again?')) return;
+            try {
+                const headers = {};
+                const token = dashboardToken();
+                if (token) headers['X-Dashboard-Token'] = token;
+                const res = await fetch('/api/config/reset-halt', {method: 'POST', headers: headers});
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error((data.detail && JSON.stringify(data.detail)) || ('HTTP ' + res.status));
+                const cleared = (data.cleared || []).join(', ');
+                masterMsg(cleared ? `Halt cleared for: ${cleared}` : 'No bots connected — nothing to reset.', 'text-profit');
+                loadConfigAudit();
+            } catch (e) {
+                masterMsg('Reset failed: ' + e.message, 'text-loss');
+            }
+        }
+
+        async function loadConfigAudit() {
+            const host = document.getElementById('config-audit');
+            if (!host) return;
+            const data = await api('/api/config/audit?limit=25');
+            const rows = (data && data.changes) || [];
+            if (!rows.length) {
+                host.innerHTML = '<div class="text-slate-600">No parameter changes recorded yet.</div>';
+                return;
+            }
+            host.innerHTML = rows.map(r => `
+                <div class="flex items-start gap-2">
+                    <span class="text-slate-600 shrink-0">${esc(String(r.ts || '').replace('T', ' ').replace('+00:00', 'Z'))}</span>
+                    <span class="text-slate-300 shrink-0">${esc(r.key)}</span>
+                    <span class="text-slate-500 truncate">${esc(JSON.stringify(r.old))} → ${esc(JSON.stringify(r.new))}</span>
+                </div>`).join('');
+        }
+
         function runBacktest() {
             document.getElementById('bt-results').classList.remove('hidden');
             // Mock API call

@@ -140,7 +140,7 @@ def strong_short(run_and_stub, monkeypatch):
     run_module, _ = run_and_stub
     monkeypatch.setattr(
         run_module, "_score_direction",
-        lambda ai_dir, ai_conf, m15, h1, h4, d, cfg: (90.0 if d == -1 else 10.0),
+        lambda ai_dir, ai_conf, m15, h1, h4, d, cfg, **kw: (90.0 if d == -1 else 10.0),
     )
     return run_module
 

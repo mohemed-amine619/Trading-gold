@@ -158,7 +158,7 @@ def test_gold_macro_trend_veto(run_and_stub, monkeypatch):
     monkeypatch.setattr(run_module, "_session_ok", lambda c: True)
     monkeypatch.setattr(
         run_module, "_score_direction",
-        lambda ai_dir, ai_conf, m, h1, h4, d, c: (75.0 if d == 1 else 10.0),
+        lambda ai_dir, ai_conf, m, h1, h4, d, c, **kw: (75.0 if d == 1 else 10.0),
     )
 
     # Mock H4 dataframe with established BEARISH opposing trend
@@ -203,7 +203,7 @@ def test_gold_minimum_signal_score_floor(run_and_stub, monkeypatch):
     # Score 54 is above standard threshold (50) but below Gold floor (58)
     monkeypatch.setattr(
         run_module, "_score_direction",
-        lambda ai_dir, ai_conf, m, h1, h4, d, c: (54.0 if d == 1 else 10.0),
+        lambda ai_dir, ai_conf, m, h1, h4, d, c, **kw: (54.0 if d == 1 else 10.0),
     )
 
     direction, score, conf, reason = bot._get_signal(m15p, h1p=None, h4p=None)
@@ -708,3 +708,240 @@ def test_api_llm_test_endpoint(run_and_stub):
 
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Schema-driven configuration plane (/api/config)
+#
+# The historical /api/settings route is an if-chain. The schema plane is the
+# replacement: every write is validated against a declared contract, applied to
+# each bot's own cfg dict, persisted, and audited. These tests pin the three
+# properties that make it safe to expose from a browser: rejection is atomic,
+# paper->live needs explicit confirmation, and the change is recorded.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def config_client(run_and_stub, monkeypatch, tmp_path):
+    run_module, _ = run_and_stub
+    from fastapi.testclient import TestClient
+
+    saved_env = {}
+    monkeypatch.setattr(
+        run_module, "_update_env_file",
+        lambda updates, env_path=".env": saved_env.update(updates) is None,
+    )
+    db_path = str(tmp_path / "trading.db")
+    monkeypatch.setattr(run_module, "_get_sqlite_db_path", lambda: db_path)
+
+    snapshot = dict(run_module.CONFIG)
+    run_module.CONFIG["dry_run"] = True
+
+    cfg = dict(run_module.CONFIG)
+    cfg["symbol"] = "XAUUSDm"
+    cfg["dry_run"] = True
+    bot = run_module.StandaloneAIBot(cfg)
+
+    app = run_module.create_app([bot])
+    yield run_module, bot, TestClient(app), saved_env, db_path
+
+    run_module.CONFIG.clear()
+    run_module.CONFIG.update(snapshot)
+
+
+def test_config_schema_endpoint_lists_every_declared_parameter(config_client):
+    run_module, _bot, client, _env, _db = config_client
+
+    res = client.get("/api/config/schema")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data["available"] is True
+    assert data["count"] == len(run_module._PARAM_SPECS)
+    keys = {p["key"] for g in data["groups"] for p in g["params"]}
+    assert {"risk_per_trade", "max_daily_dd", "fib_weight", "dry_run"} <= keys
+    # The path-param route /api/config/{section} must not swallow "schema".
+    assert data["groups"]
+
+
+def test_config_schema_reports_live_values(config_client):
+    run_module, bot, client, _env, _db = config_client
+    bot.cfg["max_open_pos"] = 7
+
+    res = client.get("/api/config/schema")
+    entry = next(
+        p for g in res.json()["groups"] for p in g["params"]
+        if p["key"] == "max_open_pos"
+    )
+    assert entry["value"] == 7
+
+
+def test_config_write_applies_to_bot_and_persists(config_client):
+    _run_module, bot, client, saved_env, _db = config_client
+
+    res = client.post("/api/config", json={
+        "risk_per_trade": 0.0075,
+        "max_open_pos": 4,
+        "fib_enabled": False,
+        "fib_weight": 12.0,
+    })
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "ok"
+    assert set(body["applied"]) == {
+        "risk_per_trade", "max_open_pos", "fib_enabled", "fib_weight"
+    }
+
+    # Applied to the bot's own cfg dict, not just module CONFIG.
+    assert bot.cfg["risk_per_trade"] == 0.0075
+    assert bot.cfg["max_open_pos"] == 4
+    assert bot.cfg["fib_enabled"] is False
+    assert bot.cfg["fib_weight"] == 12.0
+
+    # Persisted under the env names the registry declares.
+    assert saved_env["RISK_PER_TRADE"] == "0.0075"
+    assert saved_env["MAX_OPEN_POS"] == "4"
+    assert saved_env["FIB_ENABLED"] == "False"
+    assert saved_env["FIB_WEIGHT"] == "12.0"
+
+
+def test_config_write_is_atomic_on_validation_error(config_client):
+    _run_module, bot, client, saved_env, _db = config_client
+    before = dict(bot.cfg)
+
+    res = client.post("/api/config", json={
+        "max_open_pos": 9,             # valid, must NOT be applied
+        "risk_per_trade": 0.99,        # above the declared maximum
+    })
+    assert res.status_code == 400
+    errors = res.json()["detail"]["errors"]
+    assert any("risk_per_trade" in e for e in errors)
+
+    assert bot.cfg == before
+    assert "MAX_OPEN_POS" not in saved_env
+
+
+def test_config_write_rejects_unknown_parameter(config_client):
+    _run_module, bot, client, _env, _db = config_client
+    res = client.post("/api/config", json={"totally_made_up": 1})
+    assert res.status_code == 400
+    assert any("unknown parameter" in e for e in res.json()["detail"]["errors"])
+
+
+def test_config_write_requires_confirmation_to_go_live(config_client):
+    _run_module, bot, client, saved_env, _db = config_client
+    assert bot.cfg["dry_run"] is True
+
+    res = client.post("/api/config", json={"dry_run": False})
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert "dry_run" in detail["requires_confirmation"]
+    # Nothing changed: the bot is still in paper mode.
+    assert bot.cfg["dry_run"] is True
+    assert "TRADING_MODE" not in saved_env
+
+    res = client.post("/api/config", json={"dry_run": False, "confirm": True})
+    assert res.status_code == 200
+    assert bot.cfg["dry_run"] is False
+    assert saved_env["TRADING_MODE"] == "live"
+
+
+def test_config_write_audits_the_change(config_client):
+    _run_module, _bot, client, _env, _db = config_client
+
+    client.post("/api/config", json={"max_open_pos": 6})
+
+    res = client.get("/api/config/audit")
+    assert res.status_code == 200
+    rows = res.json()["changes"]
+    assert any(r["key"] == "max_open_pos" and r["new"] == 6 for r in rows)
+
+
+def test_config_read_returns_live_values(config_client):
+    _run_module, bot, client, _env, _db = config_client
+    bot.cfg["trail_atr_mult"] = 2.25
+
+    res = client.get("/api/config")
+    assert res.status_code == 200
+    assert res.json()["values"]["trail_atr_mult"] == 2.25
+
+
+def test_config_write_reports_restart_requirement(config_client):
+    _run_module, _bot, client, _env, _db = config_client
+    res = client.post("/api/config", json={"n_candles": 700})
+    assert res.status_code == 200
+    assert "n_candles" in res.json()["requires_restart"]
+
+
+def test_reset_halt_endpoint_clears_the_flag(config_client):
+    _run_module, bot, client, _env, _db = config_client
+    bot._halt_reason = "total DD 25.0% >= 20.0% (reset required)"
+
+    res = client.post("/api/config/reset-halt")
+    assert res.status_code == 200
+    assert res.json()["cleared"] == ["XAUUSDm"]
+    assert bot._halt_reason is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional write authentication (DASHBOARD_TOKEN).
+#
+# Loopback binding is a stopgap, not security. When a token is configured the
+# middleware must reject every unauthenticated mutation while leaving reads
+# open, and an unset token must leave behaviour unchanged.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_write_auth_is_disabled_when_token_unset(config_client, monkeypatch):
+    _run_module, bot, client, _env, _db = config_client
+    monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
+
+    res = client.post("/api/config", json={"max_open_pos": 5})
+    assert res.status_code == 200, res.text
+    assert bot.cfg["max_open_pos"] == 5
+
+
+def test_write_auth_rejects_missing_or_wrong_token(config_client, monkeypatch):
+    _run_module, bot, client, _env, _db = config_client
+    monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
+    before = dict(bot.cfg)
+
+    assert client.post("/api/config", json={"max_open_pos": 5}).status_code == 401
+    assert client.post(
+        "/api/config", json={"max_open_pos": 5},
+        headers={"X-Dashboard-Token": "wrong"},
+    ).status_code == 401
+    assert bot.cfg == before
+
+
+def test_write_auth_accepts_the_configured_token(config_client, monkeypatch):
+    _run_module, bot, client, _env, _db = config_client
+    monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
+
+    res = client.post(
+        "/api/config", json={"max_open_pos": 6},
+        headers={"X-Dashboard-Token": "s3cret"},
+    )
+    assert res.status_code == 200, res.text
+    assert bot.cfg["max_open_pos"] == 6
+
+
+def test_write_auth_leaves_reads_open(config_client, monkeypatch):
+    _run_module, _bot, client, _env, _db = config_client
+    monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
+
+    assert client.get("/api/config/schema").status_code == 200
+    assert client.get("/api/config").status_code == 200
+    assert client.get("/api/config/audit").status_code == 200
+
+
+def test_write_auth_guards_reset_halt(config_client, monkeypatch):
+    _run_module, bot, client, _env, _db = config_client
+    monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
+    bot._halt_reason = "halted"
+
+    assert client.post("/api/config/reset-halt").status_code == 401
+    assert bot._halt_reason == "halted"
+
+    res = client.post("/api/config/reset-halt",
+                      headers={"X-Dashboard-Token": "s3cret"})
+    assert res.status_code == 200
+    assert bot._halt_reason is None

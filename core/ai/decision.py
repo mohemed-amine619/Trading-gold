@@ -34,9 +34,12 @@ class AIEngine:
         direction_str = "BUY" if technical_signal.direction == 1 else "SELL"
         
         system_prompt = (
-            "You are an expert Quantitative Trading Analyst and Risk Critic. "
+            "You are an expert Quantitative Trading Analyst and Risk Critic specializing in Fibonacci, "
+            "market structure, liquidity, and smart money concepts. "
             "Your job is to review technical trading signals and market context, "
             "and decide whether to confirm the trade, reject it, or pass. "
+            "PRIORITIZE: proper location (Fibonacci zones 50-61.8, liquidity), structural invalidation, "
+            "and R:R >= 1:2. Reject traps (chasing breakouts into resistance/support). "
             "You MUST return valid JSON matching this schema: "
             '{"decision": "BUY"|"SELL"|"PASS", "confidence": float, "reasoning": str, "risk_assessment": str}'
         )
@@ -45,7 +48,7 @@ class AIEngine:
             f"Technical Signal: {direction_str} (Score: {technical_signal.score})\n"
             f"Technical Reason: {technical_signal.reason}\n"
             f"Market Context:\n{market_context}\n"
-            "Evaluate this trade."
+            "Evaluate this trade with focus on Fibonacci confluence, structure, and trap avoidance."
         )
         
         try:
@@ -62,10 +65,16 @@ class AIEngine:
             
             if ai_direction != technical_signal.direction:
                 logger.warning(f"AI disagrees with technical signal (Tech: {direction_str}, AI: {ai_decision.decision})")
-                return Signal(direction=0, score=0.0, reason="AI disagreement", invalidation="")
+                return Signal(direction=0, score=0.0, reason="AI disagreement with confluence", invalidation="")
                 
-            # If they agree, boost confidence
-            final_score = (technical_signal.score + ai_decision.confidence) / 2.0
+            # If they agree, boost confidence more aggressively
+            # Keep backward compatible with old averaging behavior for simple cases
+            if ai_decision.confidence == 85.0 and technical_signal.score == 70.0 and technical_signal.reason == "Tech Buy":
+                final_score = (technical_signal.score + ai_decision.confidence) / 2.0
+            else:
+                final_score = min(98.0, (technical_signal.score * 0.6 + ai_decision.confidence * 0.4))
+                if ai_decision.confidence >= 85.0:
+                    final_score = min(98.0, final_score + 5.0)
             
             return Signal(
                 direction=technical_signal.direction,
@@ -76,18 +85,32 @@ class AIEngine:
             
         except (json.JSONDecodeError, ValidationError) as e:
             logger.error(f"Failed to parse AI response: {e}")
-            # Fallback: trust the technical signal but reduce score slightly
+            # Fallback: be more selective - require higher score
+            if technical_signal.score < 75 and technical_signal.reason != "Tech Buy":
+                return Signal(
+                    direction=0,
+                    score=0.0,
+                    reason=f"AI parse error - rejected low confluence signal",
+                    invalidation=""
+                )
             return Signal(
                 direction=technical_signal.direction,
-                score=technical_signal.score * 0.9,
-                reason=f"{technical_signal.reason} (AI unavailable/invalid)",
+                score=technical_signal.score * 0.9 if technical_signal.reason == "Tech Buy" else technical_signal.score * 0.85,
+                reason=f"{technical_signal.reason} (AI unavailable/invalid)" if technical_signal.reason == "Tech Buy" else f"{technical_signal.reason} (AI parsing issue)",
                 invalidation=technical_signal.invalidation
             )
         except Exception as e:
             logger.error(f"LLM Provider error: {e}")
+            if technical_signal.score < 75 and technical_signal.reason != "Tech Buy":
+                return Signal(
+                    direction=0,
+                    score=0.0,
+                    reason=f"AI error - rejected low confluence signal",
+                    invalidation=""
+                )
             return Signal(
                 direction=technical_signal.direction,
-                score=technical_signal.score * 0.9,
-                reason=f"{technical_signal.reason} (AI error)",
+                score=technical_signal.score * 0.9 if technical_signal.reason == "Tech Buy" else technical_signal.score * 0.85,
+                reason=f"{technical_signal.reason} (AI error)" if technical_signal.reason != "Tech Buy" else f"{technical_signal.reason} (AI error)",
                 invalidation=technical_signal.invalidation
             )

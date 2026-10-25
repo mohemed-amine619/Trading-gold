@@ -7,8 +7,10 @@ from typing import List
 import pandas as pd
 
 from core.strategy.base import BaseStrategy, MarketRegime, Signal, detect_regime
+from core.strategy.strategies import TrendFollowingStrategy, MomentumStrategy, MeanReversionStrategy, FibonacciStrategy
 
 logger = logging.getLogger(__name__)
+
 
 class StrategyEnsemble:
     """
@@ -69,19 +71,29 @@ class StrategyEnsemble:
         sell_score = sell_score / sell_weight if sell_weight else 0.0
         
         # Decide direction
-        if buy_score > sell_score and buy_score > 50:
+        if buy_score > sell_score and buy_score > 55:
             return Signal(
                 direction=1,
                 score=buy_score,
                 reason="; ".join(reasons),
-                invalidation="Price drops below recent support or momentum flips bearish."
+                invalidation="Price drops below recent swing low/Fib invalidation or momentum flips bearish."
             )
-        elif sell_score > buy_score and sell_score > 50:
+        elif sell_score > buy_score and sell_score > 55:
             return Signal(
                 direction=-1,
                 score=sell_score,
                 reason="; ".join(reasons),
-                invalidation="Price breaks above recent resistance or momentum flips bullish."
+                invalidation="Price breaks above recent swing high/Fib invalidation or momentum flips bullish."
             )
             
         return Signal(direction=0, score=0.0, reason="Insufficient confluence", invalidation="")
+
+
+def get_default_ensemble() -> StrategyEnsemble:
+    strategies = [
+        TrendFollowingStrategy(weight=1.0),
+        MomentumStrategy(weight=1.0),
+        MeanReversionStrategy(weight=0.7),
+        FibonacciStrategy(weight=1.3),
+    ]
+    return StrategyEnsemble(strategies)

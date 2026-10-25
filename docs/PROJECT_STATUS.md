@@ -1,11 +1,11 @@
 # PROJECT STATUS
 
 > **Target platform: native Windows 11.** No Docker, WSL, Linux host or VM is
-> required. Last updated: 2026-10-22.
+> required. Last updated: 2026-10-25.
 
 ## 0. TEST BASELINE
 
-**509 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**587 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -20,11 +20,74 @@
 | **Market structure & location** | **70** | Implemented and tested |
 | **Trading orchestrator (candles → orders)** | **19** | Implemented and tested |
 | **Dynamic AI SL/TP Reasoning & LLM Trader Council** | **19** | **Implemented and tested** |
+| **Config plane, risk ladder & Fibonacci scoring** | **80** | **Implemented and tested** |
 | Manual trades isolation & order execution | 7 | Implemented and tested |
 | Other unit tests | 56 | Implemented and tested |
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter` or an in-memory scripted fake.
+
+---
+
+## 0.000 NEW — CONFIG PLANE, RISK LADDER & FIBONACCI SCORING
+
+The dashboard could previously edit only the handful of settings that someone
+had remembered to hand-wire into an `if` branch, and `cfg.get("missing_key")`
+silently fell back to a call-site default. A setting could therefore be saved to
+`.env`, show as applied, and have no effect. This phase replaces that pattern
+with a declared contract and adds the first real multi-stage risk ladder.
+
+### What is real now
+
+| Piece | File | Guarantee |
+|---|---|---|
+| Parameter registry | `core/config/schema.py` | 91 declared params, each with type, bounds and group. A key not declared here **cannot** be written through the API. |
+| Atomic write | `POST /api/config` | Whole payload validated first; any error rejects the *entire* batch. No half-applied risk change. |
+| Dangerous-setting gate | `POST /api/config` | `dry_run` (paper → live) returns `409` unless the body carries `confirm: true`. |
+| Audit trail | `core/config/audit.py` | One row per changed key in `config_audit` inside `data/trading.db` — still exactly one SQLite file. Fail-safe: an audit error never blocks a settings change. |
+| Persisted risk state | `core/risk/state.py` | Daily/weekly/peak equity, cooldown and loss streak survive a restart (`data/state/risk_<symbol>.json`). |
+| Risk ladder | `run.py` | At `reduce_size_at_dd` of the daily cap new size is halved; at `halt_at_dd` entries stop; at `max_daily_dd` / `max_weekly_dd` / `max_total_dd` the hard stop fires. |
+| Loss-streak breaker | `run.py` | `max_consecutive_losses` consecutive losses start a `loss_streak_cooldown_minutes` cooldown. |
+| Fibonacci scoring | `run.py` `_fib_score` | Contributes `fib_weight` points at retracement confluence; with `fib_enabled=False` the scorer reproduces the legacy 45/30/15/10 formula exactly (guarded by a test). |
+| Dashboard | `dashboard.html` | "Master Parameters" panel renders `GET /api/config/schema`, so the UI cannot drift from the validator. Includes Reset DD Halt and the audit list. |
+| Optional write auth | `run.py` middleware | When `DASHBOARD_TOKEN` is set, every mutating `/api/*` call requires `X-Dashboard-Token`. Reads stay open. Unset ⇒ unchanged behaviour. |
+
+### Invariants preserved
+
+- **Never loosen a stop.** `core/position/trailing.py` is untouched and
+  `test_never_loosen_sl` still guards it.
+- **No martingale, grid, or automatic stop-widening.** The ladder only reduces
+  size or refuses entries.
+- **Paper is still the default.** `dry_run=True`; going live needs an explicit
+  `confirm: true` over HTTP *and* writes `TRADING_MODE=live` to `.env`.
+- **Renormalised scoring.** `_score_direction` now sums configurable weights and
+  rescales to 100 points, so `min_signal_score` keeps its meaning.
+
+### Honest gaps (not done in this phase)
+
+- The registry describes `run.py`'s `CONFIG`; `core/settings.py` still has its
+  own defaults. The two are not unified — the dashboard writes affect `run.py`
+  only.
+- `core/strategy/registry.py` (the modular engine consuming these weights) does
+  not exist yet; the scoring lives in `run.py`.
+- The backtest tab in the dashboard is still a mock (`runBacktest()` does
+  nothing). Live and backtest code are not yet shared.
+- No paper-soak promotion gate yet: nothing automatically promotes a validated
+  model or blocks go-live on poor out-of-sample results.
+- `DASHBOARD_TOKEN` is a shared secret in `.env`, not per-user auth. Loopback
+  binding remains the real control.
+
+### Files
+
+New: `core/config/__init__.py`, `core/config/schema.py`, `core/config/audit.py`,
+`core/risk/state.py`, `tests/unit/test_config_schema.py`,
+`tests/unit/test_risk_ladder.py`.
+Changed: `run.py`, `dashboard.html`, `core/ai/provider.py`,
+`core/ai/dynamic_sltp.py`, `core/ai/decision.py`, `core/strategy/strategies.py`,
+`core/strategy/ensemble.py`, `tests/unit/test_dashboard_settings_api.py`,
+`tests/unit/test_dynamic_sltp.py`, `tests/unit/test_run_py_wiring.py`,
+`.gitignore` (runtime state directories).
+
 
 ---
 

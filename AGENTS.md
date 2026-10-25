@@ -9,8 +9,8 @@ PowerShell tooling lives in `scripts/windows/`; see `README.md` and
 
 ## Repo state — read this first
 
-**All 132 files are git-tracked.** `run.py` is now ~3,160 lines. `git status`
-is clean apart from new location-layer work.
+**All 152 files are git-tracked.** `run.py` is now ~4,680 lines. `git status`
+is clean.
 
 Note `trading_bot.log` is a **log file**, not a database — the old
 "second shadow SQLite file" described below has been resolved: `run.py` now
@@ -21,9 +21,9 @@ writes its `trades` table into the single configured database via
 
 | | Legacy monolith | Modular engine |
 |---|---|---|
-| Files | `run.py` (~3,160 lines) | `core/`, `api/` |
+| Files | `run.py` (~4,680 lines) | `core/`, `api/` |
 | Imports `core/`? | **Yes, for market location only** — `core/market/location.py`, imported defensively at line ~108 | n/a |
-| Tests? | Integration-tested via a stubbed MT5 module | 458 tests, all passing |
+| Tests? | Integration-tested via a stubbed MT5 module | 587 tests, all passing |
 | Actually run today | Yes — this is the production bot | Not wired into any entrypoint |
 
 - **`run.py` is the live bot.** `gui.py:226` does `import run`; `fix_mt5.bat:17` runs `py run.py`.
@@ -40,7 +40,7 @@ writes its `trades` table into the single configured database via
 Run everything with `.venv/bin/python` — the repo has two virtualenvs and only `.venv` has pytest.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 473 passed
+.venv/bin/python -m pytest tests/ -q          # 587 passed
 .venv/bin/python -m pytest tests/unit/test_risk_engine.py -q   # single file
 .venv/bin/python -m pytest tests/unit -k approve -q            # single test by name
 ```
@@ -112,17 +112,31 @@ place.
 
 ## Config duplication trap
 
-`run.py:112-166 CONFIG` and `core/settings.py Settings` define the same knobs with **different defaults**. An edit to `core/settings.py` does not affect the running bot, and vice versa.
+`run.py`'s `CONFIG` (starting around `:360`) and `core/settings.py Settings`
+define the same knobs with **different defaults**. An edit to
+`core/settings.py` does not affect the running bot, and vice versa. Within
+`run.py`, many defaults are now chosen by `_profile_cfg(...)` from
+`TRADING_PROFILE` (`balanced` default, `aggressive`, `scalper`,
+`money_printer`); the table below shows the **balanced** value.
 
-| Key | `run.py` | `core/settings.py` |
+| Key | `run.py` (balanced) | `core/settings.py` |
 |---|---|---|
-| `min_signal_score` | 60 (`:132`) | 55.0 (`:164`) |
-| `max_open_pos` | 3 (`:153`) | 5 (`:156`) |
-| `max_daily_dd` | 0.03 (`:154`) | 0.02 (`:154`) |
-| `max_margin_usage` | 0.30 (`:152`) | 0.50 (`:158`) |
-| `sleep_interval` | 1.0 (`:163`) | 5.0 (`:175`) |
+| `min_signal_score` | 50.0 | 55.0 |
+| `max_open_pos` | 3 | 5 |
+| `max_daily_dd` | 0.03 | 0.02 |
+| `max_margin_usage` | 0.30 | 0.50 |
+| `sleep_interval` | 1.0 | 5.0 |
 
-Also: `core/settings.py:176 max_spread_points` exists but `as_legacy_config()` never maps it. `run.py` reads 29 keys via `cfg.get()` that aren't in `CONFIG` (`telegram_token`, `dry_run`, `paper_trading`, `structure_trailing`, `max_spread_points`, …), so each silently takes its call-site default. **When adding a config key, add it to both sides or it will be silently ignored.**
+`core/config/schema.py` is the **write contract** for the dashboard: 91 declared
+parameters, each with bounds, and `POST /api/config` refuses anything it does
+not declare. That closes the "saved but ignored" hole for declared keys, but it
+does not unify the two default sets — the dashboard writes `run.py CONFIG`
+only. `core/settings.py` still has its own values, and `as_legacy_config()`
+still never maps `max_spread_points`.
+
+**When adding a config key, add it to `core/config/schema.py` and
+`run.py CONFIG` (and `core/settings.py` if the modular engine should see it),
+or the key will be silently ignored.**
 
 ## Docker & deployment
 
@@ -235,17 +249,24 @@ Notable: `core/position/trailing.py` holds **pure functions** with no broker dep
 ### Wiring status — still not an entrypoint
 
 `core/trading/orchestrator.py` wires the whole stack and is tested end-to-end
-(candles → risk approval → order sent), but **`run.py` still imports nothing
-from `core/`** and remains the live bot. The location layer therefore does not
-yet affect a single real order. That gap is deliberate and documented, not
-overlooked — see `docs/PROJECT_STATUS.md` §0.0.
+(candles → risk approval → order sent), but it is still not an entrypoint.
+`run.py` imports only two things from `core/`: the market-location layer
+(`core/market/location.py`) and the config plane (`core/config/`). The
+orchestrator itself is never constructed by the live bot, so its risk/execution
+graph still does not affect a real order. That gap is deliberate and documented,
+not overlooked — see `docs/PROJECT_STATUS.md` §0.0.
 
 ## Dashboard
 
-`dashboard.html` (94 KB, untracked) is served by `run.py:1633` from a **nested FastAPI app defined inside `if __name__ == "__main__"`** — it is not importable, so you cannot test it directly.
+`dashboard.html` (128 KB, **git-tracked**) is served by `run.py` from a **nested FastAPI app defined inside `if __name__ == "__main__"`** — it is not importable, so you cannot test it directly. There is no JS test suite; after editing it, check that `<div>`/`<script>` tags balance and run `node --check` on the inline script block.
+
+- The Settings tab renders a **"Master Parameters"** panel from `GET /api/config/schema` (`core/config/schema.py`), so new parameters appear without editing the HTML. Apply All posts the whole batch to `POST /api/config`; a rejected batch applies nothing. It also shows the `config_audit` trail and a Reset DD Halt button.
+- Writes send `X-Dashboard-Token` when `DASHBOARD_TOKEN` is set; the JS prompts once and stores it in `localStorage.dashboardToken`.
 
 - It expects `run.py`'s response shapes: `{status, markets, mode}`, `{positions}`, `{data}`, `{history}` (`dashboard.html:1050-1076`). The `markets` entries now also carry additive `locBias`, `locPosition`, `locRangeLow`, `locRangeHigh`, `locStructure`, `locSupport`, `locResistance` keys; the UI ignores unknown keys, so this is backward-compatible.
-- Routes `dashboard.html` calls that **nothing serves**: `/api/config/{section}` (only `api/config_router.py` has it, and that app is separate), `/api/emergency-stop` (it calls this but `run.py` exposes `/api/control`). Expect silent 404s.
+- `run.py` now serves the schema-driven config plane: `GET /api/config/schema`, `GET /api/config`, `POST /api/config`, `GET /api/config/audit`, `POST /api/config/reset-halt`, plus the legacy `/api/config/{section}`. `POST /api/config` validates the whole batch against `core/config/schema.py` and rejects it atomically; `dry_run` requires `confirm: true`.
+- Set `DASHBOARD_TOKEN` in `.env` to require `X-Dashboard-Token` on every mutating `/api/*` call (reads stay open). Unset ⇒ unchanged, and loopback binding is the only control.
+- Still unserved: `/api/emergency-stop` (the dashboard calls it, but `run.py` exposes `/api/control`). Expect a silent 404.
 - `api/main.py` is a **second, separate FastAPI app** (`version="2.0"`) that also serves `dashboard.html`'s path space. Two apps, one port, no auth on either. `dashboard.html` effectively targets `run.py`.
 - CORS is `allow_origins=["*"]` with `allow_credentials=True` in both apps (`api/main.py:25-30`) — insecure; note it if touching auth.
 - `core/notifications/__init__.py` is empty; Telegram is dead in the monolith because `CONFIG` has no `telegram_token` key (`run.py:112-166`), so `Notifier` reads `""` and silently no-ops.
@@ -261,6 +282,13 @@ overlooked — see `docs/PROJECT_STATUS.md` §0.0.
 - The live DB is `data/trading.db`. `*.db`, `*.db-shm` and `*.db-wal` are all in
   `.gitignore`, so `git add .` will not commit trade data. Treat the file and
   its WAL sidecars as sensitive regardless.
+- The same file holds `config_audit` (`core/config/audit.py`), one row per
+  changed parameter. Audit writes are fail-safe: a failure is logged and
+  swallowed so it can never abort an already-applied settings change.
+- Persisted risk state lives **outside** SQLite in
+  `data/state/risk_<symbol>.json` (`core/risk/state.py`), written atomically.
+  Trained models go to `data/models/`. Both directories, plus `data/cache/`,
+  are gitignored because they are machine-specific runtime state.
 - Sync session for the trading loop (`get_sync_db`), async for FastAPI (`get_async_db`). `get_db_dependency` commits and then the handler may commit again (`api/config_router.py:66`).
 
 ## Conventions
@@ -276,5 +304,5 @@ overlooked — see `docs/PROJECT_STATUS.md` §0.0.
 
 - One coherent, testable phase at a time; run `.venv/bin/python -m pytest tests/ -q` after each change.
 - Never report a test as passing unless you actually ran it. Never let tests touch a live account.
-- Update `docs/PROJECT_STATUS.md` when behavior changes. The real count is now 217; keep that number honest.
+- Update `docs/PROJECT_STATUS.md` when behavior changes. The real count is now 587; keep that number honest.
 - `docs/ROADMAP.md` and `docs/ARCHITECTURE.md` are **aspirational** — they describe the intended 12-phase platform, not current state. `docs/ARCHITECTURE.md:9` is already stale (claims `run.py` is 1,535 lines; it is 1840). Don't treat any of it as implemented without checking the code.

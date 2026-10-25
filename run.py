@@ -78,7 +78,7 @@ if env_file and os.path.exists(env_file):
 else:
     load_dotenv()
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # Windows consoles default to a legacy codepage (cp1252) that can't encode
@@ -129,6 +129,59 @@ except Exception as _sltp_import_error:  # pragma: no cover - defensive
     print(
         f"WARNING: dynamic SL/TP reasoning layer unavailable ({_sltp_import_error!r}); "
         f"falling back to standard stops."
+    )
+
+# ---------------------------------------------------------------------------
+# Configuration plane + persisted risk state.
+#
+# Imported defensively for the same reason as the layers above: a live bot that
+# refuses to start because a helper module is missing is worse than one that
+# runs without the refinement. When the import fails the dashboard loses its
+# schema-driven editor, but trading and the existing /api/settings route keep
+# working unchanged.
+# ---------------------------------------------------------------------------
+try:
+    from core.config.schema import (
+        PARAMS as _PARAM_SPECS,
+        schema_payload as _config_schema_payload,
+        validate_payload as _validate_config_payload,
+        TIMEFRAME_NAMES as _TF_NAMES,
+    )
+    from core.config.audit import (
+        record_changes as _audit_record,
+        recent_changes as _audit_recent,
+    )
+    _CONFIG_PLANE_AVAILABLE = True
+except Exception as _cfg_import_error:  # pragma: no cover - defensive
+    _PARAM_SPECS = {}
+    _config_schema_payload = None
+    _validate_config_payload = None
+    _audit_record = None
+    _audit_recent = None
+    _TF_NAMES = {}
+    _CONFIG_PLANE_AVAILABLE = False
+    print(
+        f"WARNING: config plane unavailable ({_cfg_import_error!r}); "
+        f"the dashboard schema editor will be disabled."
+    )
+
+try:
+    from core.risk.state import (
+        RiskState as _RiskState,
+        load_state as _load_risk_state,
+        save_state as _save_risk_state,
+        state_path as _risk_state_path,
+    )
+    _RISK_STATE_AVAILABLE = True
+except Exception as _state_import_error:  # pragma: no cover - defensive
+    _RiskState = None
+    _load_risk_state = None
+    _save_risk_state = None
+    _risk_state_path = None
+    _RISK_STATE_AVAILABLE = False
+    print(
+        f"WARNING: persisted risk state unavailable ({_state_import_error!r}); "
+        f"the daily guard will reset on restart."
     )
 
 from sklearn.ensemble import (
@@ -432,10 +485,56 @@ CONFIG = {
     "local_llm_timeout":       float(os.getenv("LOCAL_LLM_TIMEOUT", "3.0")),
     "scalp_micro_trailing":    os.getenv("SCALP_MICRO_TRAILING", "true").lower() in ("1", "true", "yes"),
 
+    # --- AI model switch + persistence ---------------------------------
+    # ai_enabled=False keeps the confluence stack but stops training and
+    # prediction (useful for debugging or when a model is under review).
+    "ai_enabled":              os.getenv("AI_ENABLED", "true").lower() in ("1", "true", "yes"),
+    # Persist a promoted model so a restart does not throw away a validated
+    # model and retrain from nothing.
+    "ai_model_persist":        os.getenv("AI_MODEL_PERSIST", "true").lower() in ("1", "true", "yes"),
+
+    # --- strategy components -------------------------------------------
+    # The confluence score is normalised to 100 points. These weights decide
+    # how that budget is split, so the dashboard can change the *balance*
+    # between evidence without changing the scale.
+    "trend_weight":            _profile_cfg("TREND_WEIGHT", 30.0, 30.0),
+    "momentum_weight":         _profile_cfg("MOMENTUM_WEIGHT", 15.0, 15.0),
+    "fib_enabled":             os.getenv("FIB_ENABLED", "true").lower() in ("1", "true", "yes"),
+    "fib_weight":              _profile_cfg("FIB_WEIGHT", 10.0, 10.0),
+    "fib_zone_low":            float(os.getenv("FIB_ZONE_LOW", "0.382")),
+    "fib_zone_high":           float(os.getenv("FIB_ZONE_HIGH", "0.786")),
+    "fib_extension_target":    float(os.getenv("FIB_EXTENSION_TARGET", "1.618")),
+
+    # --- instrument-specific thresholds --------------------------------
+    # Gold deserves stricter gates than FX; the branches below only apply
+    # when the symbol looks like gold.
+    "gold_min_signal_score":   _profile_cfg("GOLD_MIN_SIGNAL_SCORE", 58.0, 58.0),
+    "gold_min_ai_conf":        _profile_cfg("GOLD_MIN_AI_CONF", 0.55, 0.55),
+
+    # --- structure-aware management ------------------------------------
+    "structure_trailing":      os.getenv("STRUCTURE_TRAILING", "true").lower() in ("1", "true", "yes"),
+    "min_sl_separation_atr":   float(os.getenv("MIN_SL_SEPARATION_ATR", "0.55")),
+    "max_spread_points":       float(os.getenv("MAX_SPREAD_POINTS", "0") or 0.0),
+
+    # --- capital preservation ladder -----------------------------------
+    # The daily cap is not a single cliff. Below it the bot reduces size, then
+    # stops opening, then (at the cap) flattens. Each rung is expressed as a
+    # fraction of max_daily_dd so it scales with whatever cap is configured.
+    "reduce_size_at_dd":       float(os.getenv("REDUCE_SIZE_AT_DD", "0.50")),
+    "halt_at_dd":              float(os.getenv("HALT_AT_DD", "0.80")),
+    # Drawdown ceilings measured against the equity peak / the week's start.
+    "max_weekly_dd":           _profile_cfg("MAX_WEEKLY_DD", 0.08, 0.10),
+    "max_total_dd":            _profile_cfg("MAX_TOTAL_DD", 0.20, 0.25),
+    "equity_protect_close_all": os.getenv("EQUITY_PROTECT_CLOSE_ALL", "true").lower() in ("1", "true", "yes"),
+    # Loss-streak circuit breaker: N consecutive losses -> pause for M minutes.
+    "max_consecutive_losses":  _profile_cfg("MAX_CONSECUTIVE_LOSSES", 4, 4, val_type=int),
+    "loss_streak_cooldown_minutes": int(os.getenv("LOSS_STREAK_COOLDOWN_MIN", "60")),
+
     # --- manual trade management ---
     "ai_protect_manual_trades":  True,
     "manual_trade_sl_atr":       2.0,
     "manage_manual_trades_full": False,
+    "default_manual_policy":     os.getenv("DEFAULT_MANUAL_POLICY", "observe_only"),
 
     # --- safety ---
     # SAFETY: the bot MUST default to paper mode. Every mutating method
@@ -1416,6 +1515,122 @@ class AIEnsemble:
             ("%+.3f" % oos_edge) if oos_edge is not None else "n/a",
             calibrator is not None,
             top or "n/a")
+        # Persist only on promotion, never on rejection: the file must always
+        # hold a model that cleared the out-of-sample gate.
+        self._maybe_persist()
+
+    # -- persistence ---------------------------------------------------
+    # A validated model used to live only in RAM, so every restart threw away
+    # the champion and retrained from an empty slate. That is not just slow: a
+    # freshly-restarted bot is momentarily *unvalidated*, and an unvalidated
+    # model must not trade. Restoring the last promoted champion removes that
+    # window without weakening the promotion gate — a restored model is still
+    # challenged and replaced by anything that validates better.
+    MODEL_FORMAT_VERSION = 1
+
+    def _model_path(self, directory: str = os.path.join("data", "models"),
+                    timeframe=None) -> str:
+        tf = timeframe if timeframe is not None else getattr(self.config, "MODEL_TIMEFRAME", None)
+        safe_sym = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(self.symbol))
+        suffix = f"_{tf}" if tf else ""
+        return os.path.join(directory, f"{safe_sym}{suffix}.joblib")
+
+    def save_to_disk(self, directory: str = os.path.join("data", "models"),
+                     timeframe=None) -> bool:
+        """Persist the promoted champion atomically. Never raises."""
+        try:
+            import joblib
+        except Exception:  # pragma: no cover - sklearn ships joblib
+            return False
+
+        path = self._model_path(directory, timeframe)
+        with self._lock:
+            if not self._trained or self._pipeline is None:
+                return False
+            payload = {
+                "version": self.MODEL_FORMAT_VERSION,
+                "symbol": self.symbol,
+                "feature_cols": list(self._feature_cols),
+                "pipeline": self._pipeline,
+                "calibrator": self._calibrator,
+                "feature_importance": dict(self._feature_importance),
+                "oos_accuracy": self._last_oos_accuracy,
+                "oos_auc": self._last_oos_auc,
+                "oos_base_rate": self._last_oos_base_rate,
+                "oos_edge": self._last_oos_edge,
+                "n_trains": self._n_trains,
+                "n_promotions": self._n_promotions,
+            }
+        try:
+            parent = os.path.dirname(os.path.abspath(path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            tmp = path + ".tmp"
+            joblib.dump(payload, tmp)
+            os.replace(tmp, path)
+            logger.info("[AI] %s model saved to %s", self.symbol, path)
+            return True
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[AI] %s model save failed: %s", self.symbol, exc)
+            return False
+
+    def load_from_disk(self, directory: str = os.path.join("data", "models"),
+                       timeframe=None) -> bool:
+        """Restore a previously promoted champion. Never raises."""
+        try:
+            import joblib
+        except Exception:  # pragma: no cover
+            return False
+
+        path = self._model_path(directory, timeframe)
+        if not os.path.exists(path):
+            return False
+        try:
+            payload = joblib.load(path)
+            if not isinstance(payload, dict):
+                return False
+            if payload.get("version") != self.MODEL_FORMAT_VERSION:
+                logger.warning(
+                    "[AI] %s ignoring incompatible model file (v%s, expected v%s)",
+                    self.symbol, payload.get("version"), self.MODEL_FORMAT_VERSION)
+                return False
+            if payload.get("symbol") not in (None, self.symbol):
+                return False
+            cols = list(payload.get("feature_cols") or [])
+            # If the feature builder stopped producing a column the model was
+            # trained on, the model cannot be trusted: silently dropping the
+            # column would shift the input vector under sklearn.
+            missing = [c for c in cols if c not in FEATURE_COLS]
+            if missing:
+                logger.warning(
+                    "[AI] %s ignoring model: features no longer produced: %s",
+                    self.symbol, missing[:5])
+                return False
+            pipeline = payload.get("pipeline")
+            if pipeline is None:
+                return False
+            with self._lock:
+                self._pipeline            = pipeline
+                self._calibrator          = payload.get("calibrator")
+                self._feature_cols        = cols or FEATURE_COLS[:]
+                self._feature_importance  = dict(payload.get("feature_importance") or {})
+                self._last_oos_accuracy   = payload.get("oos_accuracy")
+                self._last_oos_auc        = payload.get("oos_auc")
+                self._last_oos_base_rate  = payload.get("oos_base_rate")
+                self._last_oos_edge       = payload.get("oos_edge")
+                self._n_trains            = int(payload.get("n_trains") or 1)
+                self._n_promotions        = int(payload.get("n_promotions") or 1)
+                self._trained             = True
+            logger.info("[AI] %s model restored from %s (oos_acc=%s)",
+                        self.symbol, path, self._last_oos_accuracy)
+            return True
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[AI] %s model load failed: %s", self.symbol, exc)
+            return False
+
+    def _maybe_persist(self) -> None:
+        if getattr(self.config, "AI_MODEL_PERSIST", True):
+            self.save_to_disk(timeframe=getattr(self.config, "MODEL_TIMEFRAME", None))
 
     def update(self, df: pd.DataFrame) -> None:
         """Retrain when due. Runs in a background thread so a slow fit
@@ -1653,19 +1868,70 @@ def _market_regime(last: pd.Series, cfg: dict) -> str:
     return "RANGING"
 
 
+def _fib_score(location, direction: int, cfg: dict) -> float:
+    """How well does current price sit on the Fibonacci entry for *direction*?
+
+    Returns 0.0–1.0 or 0.0 when there is no defensible range.
+
+    The mapping is deliberately in *retracement* space, not raw price:
+
+    * For a long, the relevant retracement of the up-leg is ``1 - position``
+      (price at the range low is a 100% retracement).
+    * For a short it is ``position`` (price at the range high is a 100%
+      retracement of the down-leg).
+
+    So the golden 0.618 pocket maps to *opposite* sides of the range for buys
+    and sells, which is the point: buying a discount and selling a premium are
+    the same rule seen from two directions.
+
+    Price outside the range scores zero. A breakout is not a deep discount —
+    that distinction is the whole reason the location layer clamps position
+    instead of extrapolating it.
+    """
+    if location is None or not getattr(location, "is_valid", False):
+        return 0.0
+    pos = getattr(location, "range_position", None)
+    if pos is None:
+        return 0.0
+    if getattr(location, "below_range", False) or getattr(location, "above_range", False):
+        return 0.0
+
+    zone_low = float(cfg.get("fib_zone_low", 0.382))
+    zone_high = float(cfg.get("fib_zone_high", 0.786))
+    if zone_high <= zone_low:
+        return 0.0
+
+    retrace = (1.0 - float(pos)) if direction == 1 else float(pos)
+    golden = 0.618
+    half_width = max(0.05, (zone_high - zone_low) / 2.0)
+    dist = abs(retrace - golden)
+    if dist >= half_width:
+        return 0.0
+    # sqrt falloff: broad credit inside the zone, a sharp peak at 0.618.
+    # Fib confluence is a region, not a single tick, and a linear ramp made
+    # anything more than a few points from 0.618 worthless.
+    return max(0.0, min(1.0, math.sqrt(1.0 - dist / half_width)))
+
+
 def _score_direction(ai_direction: int, ai_conf: float,
                      m15: pd.DataFrame, h1: pd.DataFrame, h4: pd.DataFrame,
-                     direction: int, cfg: dict) -> float:
+                     direction: int, cfg: dict, location=None) -> float:
     """Total confluence score (0-100) for the given direction.
 
-    Professional weight allocation:
-      AI ensemble  45 pts  — the most predictive single component
-      H4 trend     20 pts  — higher timeframe = higher reliability
-      H1 trend     10 pts  — intermediate trend confirmation
+    The score is a fixed 100-point budget split between evidence sources. The
+    split is configurable from the dashboard, but the *total* never changes, so
+    ``min_signal_score`` keeps meaning "percent of available evidence".
+
+      AI ensemble   45 pts  — the most predictive single component
+      Trend        30 pts  — 2/3 H4 (higher timeframe), 1/3 H1
       Momentum     15 pts  — RSI / MACD / Stoch confluence
       Entry quality 10 pts — pullback-to-value (EMA21/50), pinbar
-      ─────────────────────
-      Total        100 pts
+      Fibonacci     0 pts  — off by default in the budget; takes its share
+                             from the total when ``fib_enabled``
+
+    With ``fib_enabled`` true and ``fib_weight`` at 10, every component is
+    scaled by 100/110 so the sum is still 100. When it is false the weights are
+    exactly the historical 45/30/15/10, which keeps backtests comparable.
 
     Volume is folded into the regime context rather than scored separately;
     it was previously too loosely correlated with direction to merit 10pts.
@@ -1674,30 +1940,40 @@ def _score_direction(ai_direction: int, ai_conf: float,
     adx_val    = float(last.get("adx", 0.0))
     adx_strong = cfg.get("adx_strong", 30)
 
-    # AI component: 0-45 pts
+    # --- component budget ------------------------------------------------
+    ai_w    = 45.0
+    trend_w = max(0.0, float(cfg.get("trend_weight", 30.0)))
+    mom_w   = max(0.0, float(cfg.get("momentum_weight", 15.0)))
+    entry_w = 10.0
+    fib_w   = max(0.0, float(cfg.get("fib_weight", 10.0))) if cfg.get("fib_enabled", True) else 0.0
+    nominal = ai_w + trend_w + mom_w + entry_w + fib_w
+    factor  = (100.0 / nominal) if nominal > 0 else 0.0
+
+    # AI component: 0..ai_w
     if ai_direction == direction:
-        ai_pts = ai_conf * 45.0
+        ai_pts = ai_conf * ai_w
     elif ai_direction == -direction:
         ai_pts = 0.0
     else:
-        ai_pts = 13.5  # uncertain (0.5 × 27 midpoint)
+        ai_pts = 0.30 * ai_w  # uncertain: 30% of the available AI weight
 
-    # Trend component: H4 carries 20 pts, H1 carries 10 pts (total 30)
-    h1_s  = _trend_score(h1, direction)
-    h4_s  = _trend_score(h4, direction)
-    trend = h1_s * 10.0 + h4_s * 20.0
+    # Trend component: H4 carries twice the weight of H1.
+    h1_w = trend_w / 3.0
+    h4_w = trend_w * 2.0 / 3.0
+    h1_s = _trend_score(h1, direction)
+    h4_s = _trend_score(h4, direction)
+    trend = h1_s * h1_w + h4_s * h4_w
 
-    # ADX boost: strong trends get up to +25% on the trend component
-    if adx_val >= adx_strong:
-        trend = min(30.0, trend * (1.0 + (adx_val - adx_strong) / 50.0))
+    # ADX boost: strong trends get up to +25% on the trend component, capped
+    # at the trend budget so it can never manufacture points from nothing.
+    if adx_val >= adx_strong and trend_w > 0:
+        trend = min(trend_w, trend * (1.0 + (adx_val - adx_strong) / 50.0))
 
-    # Momentum: 15 pts
-    mom = _momentum_score(last, direction) * 15.0
+    momentum = _momentum_score(last, direction) * mom_w
+    entry    = _entry_quality_score(last) * entry_w
+    fib      = _fib_score(location, direction, cfg) * fib_w
 
-    # Entry quality: 10 pts (pullback-to-value, pinbar at level)
-    eq = _entry_quality_score(last) * 10.0
-
-    return ai_pts + trend + mom + eq
+    return (ai_pts + trend + momentum + entry + fib) * factor
 
 
 # ---------------------------------------------------------------------------
@@ -1717,7 +1993,8 @@ def _risk_scale(adx: float, cfg: dict) -> float:
 
 
 def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
-              vol_min, vol_max, vol_step, cfg, adx=0.0, ai_conf=0.0):
+              vol_min, vol_max, vol_step, cfg, adx=0.0, ai_conf=0.0,
+              size_multiplier=1.0):
     scale    = _risk_scale(adx, cfg) if cfg.get("dynamic_risk") else 1.0
     # --- AI CONFIDENCE SIZING -------------------------------------------
     # `ai_conf` is now a CALIBRATED probability (see AIEnsemble.predict),
@@ -1734,6 +2011,9 @@ def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
         scale *= 1.5
     elif 0.0 < ai_conf <= low_tier:
         scale *= 0.5
+    # Capital-preservation ladder: the caller halves size once the day's
+    # drawdown has consumed half the daily budget.
+    scale *= max(0.0, float(size_multiplier))
     risk_amt = account_equity * cfg["risk_per_trade"] * scale
     sl_ticks = sl_dist_price / (tick_size + 1e-10)
     rpl      = sl_ticks * tick_value
@@ -1766,6 +2046,20 @@ class StandaloneAIBot:
         self._peak_profit: dict = {}      # ticket -> peak favourable move (price units), POWER-UP (B)
         self._manual_sltp_failed: dict = {} # ticket -> epoch timestamp of last failed modification
         self._dd_positions_closed = False # one-shot equity protect close
+
+        # --- persisted risk state ------------------------------------------
+        # The daily guard, the trade counter and the loss streak used to be
+        # RAM-only, so restarting the bot at 14:00 after a bad morning reset
+        # the daily start equity and re-armed the *entire* daily loss budget.
+        # These fields are mirrored to data/state/risk_<symbol>.json on every
+        # change and restored in connect().
+        self._consecutive_losses = 0
+        self._cooldown_until: Optional[datetime] = None
+        self._peak_equity = 0.0
+        self._week_start_equity = 0.0
+        self._week_key: Optional[str] = None
+        self._halt_reason: Optional[str] = None
+        self._risk_state_path: Optional[str] = None
 
         # --- GUI hook: thread-safe status snapshot. Only this bot thread
         # ever writes to it; any other thread (e.g. a GUI) should only read
@@ -1941,6 +2235,26 @@ class StandaloneAIBot:
             decided = self.status["wins"] + self.status["losses"]
             self.status["win_rate"] = (self.status["wins"] / decided * 100.0) if decided else 0.0
 
+        # --- loss-streak circuit breaker ---------------------------------
+        # Consecutive losses are usually one regime, not N independent
+        # accidents. Pausing forces a re-evaluation instead of letting the bot
+        # average down into the same bad tape.
+        if pnl < -1e-9:
+            self._consecutive_losses += 1
+            limit = int(self.cfg.get("max_consecutive_losses", 4) or 0)
+            if limit > 0 and self._consecutive_losses >= limit:
+                minutes = int(self.cfg.get("loss_streak_cooldown_minutes", 60) or 0)
+                if minutes > 0:
+                    self._cooldown_until = datetime.utcnow() + timedelta(minutes=minutes)
+                    msg = (f"🧊 {self._consecutive_losses} consecutive losses – "
+                           f"new entries paused for {minutes} min")
+                    logger.warning(msg)
+                    self.notifier.send(msg)
+                self._consecutive_losses = 0
+        elif pnl > 1e-9:
+            self._consecutive_losses = 0
+        self._persist_risk_state()
+
     # --------------------------------------------------------------
     def connect(self) -> bool:
         # FORCE EMPTY kwargs to force connection to the currently running terminal
@@ -1987,6 +2301,10 @@ class StandaloneAIBot:
             self.start_balance = acc.balance if acc else 0.0
             self.daily_start   = acc.equity  if acc else 0.0
             self.daily_date    = date.today()
+            # A restart must not re-arm today's loss budget or forget a
+            # loss-streak cooldown. Same-day state wins; a stale day rolls
+            # over naturally on the next _daily_dd_ok() call.
+            self._restore_risk_state(self.daily_start)
             logger.info("Connected: balance=%.2f equity=%.2f",
                         self.start_balance, self.daily_start)
             self._update_status(connected=True, balance=self.start_balance,
@@ -2015,12 +2333,197 @@ class StandaloneAIBot:
         return False
 
     # --------------------------------------------------------------
+    # Persisted risk state + capital-preservation ladder
+    # --------------------------------------------------------------
+    def _risk_state_file(self) -> str:
+        if self._risk_state_path is None:
+            base = os.getenv("RISK_STATE_DIR", os.path.join("data", "state"))
+            self._risk_state_path = _risk_state_path(base, self.cfg.get("symbol", "unknown"))
+        return self._risk_state_path
+
+    def _persist_risk_state(self) -> None:
+        """Mirror the in-memory guard to disk. Never raises."""
+        if not _RISK_STATE_AVAILABLE:
+            return
+        try:
+            state = _RiskState(
+                daily_date=self.daily_date.isoformat() if self.daily_date else None,
+                daily_start_equity=float(self.daily_start or 0.0),
+                trade_date=self.trade_date.isoformat() if self.trade_date else None,
+                trades_today=int(self.trades_today or 0),
+                dd_positions_closed=bool(self._dd_positions_closed),
+                consecutive_losses=int(self._consecutive_losses or 0),
+                cooldown_until=self._cooldown_until.isoformat() if self._cooldown_until else None,
+                peak_equity=float(self._peak_equity or 0.0),
+                week_key=self._week_key,
+                week_start_equity=float(self._week_start_equity or 0.0),
+                halted_reason=self._halt_reason,
+            )
+            _save_risk_state(self._risk_state_file(), state)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("risk state persist skipped: %s", exc)
+
+    def _restore_risk_state(self, equity: float) -> None:
+        """Rehydrate the guard after a restart.
+
+        Same-day state always wins over the freshly-read equity, because that
+        is the entire point: the daily start is the reference the loss budget
+        is measured from, not "whatever the equity happened to be when the
+        process restarted".
+        """
+        if not _RISK_STATE_AVAILABLE:
+            return
+        try:
+            st = _load_risk_state(self._risk_state_file())
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("risk state restore skipped: %s", exc)
+            return
+
+        today = date.today()
+        if st.daily_date == today.isoformat() and st.daily_start_equity > 0:
+            self.daily_date = today
+            self.daily_start = st.daily_start_equity
+            self._dd_positions_closed = st.dd_positions_closed
+        if st.trade_date == today.isoformat():
+            self.trade_date = today
+            self.trades_today = st.trades_today
+
+        self._consecutive_losses = int(st.consecutive_losses or 0)
+        if st.cooldown_until:
+            try:
+                self._cooldown_until = datetime.fromisoformat(st.cooldown_until)
+            except ValueError:
+                self._cooldown_until = None
+        # Peak/equity references are never reset downward; a restart is not a
+        # new equity high-water mark.
+        self._peak_equity = max(float(st.peak_equity or 0.0), float(equity or 0.0))
+        self._week_key = st.week_key
+        self._week_start_equity = float(st.week_start_equity or 0.0)
+        self._halt_reason = st.halted_reason
+
+        logger.info(
+            "[%s] risk state restored: daily_start=%.2f trades_today=%d "
+            "peak=%.2f streak=%d halt=%s",
+            self.cfg.get("symbol"), self.daily_start, self.trades_today,
+            self._peak_equity, self._consecutive_losses, self._halt_reason or "-",
+        )
+
+    def reset_risk_halt(self, reason: str = "") -> None:
+        """Clear a total-drawdown halt. Deliberately explicit and manual."""
+        previous = self._halt_reason
+        self._halt_reason = None
+        self._cooldown_until = None
+        self._consecutive_losses = 0
+        self._peak_equity = self.start_balance or self.daily_start or 0.0
+        self._persist_risk_state()
+        logger.warning("Risk halt reset (was: %s) by %s", previous or "-", reason or "operator")
+
+    def _hard_drawdown_reason(self, equity: float) -> Optional[str]:
+        """Weekly / peak-to-trough ceilings.
+
+        These are *hard* stops: they flatten and require a manual reset, which
+        is why they are separate from the softer daily ladder.
+        """
+        if equity <= 0:
+            return None
+
+        week_key = date.today().strftime("%G-W%V")
+        if self._week_key != week_key:
+            self._week_key = week_key
+            self._week_start_equity = equity
+            if self._halt_reason and self._halt_reason.startswith("weekly"):
+                self._halt_reason = None
+            self._persist_risk_state()
+
+        if equity > self._peak_equity:
+            self._peak_equity = equity
+
+        if self._halt_reason and not self._halt_reason.startswith("weekly"):
+            return self._halt_reason
+
+        weekly_cap = float(self.cfg.get("max_weekly_dd", 0.08))
+        if self._week_start_equity > 0 and weekly_cap > 0:
+            wdd = (self._week_start_equity - equity) / self._week_start_equity
+            if wdd >= weekly_cap:
+                self._halt_reason = (
+                    f"weekly DD {wdd*100:.1f}% >= {weekly_cap*100:.1f}%"
+                )
+                self._persist_risk_state()
+                return self._halt_reason
+
+        total_cap = float(self.cfg.get("max_total_dd", 0.20))
+        if self._peak_equity > 0 and total_cap > 0:
+            tdd = (self._peak_equity - equity) / self._peak_equity
+            if tdd >= total_cap:
+                self._halt_reason = (
+                    f"total DD {tdd*100:.1f}% >= {total_cap*100:.1f}% (reset required)"
+                )
+                self._persist_risk_state()
+                return self._halt_reason
+
+        return None
+
+    def _entry_gate(self, equity: float) -> tuple:
+        """Return ``(allowed, size_multiplier, reason)`` for a NEW entry.
+
+        This is the soft half of the ladder: pause and half-size rungs live
+        here so that blocking new entries can never stop the bot from managing
+        the positions already open. ``_daily_dd_ok`` owns the hard rungs.
+        """
+        if self._halt_reason:
+            return False, 0.0, self._halt_reason
+
+        if self._cooldown_until is not None:
+            now = datetime.utcnow()
+            if now < self._cooldown_until:
+                left = int((self._cooldown_until - now).total_seconds() // 60) + 1
+                return False, 0.0, f"loss-streak cooldown ({left} min left)"
+            self._cooldown_until = None
+            self._persist_risk_state()
+
+        cap = float(self.cfg.get("max_daily_dd", 0.03))
+        if cap <= 0 or self.daily_start <= 0:
+            return True, 1.0, ""
+
+        used = max(0.0, (self.daily_start - equity) / self.daily_start) / cap
+        halt_at = float(self.cfg.get("halt_at_dd", 0.80))
+        reduce_at = float(self.cfg.get("reduce_size_at_dd", 0.50))
+
+        if used >= 1.0:
+            return False, 0.0, "daily DD cap reached"
+        if used >= halt_at:
+            return False, 0.0, f"daily DD {used*100:.0f}% of cap – new entries paused"
+        if used >= reduce_at:
+            return True, 0.5, f"daily DD {used*100:.0f}% of cap – half size"
+        return True, 1.0, ""
+
+    # --------------------------------------------------------------
     def _daily_dd_ok(self, equity: float) -> bool:
+        """Hard drawdown guard. Runs before position management in step().
+
+        Returning False skips the whole tick, so this must only fire when the
+        positions have been (or are being) flattened — never for the softer
+        ladder rungs, which would otherwise disable trailing stops exactly
+        when they matter most.
+        """
         today = date.today()
         if self.daily_date != today:
             self.daily_date  = today
             self.daily_start = equity
             self._dd_positions_closed = False
+            self._persist_risk_state()
+
+        hard_reason = self._hard_drawdown_reason(equity)
+        if hard_reason:
+            logger.warning("%s – closing all positions and halting", hard_reason)
+            if (self.cfg.get("equity_protect_close_all", True) and
+                    not self._dd_positions_closed):
+                self._close_all(hard_reason)
+                self._dd_positions_closed = True
+                self.notifier.send(
+                    f"🛡️ {hard_reason} – all positions closed. Manual reset required.")
+            return False
+
         if self.daily_start > 0:
             dd = (self.daily_start - equity) / self.daily_start
             if dd >= self.cfg["max_daily_dd"]:
@@ -2077,33 +2580,59 @@ class StandaloneAIBot:
             return 0, 0.0, 0.5, "no data"
 
         # AI signal – trained & predicted every new bar
-        if self.ai is None:
-            self.ai = AIEnsemble(self.cfg["symbol"], type("C", (), {
-                "AI_CONFIDENCE_THRESHOLD": self.cfg["ai_confidence_threshold"],
-                "AI_TRAIN_BARS":           self.cfg["ai_train_bars"],
-                "AI_RETRAIN_BARS":         self.cfg["ai_retrain_bars"],
-                # Model-validation + calibration knobs. These MUST be present
-                # here: AIEnsemble.train() reads them outside any try/except,
-                # so a missing key raises AttributeError straight into the
-                # main loop. Keep this in sync with CONFIG and core/settings.py.
-                "AI_VALIDATION_FRACTION":  self.cfg["ai_validation_fraction"],
-                "AI_MIN_OOS_ACCURACY":     self.cfg["ai_min_oos_accuracy"],
-                "AI_MIN_OOS_AUC":          self.cfg["ai_min_oos_auc"],
-                "AI_MIN_OOS_EDGE":         self.cfg["ai_min_oos_edge"],
-                "AI_PROMOTE_TOLERANCE":    self.cfg["ai_promote_tolerance"],
-                "AI_CALIBRATE":            self.cfg["ai_calibrate"],
-                "AI_MIN_EDGE_FOR_SIZE_UP": self.cfg["ai_min_edge_for_size_up"],
-            })())
-        self.ai.update(m15p)
-        ai_sig       = self.ai.predict(m15p)
-        ai_direction = ai_sig.direction
-        ai_conf      = ai_sig.confidence
+        ai_on = bool(self.cfg.get("ai_enabled", True))
+        if not ai_on:
+            # The model is a component, not a prerequisite. Turning it off
+            # leaves the confluence stack intact and simply removes the AI
+            # share of the score (both directions get the same neutral 30%).
+            ai_direction, ai_conf = 0, 0.5
+        else:
+            if self.ai is None:
+                self.ai = AIEnsemble(self.cfg["symbol"], type("C", (), {
+                    "AI_CONFIDENCE_THRESHOLD": self.cfg["ai_confidence_threshold"],
+                    "AI_TRAIN_BARS":           self.cfg["ai_train_bars"],
+                    "AI_RETRAIN_BARS":         self.cfg["ai_retrain_bars"],
+                    # Model-validation + calibration knobs. These MUST be present
+                    # here: AIEnsemble.train() reads them outside any try/except,
+                    # so a missing key raises AttributeError straight into the
+                    # main loop. Keep this in sync with CONFIG and core/settings.py.
+                    "AI_VALIDATION_FRACTION":  self.cfg["ai_validation_fraction"],
+                    "AI_MIN_OOS_ACCURACY":     self.cfg["ai_min_oos_accuracy"],
+                    "AI_MIN_OOS_AUC":          self.cfg["ai_min_oos_auc"],
+                    "AI_MIN_OOS_EDGE":         self.cfg["ai_min_oos_edge"],
+                    "AI_PROMOTE_TOLERANCE":    self.cfg["ai_promote_tolerance"],
+                    "AI_CALIBRATE":            self.cfg["ai_calibrate"],
+                    "AI_MIN_EDGE_FOR_SIZE_UP": self.cfg["ai_min_edge_for_size_up"],
+                    "AI_MODEL_PERSIST":        self.cfg.get("ai_model_persist", True),
+                    "MODEL_TIMEFRAME":         self.cfg.get("timeframe"),
+                })())
+                # A persisted model is only restored once, at construction.
+                # Retraining on top of it is still governed by the same
+                # out-of-sample promotion gate, so a stale file can never
+                # outrank a model that actually validates better.
+                if self.cfg.get("ai_model_persist", True):
+                    try:
+                        self.ai.load_from_disk(timeframe=self.cfg.get("timeframe"))
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.debug("No persisted model for %s (%s)",
+                                     self.cfg["symbol"], exc)
+            self.ai.update(m15p)
+            ai_sig       = self.ai.predict(m15p)
+            ai_direction = ai_sig.direction
+            ai_conf      = ai_sig.confidence
+
+        # Market location is computed once per bar and shared by the scorer
+        # (Fibonacci confluence) and the gate below. Skipped entirely when
+        # neither consumer is enabled.
+        location = None
+        if self.cfg.get("location_gate", True) or self.cfg.get("fib_enabled", True):
+            location = self._location_for(m15p)
 
         # Score both directions (confluence, independent of gates)
         best_dir, best_score = 0, 0.0
         for d in [1, -1]:
             score = _score_direction(ai_direction, ai_conf, m15p, h1p, h4p,
-                                     d, self.cfg)
+                                     d, self.cfg, location=location)
             if score > best_score:
                 best_score, best_dir = score, d
 
@@ -2137,7 +2666,7 @@ class StandaloneAIBot:
 
             # 3. Gold AI Confidence Gate: 0.50 is pure noise; Gold requires >= 0.55
             gold_min_conf = float(self.cfg.get("gold_min_ai_conf", 0.55))
-            if ai_conf < gold_min_conf:
+            if ai_on and ai_conf < gold_min_conf:
                 return 0, best_score, ai_conf, f"gold AI conf {ai_conf:.2f} < threshold ({gold_min_conf:.2f})"
 
             # 4. Gold Spread Gate: Prevent entries during wide spread / roll-over
@@ -2155,7 +2684,7 @@ class StandaloneAIBot:
             # AI Confidence Gate (all non-gold symbols):
             # 0.50 is pure noise / coin flip. Scalping requires real predictive conviction.
             min_conf = float(self.cfg.get("ai_confidence_threshold", 0.55))
-            if ai_conf < min_conf:
+            if ai_on and ai_conf < min_conf:
                 return 0, best_score, ai_conf, f"AI conf {ai_conf:.2f} < threshold ({min_conf:.2f})"
 
         # --- market location gate -------------------------------------
@@ -2163,7 +2692,6 @@ class StandaloneAIBot:
         # ever *remove* a trade, never introduce one. It runs after the score
         # gate so it never costs anything on a signal that was already weak.
         if self.cfg.get("location_gate", True):
-            location = self._location_for(m15p)
             if location is None:
                 # No location available. Deliberately NOT a veto: this layer is
                 # an enhancement on top of a working signal stack, and refusing
@@ -2298,6 +2826,7 @@ class StandaloneAIBot:
         if self.trade_date != today:
             self.trade_date  = today
             self.trades_today = 0
+            self._persist_risk_state()
         limit = self.cfg.get("max_trades_per_day", 60 if _IS_AGGRESSIVE else 15)
         return self.trades_today < limit
 
@@ -2375,9 +2904,14 @@ class StandaloneAIBot:
         return getattr(mt5, "ORDER_FILLING_RETURN", 2)
 
     # --------------------------------------------------------------
-    def _send_order(self, direction: int, equity: float, m15p: pd.DataFrame, ai_conf: float = 0.0) -> bool:
+    def _send_order(self, direction: int, equity: float, m15p: pd.DataFrame,
+                    ai_conf: float = 0.0, size_multiplier: float = 1.0) -> bool:
         """`m15p` is the already-prepared frame from the main loop —
-        avoids an extra MT5 fetch + full indicator recompute per entry."""
+        avoids an extra MT5 fetch + full indicator recompute per entry.
+
+        ``size_multiplier`` is the capital-preservation ladder's verdict: 1.0
+        normally, 0.5 once the day has used half its drawdown budget.
+        """
         sym  = self.cfg["symbol"]
         info = mt5.symbol_info(sym)
         if info is None:
@@ -2486,6 +3020,7 @@ class StandaloneAIBot:
             info.trade_tick_size, info.trade_tick_value,
             info.volume_min, info.volume_max, info.volume_step,
             self.cfg, adx=adx, ai_conf=ai_conf,
+            size_multiplier=size_multiplier,
         )
 
         if not self._margin_ok(price, volume, equity):
@@ -2513,6 +3048,10 @@ class StandaloneAIBot:
         if self.cfg.get("dry_run"):
             logger.info("[DRY-RUN] %s vol=%.2f sl=%.5f tp=%.5f",
                         "BUY" if direction == 1 else "SELL", volume, sl, tp)
+            # Count paper entries too, otherwise max_trades_per_day is a test
+            # that never runs in the mode the bot actually defaults to.
+            self.trades_today += 1
+            self._persist_risk_state()
             return True
 
         retries = self.cfg.get("max_slippage_retries", 3)
@@ -3159,7 +3698,14 @@ class StandaloneAIBot:
             if (direction != 0 and
                     self._count_positions() < self.cfg.get("max_open_pos", 3) and
                     self._trades_today_ok()):
-                self._send_order(direction, equity, m15p, ai_conf)
+                allowed, size_mult, gate_reason = self._entry_gate(equity)
+                if not allowed:
+                    logger.info("[%s] Entry blocked: %s", self.cfg["symbol"], gate_reason)
+                elif gate_reason:
+                    logger.info("[%s] %s", self.cfg["symbol"], gate_reason)
+                if allowed:
+                    self._send_order(direction, equity, m15p, ai_conf,
+                                     size_multiplier=size_mult)
 
     def run(self) -> None:
         if not self.connect():
@@ -3200,7 +3746,7 @@ class StandaloneAIBot:
 # Entry point with FastAPI Dashboard
 # ---------------------------------------------------------------------------
 import uvicorn
-from fastapi import FastAPI, Response, Request
+from fastapi import FastAPI, Response, Request, HTTPException
 
 def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
     """Factory to create the FastAPI dashboard app, testable and decoupled."""
@@ -3208,6 +3754,40 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
         bots = []
 
     app = FastAPI(title="AI Quant Platform Dashboard")
+
+    # ------------------------------------------------------------------
+    # Optional write authentication.
+    #
+    # The dashboard binds to 127.0.0.1, which is a stopgap, not security: any
+    # local process (or a malicious page in the same browser, via a simple
+    # POST) can reach it. When DASHBOARD_TOKEN is set, every mutating API call
+    # must present it in the X-Dashboard-Token header. When it is unset the
+    # behaviour is unchanged, so existing deployments and tests are unaffected
+    # -- but then the loopback binding is the only control, which is exactly
+    # what AGENTS.md warns about.
+    #
+    # The token is read per request, not captured at import, so setting it in
+    # .env takes effect on the next call instead of on the next restart.
+    # ------------------------------------------------------------------
+    @app.middleware("http")
+    async def _dashboard_write_auth(request: Request, call_next):
+        import hmac
+        from fastapi.responses import JSONResponse
+
+        expected = (os.getenv("DASHBOARD_TOKEN") or "").strip()
+        if (expected
+                and request.method in ("POST", "PUT", "PATCH", "DELETE")
+                and request.url.path.startswith("/api/")):
+            supplied = (request.headers.get("x-dashboard-token") or "").strip()
+            if not hmac.compare_digest(supplied, expected):
+                logger.warning(
+                    "Rejected unauthenticated %s %s",
+                    request.method, request.url.path)
+                return JSONResponse(
+                    {"detail": "invalid or missing X-Dashboard-Token"},
+                    status_code=401)
+        return await call_next(request)
+
     
     @app.get("/")
     def serve_dashboard():
@@ -3671,6 +4251,167 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
 
         logger.info("Bot Settings Updated from Web UI & persisted to .env! Applied to all %d bot instances.", len(bots))
         return {"status": "ok", "message": "Settings saved and applied successfully."}
+
+    # ------------------------------------------------------------------
+    # Schema-driven configuration plane.
+    #
+    # The route above is the historical one: a hand-written if-chain that
+    # knew about a subset of CONFIG and invented percent conversions per
+    # field. It stays for backward compatibility with the existing dashboard
+    # and its tests. These routes replace it going forward:
+    #
+    #   GET  /api/config/schema  -> every declared parameter + live value
+    #   POST /api/config         -> validated, applied, persisted, audited
+    #   GET  /api/config/audit   -> recent changes
+    #
+    # They MUST be registered before /api/config/{section}, otherwise
+    # "schema" is captured as a section name.
+    # ------------------------------------------------------------------
+    def _live_cfg() -> dict:
+        return bots[0].cfg if bots else CONFIG
+
+    def _apply_config_values(values: dict, source: str) -> dict:
+        """Apply validated values everywhere and record the change.
+
+        Three stores have to move together: module CONFIG (the default for
+        new bots), each bot's own cfg dict (tests and the GUI use copies),
+        and each bot's reasoner cfg. Updating only one of them is how a
+        dashboard edit ends up looking applied while having no effect.
+        """
+        cfg = _live_cfg()
+        changes: dict = {}
+        env_updates: dict = {}
+
+        for key, value in values.items():
+            old = CONFIG.get(key, cfg.get(key))
+            if old != value:
+                changes[key] = (old, value)
+
+            CONFIG[key] = value
+            for b in bots:
+                b.cfg[key] = value
+                try:
+                    if hasattr(b, "reasoner") and b.reasoner is not None:
+                        b.reasoner.cfg[key] = value
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+            spec = _PARAM_SPECS.get(key)
+            if spec is not None and spec.env:
+                if key == "dry_run":
+                    env_updates["TRADING_MODE"] = "paper" if value else "live"
+                else:
+                    env_updates[spec.env] = str(value)
+
+        if "dry_run" in values and not values["dry_run"]:
+            print("=" * 70)
+            print("  TRADING_MODE switched to LIVE from the dashboard.")
+            print("  Real orders will be sent on the next signal.")
+            print("=" * 70)
+
+        if env_updates:
+            _update_env_file(env_updates)
+
+        if changes and _audit_record is not None:
+            try:
+                _audit_record(_get_sqlite_db_path(), source, changes)
+            except Exception:  # pragma: no cover - audit must never block
+                pass
+
+        return changes
+
+    def _current_values(cfg: dict) -> dict:
+        return {k: cfg.get(k, spec.default) for k, spec in _PARAM_SPECS.items()}
+
+    @app.get("/api/config/schema")
+    def api_config_schema():
+        if _config_schema_payload is None:
+            return {"available": False, "groups": [], "count": 0,
+                    "detail": "config plane unavailable"}
+        cfg = _live_cfg()
+        payload = _config_schema_payload(_current_values(cfg))
+        payload["available"] = True
+        payload["symbol"] = cfg.get("symbol")
+        payload["dry_run"] = bool(cfg.get("dry_run", True))
+        return payload
+
+    @app.get("/api/config")
+    def api_config_read():
+        if not _CONFIG_PLANE_AVAILABLE:
+            return {"available": False, "values": {}}
+        return {"available": True, "values": _current_values(_live_cfg())}
+
+    @app.post("/api/config")
+    async def api_config_write(request: Request):
+        if _validate_config_payload is None:
+            raise HTTPException(status_code=503, detail="config plane unavailable")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="payload must be JSON")
+
+        values, errors = _validate_config_payload(body)
+        if errors:
+            # Reject the whole payload. A half-applied risk change is worse
+            # than a rejected one.
+            raise HTTPException(status_code=400, detail={"errors": errors})
+        if not values:
+            return {"status": "noop", "applied": [], "changed": {}}
+
+        dangerous = [
+            k for k in values
+            if _PARAM_SPECS.get(k) is not None and _PARAM_SPECS[k].dangerous
+        ]
+        if dangerous and not bool(body.get("confirm", False)):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "errors": [
+                        f"{k} changes the live blast radius; resend with confirm=true"
+                        for k in dangerous
+                    ],
+                    "requires_confirmation": dangerous,
+                },
+            )
+
+        changes = _apply_config_values(values, source="dashboard")
+        restart = [
+            k for k in values
+            if _PARAM_SPECS.get(k) is not None and _PARAM_SPECS[k].requires_restart
+        ]
+        logger.info(
+            "Config updated from dashboard: %d value(s) applied, %d changed%s",
+            len(values), len(changes),
+            f", restart required for {restart}" if restart else "",
+        )
+        return {
+            "status": "ok",
+            "applied": sorted(values),
+            "changed": {k: {"old": o, "new": n} for k, (o, n) in changes.items()},
+            "requires_restart": restart,
+        }
+
+    @app.get("/api/config/audit")
+    def api_config_audit(limit: int = 100):
+        if _audit_recent is None:
+            return {"changes": []}
+        return {"changes": _audit_recent(_get_sqlite_db_path(), limit)}
+
+    @app.post("/api/config/reset-halt")
+    def api_config_reset_halt():
+        """Clear a total-drawdown halt. Explicit, manual, and audited."""
+        cleared = []
+        for b in bots:
+            if hasattr(b, "reset_risk_halt"):
+                b.reset_risk_halt("dashboard reset")
+                cleared.append(b.cfg.get("symbol"))
+        if _audit_record is not None:
+            try:
+                _audit_record(_get_sqlite_db_path(), "dashboard",
+                              {"risk_halt": ("halted", "reset")} if cleared else {})
+            except Exception:  # pragma: no cover
+                pass
+        return {"status": "ok", "cleared": cleared}
 
     @app.get("/api/config/{section}")
     def api_get_config_section(section: str):

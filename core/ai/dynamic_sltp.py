@@ -402,7 +402,7 @@ class DynamicSLTPReasoner:
                 sl_source = "ai_structure" if plan.structural else "ai_volatility"
                 reasoning_parts.append(f"SL via {sl_source}: {plan.reason}")
 
-        # 2. Dynamic Take Profit Target Determination (Liquidity Magnet)
+        # 2. Dynamic Take Profit Target Determination (Liquidity Magnet + Fibonacci)
         sl_dist = abs(entry_price - sl_price)
         tp_price = entry_price + (sl_dist * min_rr) if direction == 1 else entry_price - (sl_dist * min_rr)
 
@@ -419,6 +419,36 @@ class DynamicSLTPReasoner:
                     tp_price = candidate_tp
                     tp_source = f"ai_liquidity_pool_{pool.kind.value}"
                     reasoning_parts.append(f"TP targeted 0.15 ATR before resting liquidity at {pool.price:.4f} (R:R {candidate_rr:.2f})")
+            
+            # Fibonacci extension targets
+            try:
+                fib_levels = getattr(location, 'fib_levels', {})
+                if fib_levels:
+                    if direction == 1:
+                        # Look for Fib extension targets above (1.272, 1.618)
+                        for key in ['1.272', '1.618', '1.0']:
+                            if key in fib_levels:
+                                fib_target = fib_levels[key]
+                                if fib_target > entry_price:
+                                    cand_rr = abs(fib_target - entry_price) / max(sl_dist, 1e-10)
+                                    if cand_rr >= 1.8 and cand_rr > (abs(tp_price - entry_price) / max(sl_dist, 1e-10)):
+                                        tp_price = fib_target - location.atr * 0.1
+                                        tp_source = f"fib_extension_{key}"
+                                        reasoning_parts.append(f"TP at Fib {key} extension with confluence (R:R {cand_rr:.2f})")
+                                        break
+                    else:
+                        for key in ['1.272', '1.618', '1.0']:
+                            if key in fib_levels:
+                                fib_target = fib_levels[key]
+                                if fib_target < entry_price:
+                                    cand_rr = abs(fib_target - entry_price) / max(sl_dist, 1e-10)
+                                    if cand_rr >= 1.8 and cand_rr > (abs(tp_price - entry_price) / max(sl_dist, 1e-10)):
+                                        tp_price = fib_target + location.atr * 0.1
+                                        tp_source = f"fib_extension_{key}"
+                                        reasoning_parts.append(f"TP at Fib {key} extension with confluence (R:R {cand_rr:.2f})")
+                                        break
+            except Exception:
+                pass
 
         # 3. Microstructure Scalping Refinement & LLM Consultation
         spread_pts = getattr(symbol_info, "spread", 0) or 0
@@ -435,7 +465,8 @@ class DynamicSLTPReasoner:
             f"Proposed Structural SL: {sl_price:.5f}\n"
             f"Proposed Target TP: {tp_price:.5f}\n"
             f"Spread Points: {spread_pts}\n"
-            "Task: Evaluate entry SL/TP validity and output JSON."
+            f"Fibonacci/Structure Analysis: SL beyond swing invalidation, TP at liquidity/Fib extension\n"
+            "Task: Evaluate entry SL/TP validity with focus on Fibonacci confluence and trap avoidance. Output JSON."
         )
         try:
             raw_ai = self.provider.generate(prompt, ENTRY_SLTP_SYSTEM_PROMPT, json_mode=True)

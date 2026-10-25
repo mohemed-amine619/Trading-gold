@@ -145,6 +145,15 @@ data/*.db-shm
 data/*.db-wal
 
 # -----------------------------------------------------------------------------
+# Runtime state (risk ladder, trained models, symbol caches)
+# Machine-specific: a committed risk state would restore someone else's
+# drawdown/cooldown on a fresh checkout. Never commit these.
+# -----------------------------------------------------------------------------
+data/state/
+data/models/
+data/cache/
+
+# -----------------------------------------------------------------------------
 # NOTE: the one-shot source patchers (modify_html.py, update_manager.py,
 # patch_*.py, manual_protect.py), the run_pro.py fork and get-pip.py used to be
 # listed here. They have all been removed from the tree. If any reappear, do not
