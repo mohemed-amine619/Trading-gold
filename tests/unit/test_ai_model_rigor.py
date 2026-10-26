@@ -694,3 +694,89 @@ def test_edge_gate_defaults_to_half_a_confidence_point(run_module):
     baseline = _lot(run_module, cfg, 0.0)
     # 0.59 confidence -> edge 0.09, just under the floor.
     assert _lot(run_module, cfg, 0.59) < baseline
+
+# ---------------------------------------------------------------------------
+# Using the live model vs. promoting it
+# ---------------------------------------------------------------------------
+# The promotion gate only guards REPLACEMENT. It never stopped an already-live
+# model from continuing to emit confidence, even after every subsequent
+# challenger showed the family had no edge over the majority-class baseline.
+# Live logs showed exactly that: `ai_conf=0.664` while challengers were being
+# rejected with `lift -0.054 (acc 0.538 vs baseline 0.591)`. A matching AI vote
+# is worth up to 45 score points and an upsize on the sizing path, so an
+# unvalidated model was supplying conviction it had not earned.
+
+def test_unvalidated_live_model_is_neutralised(run_module):
+    """A model promoted without a validation split has no measured edge and
+    must not vote."""
+    ai = _ensemble(run_module, AI_TRAIN_BARS=400, AI_VALIDATION_FRACTION=0.05)
+    assert ai.train(_make_ohlcv()) is True
+    assert ai._last_oos_edge is None, "precondition: unmeasured promotion"
+
+    sig = ai.predict(_make_ohlcv())
+    assert sig.direction == 0
+    assert sig.confidence == pytest.approx(0.5)
+    assert "no measured OOS edge" in sig.reason
+
+
+def test_live_model_with_negative_edge_is_neutralised(run_module):
+    """A live model whose own recorded lift is below the floor must abstain."""
+    ai = _ensemble(run_module)
+    assert ai.train(_make_ohlcv(phi=0.5, noise=0.002, seed=3)) is True
+    assert ai._last_oos_edge > 0.0, "precondition: a validated model"
+
+    ai._last_oos_edge = -0.054          # decayed, as the live log showed
+    sig = ai.predict(_make_ohlcv(phi=0.5, noise=0.002, seed=3))
+    assert sig.direction == 0
+    assert sig.confidence == pytest.approx(0.5)
+    assert "below floor" in sig.reason
+
+
+def test_edge_gate_does_not_penalise_a_validated_model(run_module):
+    """The gate must not be so strict that a good model stops trading."""
+    ai = _ensemble(run_module)
+    assert ai.train(_make_ohlcv(phi=0.5, noise=0.002, seed=3)) is True
+    sig = ai.predict(_make_ohlcv(phi=0.5, noise=0.002, seed=3))
+    assert "AI neutral" not in sig.reason
+
+
+def test_edge_gate_escape_hatch_restores_unconditional_predictions(run_module):
+    """AI_MIN_OOS_EDGE=-1.0 is the documented way back to the old behaviour."""
+    ai = _ensemble(run_module, AI_MIN_OOS_EDGE=-1.0)
+    assert ai.train(_make_ohlcv(phi=0.5, noise=0.002, seed=3)) is True
+    ai._last_oos_edge = -0.054
+    sig = ai.predict(_make_ohlcv(phi=0.5, noise=0.002, seed=3))
+    assert "AI neutral" not in sig.reason
+
+
+def test_neutralisation_is_logged_once_not_per_bar(run_module, caplog):
+    """predict() runs every bar; a warning per bar would bury the log."""
+    ai = _ensemble(run_module)
+    assert ai.train(_make_ohlcv(phi=0.5, noise=0.002, seed=3)) is True
+    ai._last_oos_edge = -0.054
+    df = _make_ohlcv(phi=0.5, noise=0.002, seed=3)
+
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            ai.predict(df)
+
+    blocked = [r for r in caplog.records if "neutralised" in r.getMessage()]
+    assert len(blocked) == 1
+
+
+def test_promoting_a_valid_model_clears_the_block(run_module):
+    """After the live model's metrics change, the gate re-evaluates.
+
+    Otherwise a single bad state would silence the AI until the process is
+    restarted, even after a valid model was installed.
+    """
+    ai = _ensemble(run_module)
+    assert ai.train(_make_ohlcv(phi=0.5, noise=0.002, seed=3)) is True
+    ai._last_oos_edge = -0.054
+    assert ai.predict(_make_ohlcv(phi=0.5, noise=0.002, seed=3)).direction == 0
+    assert ai._edge_block_reason
+
+    ai._promote(ai._pipeline, ai._calibrator, ai._feature_cols, 800,
+                oos_acc=0.60, oos_edge=0.05)
+    assert ai._edge_block_reason == ""
+    assert "AI neutral" not in ai.predict(_make_ohlcv(phi=0.5, noise=0.002, seed=3)).reason

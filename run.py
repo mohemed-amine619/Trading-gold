@@ -466,6 +466,10 @@ CONFIG = {
     "max_risk_scale":          _profile_cfg("MAX_RISK_SCALE", 1.2, 1.5),
     "max_margin_usage":        _profile_cfg("MAX_MARGIN_USAGE", 0.30, 0.45),
     "max_open_pos":            _profile_cfg("MAX_OPEN_POS", 3, 5, val_type=int),
+    # One idea, one position. max_open_pos is a stacking ceiling; this is the
+    # per-symbol cap that stops the same signal being re-fired on consecutive
+    # bars (which multiplies risk on a single thesis without adding signal).
+    "max_pos_per_symbol":      int(os.getenv("MAX_POS_PER_SYMBOL", "1")),
     "max_daily_dd":            _profile_cfg("MAX_DAILY_DD", 0.03, 0.05),
     
     # --- breakeven / progressive profit lock (with correction breathing room) ---
@@ -526,6 +530,11 @@ CONFIG = {
     # --- structure-aware management ------------------------------------
     "structure_trailing":      os.getenv("STRUCTURE_TRAILING", "true").lower() in ("1", "true", "yes"),
     "min_sl_separation_atr":   float(os.getenv("MIN_SL_SEPARATION_ATR", "0.55")),
+    # Minimum *improvement* required before sending a stop modification. The
+    # separation floor above keeps the stop away from price; this one stops the
+    # ratchet from spending a broker call on a one-tick drift of the rolling
+    # swing anchor. 0 disables the threshold (old behaviour).
+    "min_sl_step_atr":         float(os.getenv("MIN_SL_STEP_ATR", "0.05")),
     "max_spread_points":       float(os.getenv("MAX_SPREAD_POINTS", "0") or 0.0),
 
     # --- capital preservation ladder -----------------------------------
@@ -1119,6 +1128,11 @@ class AISignal:
     direction: int    = 0      # +1 long | -1 short | 0 uncertain
     confidence: float = 0.5
     reason: str       = ""
+    # True when the model is deliberately NOT voting (no measured edge), as
+    # opposed to "voted and was uncertain". The confidence gates must skip an
+    # abstention: requiring a random 0.5 to clear 0.55 would block every trade
+    # forever, which is not the same thing as refusing a bad model's opinion.
+    abstained: bool   = False
 
 
 def _make_pipeline() -> Pipeline:
@@ -1265,6 +1279,7 @@ class AIEnsemble:
         self._last_oos_base_rate: Optional[float] = None
         self._last_oos_edge: Optional[float] = None
         self._last_reject_reason: str = ""
+        self._edge_block_reason: str = ""   # current edge-gate verdict, for log-once
         self._feature_importance: dict = {}
         self._trained: bool = False
         self._lock = threading.Lock()   # guards pipeline swap during training
@@ -1516,6 +1531,7 @@ class AIEnsemble:
             self._last_oos_base_rate = oos_base_rate
             self._last_oos_edge = oos_edge
             self._last_reject_reason = ""
+            self._edge_block_reason = ""
         top = ", ".join("%s=%.3f" % (k, v) for k, v in list(importance.items())[:5])
         logger.info(
             "[AI] %s promoted run #%d | train=%d | oos_acc=%s | auc=%s | "
@@ -1633,6 +1649,7 @@ class AIEnsemble:
                 self._n_trains            = int(payload.get("n_trains") or 1)
                 self._n_promotions        = int(payload.get("n_promotions") or 1)
                 self._trained             = True
+                self._edge_block_reason   = ""
             logger.info("[AI] %s model restored from %s (oos_acc=%s)",
                         self.symbol, path, self._last_oos_accuracy)
             return True
@@ -1689,6 +1706,37 @@ class AIEnsemble:
             if reject_reason:
                 return AISignal(0, 0.5, "model not promoted: %s" % reject_reason)
             return AISignal(0, 0.5, "model not trained yet")
+
+        # --- EDGE GATE -------------------------------------------------
+        # The promotion gate in train() only guards REPLACEMENT. Without this
+        # check a model promoted once keeps emitting confidence forever, even
+        # after every subsequent challenger proves the family is worse than
+        # the majority-class baseline. That is unearned conviction: the score
+        # gives a matching AI vote up to 45 points, and the sizing path gives
+        # it an upsize. An unmeasured or negative out-of-sample lift returns a
+        # NEUTRAL signal instead (direction 0 -> the same 30% neutral share the
+        # bot uses when the AI is switched off), so the technical stack keeps
+        # working without the model pretending to know something.
+        # ``AI_MIN_OOS_EDGE=-1.0`` is the documented escape hatch that restores
+        # the old unconditional behaviour; any value > -1.0 enforces the gate.
+        min_edge = float(getattr(self.config, "AI_MIN_OOS_EDGE", 0.0) or 0.0)
+        if min_edge > -1.0:
+            blocked = None
+            if oos_edge is None:
+                blocked = "no measured OOS edge (promoted without validation)"
+            elif oos_edge < min_edge:
+                blocked = ("OOS lift %+.3f below floor %+.3f" % (oos_edge, min_edge))
+            if blocked:
+                with self._lock:
+                    announce = self._edge_block_reason != blocked
+                    self._edge_block_reason = blocked
+                if announce:
+                    logger.warning("[AI] %s predictions neutralised: %s",
+                                   self.symbol, blocked)
+                return AISignal(0, 0.5, "AI neutral - %s" % blocked, abstained=True)
+        with self._lock:
+            self._edge_block_reason = None
+
         if len(df) < _MIN_PRED:
             return AISignal(0, 0.5, "not enough bars for prediction")
         try:
@@ -2002,6 +2050,44 @@ def _risk_scale(adx: float, cfg: dict) -> float:
     if adx >= hi_adx:
         return hi
     return lo + (adx - lo_adx) / (hi_adx - lo_adx) * (hi - lo)
+
+
+def _sl_modify_allowed(action: str, direction: int, current_sl: float,
+                       new_sl: float, atr: float, cfg: dict) -> bool:
+    """Should this proposed stop change be sent to the broker?
+
+    Two rules, both in the safe direction:
+
+    * **Never loosen.** For a buy the new stop must be strictly higher than
+      the current one (a current stop of ``0`` means "none set", so any stop
+      is an improvement). For a sell it must be strictly lower.
+    * **Minimum real improvement.** The structure anchor is a rolling 5-bar
+      swing and ATR is recomputed each bar, so without a floor the ratchet
+      fires on ~0.01 price-unit drift: one broker round-trip per bar, each a
+      chance to hit a requote, an invalid-stops rejection or a rate limit.
+      ``min_sl_step_atr=0`` restores the every-move behaviour.
+
+    ``MOVE_TO_BREAKEVEN`` / ``SECURE_PROFIT`` bypass the step floor: those are
+    state changes (risk-free / locked profit), not anchor drift, and must land
+    even when the move is small.
+
+    This is a pure function on purpose — the "never widen a stop" class of bug
+    is the most expensive one in the file and the easiest to test in isolation.
+    """
+    if new_sl is None:
+        return False
+    new_sl = float(new_sl)
+    current_sl = float(current_sl or 0.0)
+    eps = 1e-9
+    if current_sl > 0.0:
+        if direction == 1 and not (new_sl > current_sl + eps):
+            return False
+        if direction != 1 and not (new_sl < current_sl - eps):
+            return False
+    if action in ("MOVE_TO_BREAKEVEN", "SECURE_PROFIT"):
+        return True
+    min_step = float(cfg.get("min_sl_step_atr", 0.05) or 0.0) * float(atr or 0.0)
+    return abs(new_sl - current_sl) >= (min_step - eps)
 
 
 def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
@@ -2632,6 +2718,13 @@ class StandaloneAIBot:
             ai_sig       = self.ai.predict(m15p)
             ai_direction = ai_sig.direction
             ai_conf      = ai_sig.confidence
+            if getattr(ai_sig, "abstained", False):
+                # The model has no measured edge, so it is not voting. Treat it
+                # exactly like `ai_enabled=False`: the confluence stack keeps
+                # working with the neutral AI share, and the AI confidence gates
+                # below are skipped. They exist to refuse a bad *opinion*, not to
+                # require a random number to be confident.
+                ai_on = False
 
         # Market location is computed once per bar and shared by the scorer
         # (Fibonacci confluence) and the gate below. Skipped entirely when
@@ -2832,6 +2925,28 @@ class StandaloneAIBot:
     def _count_positions(self) -> int:
         bot_magic = self.cfg.get("magic_number", 888999)
         return len([p for p in self._open_positions() if getattr(p, "magic", 0) == bot_magic])
+
+    def _count_symbol_positions(self) -> int:
+        """Open bot positions on THIS symbol, long or short.
+
+        ``max_open_pos`` is a ceiling on stacking, not a target. Without a
+        separate per-symbol cap one signal can be re-fired on consecutive
+        bars and multiply the risk on a single thesis (observed: two
+        identical shorts opened from the same bar). The filter is explicit
+        rather than relying on ``positions_get(symbol=...)`` so the guard
+        survives a future change to ``_open_positions``.
+        """
+        bot_magic = self.cfg.get("magic_number", 888999)
+        sym = self.cfg.get("symbol")
+        return len([p for p in self._open_positions()
+                    if getattr(p, "magic", 0) == bot_magic
+                    and getattr(p, "symbol", sym) == sym])
+
+    def _entry_slots_ok(self) -> bool:
+        """Both caps must allow one more position: per symbol AND overall."""
+        sym_cap = max(1, int(self.cfg.get("max_pos_per_symbol", 1)))
+        return (self._count_symbol_positions() < sym_cap
+                and self._count_positions() < self.cfg.get("max_open_pos", 3))
 
     def _trades_today_ok(self) -> bool:
         today = date.today()
@@ -3482,11 +3597,16 @@ class StandaloneAIBot:
                         peak_profit=self._peak_profit.get(pos.ticket, 0.0)
                     )
                     if adj.new_sl is not None:
-                        if direction == 1 and adj.new_sl > pos.sl + 1e-9 and adj.new_sl < close_price:
-                            logger.info("[%s] AI Dynamic SL (%s): %.5f -> %.5f (%s)",
-                                        pos.symbol, adj.action, pos.sl, adj.new_sl, adj.reasoning)
-                            self._modify_sl(pos, adj.new_sl)
-                        elif direction == -1 and (pos.sl == 0 or adj.new_sl < pos.sl - 1e-9) and adj.new_sl > close_price:
+                        # Never loosen, and require a minimum improvement.
+                        # The structure anchor is a rolling 5-bar swing and
+                        # ATR is recomputed every bar, so a raw one-tick delta
+                        # produced a broker round-trip per bar for ~0.01 price
+                        # units. Each modify is a failure surface (requote,
+                        # invalid stops during fast moves, broker rate limits).
+                        within_price = (adj.new_sl < close_price if direction == 1
+                                        else adj.new_sl > close_price)
+                        if within_price and _sl_modify_allowed(
+                                adj.action, direction, pos.sl, adj.new_sl, atr, self.cfg):
                             logger.info("[%s] AI Dynamic SL (%s): %.5f -> %.5f (%s)",
                                         pos.symbol, adj.action, pos.sl, adj.new_sl, adj.reasoning)
                             self._modify_sl(pos, adj.new_sl)
@@ -3494,7 +3614,8 @@ class StandaloneAIBot:
             # --- MARKET STRUCTURE TRAILING STOP ---
             if floating_pnl > 0 and self.cfg.get("structure_trailing", True):
                 info = mt5.symbol_info(pos.symbol)
-                min_step = (getattr(info, "point", 0.01) or 0.01) * 1.5
+                min_step = max((getattr(info, "point", 0.01) or 0.01) * 1.5,
+                               float(self.cfg.get("min_sl_step_atr", 0.05) or 0.0) * atr)
                 is_gold = "XAU" in pos.symbol.upper() or "GOLD" in pos.symbol.upper()
                 min_separation = float(self.cfg.get("min_sl_separation_atr", 0.55 if is_gold else 0.45)) * atr
                 if direction == 1:  # BUY
@@ -3707,8 +3828,17 @@ class StandaloneAIBot:
             if direction != 0:
                 self._close_opposite_positions(direction, score)
 
+            # A per-symbol cap separate from max_open_pos: one idea, one
+            # position. Stacking identical entries multiplies the risk of a
+            # single thesis without adding any signal.
+            sym_cap = max(1, int(self.cfg.get("max_pos_per_symbol", 1)))
+            sym_open = self._count_symbol_positions()
+            if direction != 0 and sym_open >= sym_cap:
+                logger.info("[%s] Entry skipped: %d/%d position(s) already open on %s",
+                            self.cfg["symbol"], sym_open, sym_cap, self.cfg["symbol"])
+
             if (direction != 0 and
-                    self._count_positions() < self.cfg.get("max_open_pos", 3) and
+                    self._entry_slots_ok() and
                     self._trades_today_ok()):
                 allowed, size_mult, gate_reason = self._entry_gate(equity)
                 if not allowed:

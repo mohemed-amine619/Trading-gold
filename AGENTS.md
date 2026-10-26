@@ -127,12 +127,30 @@ define the same knobs with **different defaults**. An edit to
 | `max_margin_usage` | 0.30 | 0.50 |
 | `sleep_interval` | 1.0 | 5.0 |
 
-`core/config/schema.py` is the **write contract** for the dashboard: 91 declared
+`core/config/schema.py` is the **write contract** for the dashboard: 93 declared
 parameters, each with bounds, and `POST /api/config` refuses anything it does
 not declare. That closes the "saved but ignored" hole for declared keys, but it
 does not unify the two default sets — the dashboard writes `run.py CONFIG`
 only. `core/settings.py` still has its own values, and `as_legacy_config()`
 still never maps `max_spread_points`.
+
+Two of those keys exist because of live failure modes, so do not "simplify"
+them away:
+
+- `max_pos_per_symbol` (default 1) — `max_open_pos` alone allowed the same
+  signal to re-fire and open an identical position on the same symbol (two
+  identical XAUUSDm shorts were observed). The guard is
+  `_count_symbol_positions()` / `_entry_slots_ok()` in `run.py`.
+- `min_sl_step_atr` (default 0.05) — a stop modify is only sent when it improves
+  the stop by at least this ATR multiple, via the pure `_sl_modify_allowed()`.
+  Without it the rolling 5-bar anchor caused one broker round-trip per bar for
+  ~0.01 price units. `0` restores the old every-move behaviour.
+
+Separately, `AIEnsemble.predict()` refuses to use a model whose recorded
+out-of-sample edge is unmeasured or below `ai_min_oos_edge`: it returns neutral
+`(0, 0.5)`. The promotion gate only guards *replacement*, so without this a
+model promoted once kept voting forever. `AI_MIN_OOS_EDGE=-1.0` is the escape
+hatch.
 
 **When adding a config key, add it to `core/config/schema.py` and
 `run.py CONFIG` (and `core/settings.py` if the modular engine should see it),

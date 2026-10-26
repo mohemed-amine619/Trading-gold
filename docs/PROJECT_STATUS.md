@@ -41,7 +41,7 @@ with a declared contract and adds the first real multi-stage risk ladder.
 
 | Piece | File | Guarantee |
 |---|---|---|
-| Parameter registry | `core/config/schema.py` | 91 declared params, each with type, bounds and group. A key not declared here **cannot** be written through the API. |
+| Parameter registry | `core/config/schema.py` | 93 declared params, each with type, bounds and group. A key not declared here **cannot** be written through the API. |
 | Atomic write | `POST /api/config` | Whole payload validated first; any error rejects the *entire* batch. No half-applied risk change. |
 | Dangerous-setting gate | `POST /api/config` | `dry_run` (paper → live) returns `409` unless the body carries `confirm: true`. |
 | Audit trail | `core/config/audit.py` | One row per changed key in `config_audit` inside `data/trading.db` — still exactly one SQLite file. Fail-safe: an audit error never blocks a settings change. |
@@ -52,10 +52,36 @@ with a declared contract and adds the first real multi-stage risk ladder.
 | Dashboard | `dashboard.html` | "Master Parameters" panel renders `GET /api/config/schema`, so the UI cannot drift from the validator. Includes Reset DD Halt and the audit list. |
 | Optional write auth | `run.py` middleware | When `DASHBOARD_TOKEN` is set, every mutating `/api/*` call requires `X-Dashboard-Token`. Reads stay open. Unset ⇒ unchanged behaviour. |
 
+### Follow-up — the model that was promoted is not the model that is validated
+
+Live logs exposed a gap the promotion gate does not cover. `_reject()` only
+guards **replacement**: a model promoted once kept emitting confidence forever,
+even while every subsequent challenger was rejected with
+`lift -0.054 (acc 0.538 vs baseline 0.591)`. `predict()` read
+`AI_CONFIDENCE_THRESHOLD` but never the live model's own recorded out-of-sample
+edge, so an unvalidated model supplied up to 45 score points and an upsize on
+the sizing path — conviction it had not earned. Four changes close this:
+
+| Change | Where | Behaviour |
+|---|---|---|
+| Edge gate on *use* | `AIEnsemble.predict` | When `oos_edge is None` (promoted without a validation split) or below `AI_MIN_OOS_EDGE`, prediction returns **neutral** `(direction 0, conf 0.5)` with `AISignal.abstained=True`. The technical stack keeps working; the AI simply stops voting. `AI_MIN_OOS_EDGE=-1.0` is the documented escape hatch back to unconditional use. |
+| Abstention ≠ weak vote | `run.py` `_get_signal` | The AI-confidence gates (`ai_conf >= 0.55`) are skipped for an abstention. Without that, neutrality would be a blanket trading halt: 0.5 can never clear 0.55. A genuine but weak vote is still refused. |
+| Per-symbol entry cap | `run.py` `_count_symbol_positions` / `_entry_slots_ok` | `MAX_POS_PER_SYMBOL` (default 1) caps each symbol independently of `MAX_OPEN_POS`. The live log showed two identical XAUUSDm shorts from one signal — 2× the risk on one thesis, no extra signal. |
+| Minimum stop improvement | `run.py` `_sl_modify_allowed` | A modify is only sent when the stop **improves** and does so by at least `MIN_SL_STEP_ATR` (default 0.05 ATR). The rolling 5-bar anchor plus a recomputed ATR produced a broker round-trip for 0.011 price units. `MOVE_TO_BREAKEVEN` / `SECURE_PROFIT` bypass the floor (state change, not drift); neither ever loosens. `0` restores the old every-move behaviour. |
+
+Tests: 6 in `test_ai_model_rigor.py` (unmeasured, negative, validated,
+escape hatch, log-once, reset-on-promote), 9 in `test_run_py_wiring.py`
+(symbol/magic filtering, cap, overall cap, floor of 1, abstention does not
+halt, weak vote still gated, and `step()` proven by mutation to refuse a
+second position), 10 in `test_progressive_breakeven_run.py`
+(never-loosen both directions, step floor, breakeven bypass, `0` disables,
+absent stop).
+
 ### Invariants preserved
 
 - **Never loosen a stop.** `core/position/trailing.py` is untouched and
-  `test_never_loosen_sl` still guards it.
+  `test_never_loosen_sl` still guards it. `_sl_modify_allowed` adds a second,
+  independent never-loosen check on the live ratchet path.
 - **No martingale, grid, or automatic stop-widening.** The ladder only reduces
   size or refuses entries.
 - **Paper is still the default.** `dry_run=True`; going live needs an explicit

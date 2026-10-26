@@ -147,6 +147,9 @@ _add(_p("max_total_dd", "Max total drawdown", "Risk", "float", 0.20, 0.02, 0.60,
         help="Drawdown from the equity peak that stops the bot entirely."))
 _add(_p("max_open_pos", "Max open positions", "Risk", "int", 3, 1, 20, 1,
         env="MAX_OPEN_POS"))
+_add(_p("max_pos_per_symbol", "Max positions per symbol", "Risk", "int", 1, 1, 20, 1,
+        env="MAX_POS_PER_SYMBOL",
+        help="One idea, one position: blocks re-firing the same symbol until max_open_pos would stack risk on a single thesis."))
 _add(_p("max_margin_usage", "Max margin usage", "Risk", "float", 0.30, 0.05, 0.95, 0.01,
         env="MAX_MARGIN_USAGE", percent=True))
 _add(_p("max_trades_per_day", "Max trades per day", "Risk", "int", 15, 1, 500, 1,
@@ -206,6 +209,9 @@ _add(_p("structure_trailing", "Structure-based trailing", "Trade Management", "b
 _add(_p("min_sl_separation_atr", "Min stop separation (ATR)", "Trade Management", "float", 0.55, 0.05, 3.0, 0.05,
         env="MIN_SL_SEPARATION_ATR",
         help="Keeps the ratchet from choking a position on a normal pullback."))
+_add(_p("min_sl_step_atr", "Min stop improvement (ATR)", "Trade Management", "float", 0.05, 0.0, 0.50, 0.01,
+        env="MIN_SL_STEP_ATR",
+        help="Do not send a stop modification unless it improves the stop by at least this much. 0 = every move."))
 _add(_p("enable_breakeven", "Move stop to breakeven", "Trade Management", "bool", True,
         env="ENABLE_BREAKEVEN"))
 _add(_p("breakeven_trigger_atr", "Breakeven trigger (ATR)", "Trade Management", "float", 0.4, 0.0, 5.0, 0.05,

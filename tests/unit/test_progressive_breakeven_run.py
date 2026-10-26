@@ -413,3 +413,77 @@ def test_profile_default_still_applies_when_env_is_absent(tmp_path, monkeypatch)
     assert mod.CONFIG["risk_per_trade"] == 0.015
     assert mod.CONFIG["max_open_pos"] == 5
     sys.modules.pop("run", None)
+
+
+# ---------------------------------------------------------------------------
+# Minimum stop-improvement step (_sl_modify_allowed)
+# ---------------------------------------------------------------------------
+# Live logs showed the structure ratchet sending a modify for a 0.011 price
+# move (4027.436 -> 4027.425) on the same 5-bar anchor. Each modify is a broker
+# round-trip and a failure surface. The floor below damps drift without ever
+# loosening a stop, and the never-loosen rule is re-asserted here.
+
+def _cfg(**overrides):
+    base = {"min_sl_step_atr": 0.05}
+    base.update(overrides)
+    return base
+
+
+def test_step_floor_blocks_a_one_tick_ratchet(run_module):
+    atr = 7.4
+    # 0.011 is far below 0.05 * 7.4 = 0.37
+    assert run_module._sl_modify_allowed(
+        "TIGHTEN_SL", -1, 4027.436, 4027.425, atr, _cfg()) is False
+
+
+def test_step_floor_allows_a_real_structure_move(run_module):
+    atr = 7.4
+    # 4027.425 -> 4026.355 is a 1.07 improvement, above 0.37
+    assert run_module._sl_modify_allowed(
+        "TIGHTEN_SL", -1, 4027.425, 4026.355, atr, _cfg()) is True
+
+
+def test_never_loosens_a_long_stop(run_module):
+    assert run_module._sl_modify_allowed(
+        "TIGHTEN_SL", 1, 2000.0, 1999.0, 5.0, _cfg()) is False
+
+
+def test_never_loosens_a_short_stop(run_module):
+    assert run_module._sl_modify_allowed(
+        "TIGHTEN_SL", -1, 2000.0, 2001.0, 5.0, _cfg()) is False
+
+
+def test_identical_stop_is_not_a_modification(run_module):
+    assert run_module._sl_modify_allowed(
+        "TIGHTEN_SL", -1, 2000.0, 2000.0, 5.0, _cfg()) is False
+
+
+def test_breakeven_bypasses_the_step_floor(run_module):
+    """MOVE_TO_BREAKEVEN is a state change, not anchor drift."""
+    assert run_module._sl_modify_allowed(
+        "MOVE_TO_BREAKEVEN", -1, 2000.05, 2000.00, 5.0, _cfg()) is True
+    assert run_module._sl_modify_allowed(
+        "SECURE_PROFIT", 1, 1999.95, 2000.00, 5.0, _cfg()) is True
+
+
+def test_breakeven_bypass_still_refuses_to_loosen(run_module):
+    """The bypass applies to the step floor only, never to the direction."""
+    assert run_module._sl_modify_allowed(
+        "MOVE_TO_BREAKEVEN", -1, 2000.0, 2001.0, 5.0, _cfg()) is False
+
+
+def test_zero_step_restores_every_move(run_module):
+    assert run_module._sl_modify_allowed(
+        "TIGHTEN_SL", -1, 2000.000, 1999.999, 5.0,
+        _cfg(min_sl_step_atr=0.0)) is True
+
+
+def test_absent_stop_may_always_be_set(run_module):
+    """current_sl == 0 means "no stop", so setting one is always an improvement."""
+    assert run_module._sl_modify_allowed(
+        "TIGHTEN_SL", -1, 0.0, 1999.0, 5.0, _cfg()) is True
+
+
+def test_none_new_stop_is_refused(run_module):
+    assert run_module._sl_modify_allowed(
+        "TIGHTEN_SL", -1, 2000.0, None, 5.0, _cfg()) is False

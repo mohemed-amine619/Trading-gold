@@ -419,3 +419,159 @@ class TestDynamicAISLTP:
         assert any("AI Dynamic SL/TP" in m for m in messages), (
             "dynamic_sltp_enabled=True but AI Dynamic SL/TP was never logged"
         )
+
+
+class TestPerSymbolEntryCap:
+    """One idea, one position.
+
+    `max_open_pos` alone allowed the same signal to be re-fired on the next
+    bar and open an identical position on the same symbol. That doubles the
+    risk of a single thesis without adding any signal, and it really happened
+    live (two identical shorts, tickets 2122971646 / 2122941313).
+    """
+
+    @staticmethod
+    def _pos(ticket, magic, symbol, direction=1):
+        return types.SimpleNamespace(ticket=ticket, magic=magic,
+                                     symbol=symbol, type=direction)
+
+    def test_counts_this_symbol_and_this_magic_only(self, run_and_stub, monkeypatch):
+        run_module, _ = run_and_stub
+        bot = build_bot(run_module)
+        magic = bot.cfg["magic_number"]
+        monkeypatch.setattr(bot, "_open_positions", lambda: [
+            self._pos(1, magic, "TEST"),
+            self._pos(2, magic, "TEST"),
+            self._pos(3, magic, "OTHER"),        # different symbol
+            self._pos(4, magic + 1, "TEST"),     # manual / foreign magic
+        ])
+        assert bot._count_symbol_positions() == 2
+
+    def test_second_position_on_the_same_symbol_is_refused(self, run_and_stub, monkeypatch):
+        run_module, _ = run_and_stub
+        bot = build_bot(run_module, max_pos_per_symbol=1, max_open_pos=15)
+        magic = bot.cfg["magic_number"]
+        monkeypatch.setattr(bot, "_open_positions",
+                            lambda: [self._pos(1, magic, "TEST")])
+        assert bot._entry_slots_ok() is False
+
+    def test_empty_book_allows_an_entry(self, run_and_stub, monkeypatch):
+        run_module, _ = run_and_stub
+        bot = build_bot(run_module, max_pos_per_symbol=1, max_open_pos=15)
+        monkeypatch.setattr(bot, "_open_positions", lambda: [])
+        assert bot._entry_slots_ok() is True
+
+    def test_overall_cap_still_applies(self, run_and_stub, monkeypatch):
+        run_module, _ = run_and_stub
+        bot = build_bot(run_module, max_pos_per_symbol=5, max_open_pos=1)
+        magic = bot.cfg["magic_number"]
+        monkeypatch.setattr(bot, "_open_positions",
+                            lambda: [self._pos(1, magic, "TEST")])
+        assert bot._entry_slots_ok() is False
+
+    def test_cap_is_never_below_one(self, run_and_stub, monkeypatch):
+        """A misconfigured 0 must not freeze the bot out entirely."""
+        run_module, _ = run_and_stub
+        bot = build_bot(run_module, max_pos_per_symbol=0, max_open_pos=5)
+        monkeypatch.setattr(bot, "_open_positions", lambda: [])
+        assert bot._entry_slots_ok() is True
+
+
+class _NeutralAI:
+    """A model that abstains because it has no measured out-of-sample edge."""
+
+    def update(self, frame): pass
+
+    def predict(self, frame):
+        return types.SimpleNamespace(direction=0, confidence=0.5, abstained=True,
+                                     reason="AI neutral - no measured OOS edge")
+
+
+class _UncertainAI:
+    """A model that voted, but weakly. This is NOT an abstention."""
+
+    def update(self, frame): pass
+
+    def predict(self, frame):
+        return types.SimpleNamespace(direction=1, confidence=0.50, abstained=False,
+                                     reason="AI LONG weakly")
+
+
+class TestAbstainedAiSkipsConfidenceGate:
+    """An abstention must not become a blanket trading halt.
+
+    ``predict()`` returns neutral ``(0, 0.5)`` when the live model has no
+    measured edge. The AI-confidence gates require ``ai_conf >= 0.55``, so
+    without this distinction an unvalidated model would block *every* entry:
+    0.5 can never clear 0.55. The gate exists to refuse a bad opinion, not to
+    require a random number to be confident.
+    """
+
+    def _bot(self, run_module, ai):
+        bot = build_bot(run_module, location_gate=False, use_session_filter=False,
+                        min_signal_score=0, adx_min=0, fib_enabled=False)
+        bot.ai = ai
+        return bot
+
+    def test_abstained_model_does_not_block(self, run_and_stub):
+        run_module, _ = run_and_stub
+        bot = self._bot(run_module, _NeutralAI())
+        frame = run_module._prepare(uptrend_frame(), bot.cfg)
+
+        direction, score, conf, reason = bot._get_signal(frame, frame, frame)
+
+        assert "AI conf" not in reason, f"abstention became a halt: {reason}"
+        assert direction != 0, f"technical signal lost to a neutral model: {reason}"
+
+    def test_a_weak_vote_is_still_refused(self, run_and_stub):
+        """The control: a real but weak opinion is still gated, so the test
+        above cannot pass for the wrong reason."""
+        run_module, _ = run_and_stub
+        bot = self._bot(run_module, _UncertainAI())
+        frame = run_module._prepare(uptrend_frame(), bot.cfg)
+
+        direction, score, conf, reason = bot._get_signal(frame, frame, frame)
+
+        assert direction == 0
+        assert "AI conf" in reason
+
+
+class TestStepHonoursThePerSymbolCap:
+    """Mutation check: remove `_entry_slots_ok()` from `step()` and the first
+    test below fails (a second position is sent). The control proves the
+    harness would have observed a send, so the refusal is not vacuous."""
+
+    def _drive(self, run_module, monkeypatch, booked):
+        bot = build_bot(run_module, max_pos_per_symbol=1, max_open_pos=15)
+        frame = run_module._prepare(uptrend_frame(), bot.cfg)
+        magic = bot.cfg["magic_number"]
+        positions = ([types.SimpleNamespace(ticket=1, magic=magic,
+                                            symbol="TEST", type=1)]
+                     if booked else [])
+
+        monkeypatch.setattr(bot, "_ensure_connected", lambda: True)
+        monkeypatch.setattr(bot, "_get_data", lambda: (frame, frame, frame))
+        monkeypatch.setattr(bot, "_daily_dd_ok", lambda equity: True)
+        monkeypatch.setattr(bot, "_prepared_m15", lambda f: f)
+        monkeypatch.setattr(bot, "_prepared_h1", lambda f: f)
+        monkeypatch.setattr(bot, "_manage_positions", lambda *a, **k: None)
+        monkeypatch.setattr(bot, "_get_signal", lambda *a, **k: (1, 90.0, 0.8, "ok"))
+        monkeypatch.setattr(bot, "_close_opposite_positions", lambda *a: None)
+        monkeypatch.setattr(bot, "_open_positions", lambda: positions)
+        monkeypatch.setattr(bot, "_trades_today_ok", lambda: True)
+        monkeypatch.setattr(bot, "_entry_gate", lambda equity: (True, 1.0, ""))
+
+        sent = []
+        monkeypatch.setattr(bot, "_send_order",
+                            lambda *a, **k: (sent.append(a), True)[1])
+        bot.step()
+        return sent
+
+    def test_already_open_symbol_is_not_stacked(self, run_and_stub, monkeypatch):
+        run_module, _ = run_and_stub
+        assert self._drive(run_module, monkeypatch, booked=True) == []
+
+    def test_empty_book_still_opens(self, run_and_stub, monkeypatch):
+        run_module, _ = run_and_stub
+        sent = self._drive(run_module, monkeypatch, booked=False)
+        assert len(sent) == 1, "control failed: step() never reached _send_order"
