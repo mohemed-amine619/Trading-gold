@@ -1440,13 +1440,11 @@
 
         async function triggerEmergencyStop() {
             if(confirm("DANGER: This will close ALL open positions and halt trading. Proceed?")) {
-                try {
-                    const res = await fetch('/api/emergency-stop', { method: 'POST' });
-                    if(res.ok) alert("EMERGENCY STOP ACTIVATED.");
-                    else alert("Failed to trigger emergency stop via API.");
-                } catch(e) {
-                    alert("Emergency stop command sent! (Simulated)");
-                }
+                // api() returns null on any failure (it never throws), so the
+                // result must be checked rather than caught.
+                const result = await api('/api/emergency-stop', { method: 'POST' });
+                if (result) alert("EMERGENCY STOP ACTIVATED.");
+                else alert("EMERGENCY STOP FAILED. Positions may still be open; check MT5 directly.");
             }
         }
         

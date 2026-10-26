@@ -67,6 +67,13 @@ class StubMT5:
     def last_error(self): return (1, "Success")
 
 
+from fastapi.testclient import TestClient
+
+# Every write in this module must carry the token; the fixture sets it.
+TEST_TOKEN = "test-token"
+AUTH = {"X-Dashboard-Token": TEST_TOKEN}
+
+
 @pytest.fixture(scope="module")
 def run_and_stub():
     snapshot = dict(os.environ)
@@ -86,6 +93,7 @@ def run_and_stub():
     for key in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_PATH"):
         os.environ[key] = ""
     os.environ["TRADING_MODE"] = "paper"
+    os.environ["DASHBOARD_TOKEN"] = TEST_TOKEN
 
     sys.modules.pop("run", None)
     import run as run_module_
@@ -229,7 +237,7 @@ def test_dashboard_api_get_settings(run_and_stub):
 
     bot = run_module.StandaloneAIBot(cfg)
     app = run_module.create_app([bot])
-    client = TestClient(app)
+    client = TestClient(app, headers=AUTH)
 
     res = client.get("/api/settings")
     assert res.status_code == 200
@@ -254,7 +262,7 @@ def test_dashboard_api_post_settings(run_and_stub, monkeypatch):
     cfg = dict(run_module.CONFIG)
     bot = run_module.StandaloneAIBot(cfg)
     app = run_module.create_app([bot])
-    client = TestClient(app)
+    client = TestClient(app, headers=AUTH)
 
     payload = {
         "trading_mode": "live",
@@ -298,7 +306,7 @@ def test_dashboard_api_config_sections(run_and_stub, monkeypatch):
     cfg = dict(run_module.CONFIG)
     bot = run_module.StandaloneAIBot(cfg)
     app = run_module.create_app([bot])
-    client = TestClient(app)
+    client = TestClient(app, headers=AUTH)
 
     # Test GET /api/config/risk
     res_risk_get = client.get("/api/config/risk")
@@ -566,7 +574,7 @@ def test_api_settings_syncs_profit_lock_and_spatial_veto(run_and_stub, monkeypat
     cfg = dict(run_module.CONFIG)
     bot = run_module.StandaloneAIBot(cfg)
     app = run_module.create_app([bot])
-    client = TestClient(app)
+    client = TestClient(app, headers=AUTH)
 
     # 1. Test GET contains new keys
     res_get = client.get("/api/settings")
@@ -655,7 +663,7 @@ def test_api_settings_llm_controls_roundtrip(run_and_stub, monkeypatch):
     cfg = dict(run_module.CONFIG)
     bot = run_module.StandaloneAIBot(cfg)
     app = run_module.create_app([bot])
-    client = TestClient(app)
+    client = TestClient(app, headers=AUTH)
 
     # 1. Test GET returns LLM fields
     res_get = client.get("/api/settings")
@@ -695,7 +703,7 @@ def test_api_llm_test_endpoint(run_and_stub):
     cfg = dict(run_module.CONFIG)
     bot = run_module.StandaloneAIBot(cfg)
     app = run_module.create_app([bot])
-    client = TestClient(app)
+    client = TestClient(app, headers=AUTH)
 
     # Test with embedded provider (always succeeds)
     payload = {"provider": "embedded", "url": "http://localhost:1235/v1", "model": "test-model"}
@@ -742,7 +750,7 @@ def config_client(run_and_stub, monkeypatch, tmp_path):
     bot = run_module.StandaloneAIBot(cfg)
 
     app = run_module.create_app([bot])
-    yield run_module, bot, TestClient(app), saved_env, db_path
+    yield run_module, bot, TestClient(app, headers=AUTH), saved_env, db_path
 
     run_module.CONFIG.clear()
     run_module.CONFIG.update(snapshot)
@@ -890,22 +898,50 @@ def test_reset_halt_endpoint_clears_the_flag(config_client):
 # open, and an unset token must leave behaviour unchanged.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_write_auth_is_disabled_when_token_unset(config_client, monkeypatch):
-    _run_module, bot, client, _env, _db = config_client
+def test_unset_token_refuses_config_writes(config_client, monkeypatch):
+    run_module, bot, _client, _env, _db = config_client
     monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
+    before = dict(bot.cfg)
+    bare = TestClient(run_module.create_app([bot]))
 
-    res = client.post("/api/config", json={"max_open_pos": 5})
+    res = bare.post("/api/config", json={"max_open_pos": 5})
+    assert res.status_code == 503, res.text
+    assert "DASHBOARD_TOKEN" in res.json()["detail"]
+    assert bot.cfg == before
+
+
+def test_unset_token_still_allows_the_kill_switch(config_client, monkeypatch):
+    run_module, bot, _client, _env, _db = config_client
+    monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
+    closed = []
+    monkeypatch.setattr(bot, "_close_all", lambda reason: closed.append(reason))
+    bot.paused = False
+    bare = TestClient(run_module.create_app([bot]))
+
+    res = bare.post("/api/emergency-stop")
     assert res.status_code == 200, res.text
-    assert bot.cfg["max_open_pos"] == 5
+    assert closed == ["EMERGENCY_STOP"]
+    assert bot.paused is True
+
+
+def test_unset_token_refuses_resume(config_client, monkeypatch):
+    run_module, bot, _client, _env, _db = config_client
+    monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
+    bot.paused = True
+    bare = TestClient(run_module.create_app([bot]))
+
+    assert bare.post("/api/resume").status_code == 503
+    assert bot.paused is True
 
 
 def test_write_auth_rejects_missing_or_wrong_token(config_client, monkeypatch):
-    _run_module, bot, client, _env, _db = config_client
+    run_module, bot, _client, _env, _db = config_client
     monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
     before = dict(bot.cfg)
+    bare = TestClient(run_module.create_app([bot]))
 
-    assert client.post("/api/config", json={"max_open_pos": 5}).status_code == 401
-    assert client.post(
+    assert bare.post("/api/config", json={"max_open_pos": 5}).status_code == 401
+    assert bare.post(
         "/api/config", json={"max_open_pos": 5},
         headers={"X-Dashboard-Token": "wrong"},
     ).status_code == 401
@@ -925,23 +961,25 @@ def test_write_auth_accepts_the_configured_token(config_client, monkeypatch):
 
 
 def test_write_auth_leaves_reads_open(config_client, monkeypatch):
-    _run_module, _bot, client, _env, _db = config_client
-    monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
+    run_module, bot, _client, _env, _db = config_client
+    monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
+    bare = TestClient(run_module.create_app([bot]))
 
-    assert client.get("/api/config/schema").status_code == 200
-    assert client.get("/api/config").status_code == 200
-    assert client.get("/api/config/audit").status_code == 200
+    assert bare.get("/api/config/schema").status_code == 200
+    assert bare.get("/api/config").status_code == 200
+    assert bare.get("/api/config/audit").status_code == 200
 
 
 def test_write_auth_guards_reset_halt(config_client, monkeypatch):
-    _run_module, bot, client, _env, _db = config_client
+    run_module, bot, _client, _env, _db = config_client
     monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
     bot._halt_reason = "halted"
+    bare = TestClient(run_module.create_app([bot]))
 
-    assert client.post("/api/config/reset-halt").status_code == 401
+    assert bare.post("/api/config/reset-halt").status_code == 401
     assert bot._halt_reason == "halted"
 
-    res = client.post("/api/config/reset-halt",
-                      headers={"X-Dashboard-Token": "s3cret"})
+    res = bare.post("/api/config/reset-halt",
+                    headers={"X-Dashboard-Token": "s3cret"})
     assert res.status_code == 200
     assert bot._halt_reason is None

@@ -3903,10 +3903,9 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
     # The dashboard binds to 127.0.0.1, which is a stopgap, not security: any
     # local process (or a malicious page in the same browser, via a simple
     # POST) can reach it. When DASHBOARD_TOKEN is set, every mutating API call
-    # must present it in the X-Dashboard-Token header. When it is unset the
-    # behaviour is unchanged, so existing deployments and tests are unaffected
-    # -- but then the loopback binding is the only control, which is exactly
-    # what AGENTS.md warns about.
+    # must present it in the X-Dashboard-Token header. When it is unset, every
+    # mutating call is refused (503) except /api/emergency-stop, so the kill
+    # switch stays reachable while config changes and resume stay locked.
     #
     # The token is read per request, not captured at import, so setting it in
     # .env takes effect on the next call instead of on the next restart.
@@ -3917,9 +3916,21 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
         from fastapi.responses import JSONResponse
 
         expected = (os.getenv("DASHBOARD_TOKEN") or "").strip()
-        if (expected
-                and request.method in ("POST", "PUT", "PATCH", "DELETE")
+        if (request.method in ("POST", "PUT", "PATCH", "DELETE")
                 and request.url.path.startswith("/api/")):
+            if not expected:
+                # Fail closed: with no token, only the kill switch (which
+                # reduces risk) stays reachable. Every other write, including
+                # config changes and resume, is refused until DASHBOARD_TOKEN
+                # is set.
+                if request.url.path == "/api/emergency-stop":
+                    return await call_next(request)
+                logger.warning(
+                    "Rejected %s %s: DASHBOARD_TOKEN is not set",
+                    request.method, request.url.path)
+                return JSONResponse(
+                    {"detail": "writes are disabled until DASHBOARD_TOKEN is set in .env"},
+                    status_code=503)
             supplied = (request.headers.get("x-dashboard-token") or "").strip()
             if not hmac.compare_digest(supplied, expected):
                 logger.warning(

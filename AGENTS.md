@@ -23,7 +23,7 @@ writes its `trades` table into the single configured database via
 |---|---|---|
 | Files | `run.py` (~4,680 lines) | `core/`, `api/` |
 | Imports `core/`? | **Yes, for market location only** — `core/market/location.py`, imported defensively at line ~108 | n/a |
-| Tests? | Integration-tested via a stubbed MT5 module | 612 tests, all passing |
+| Tests? | Integration-tested via a stubbed MT5 module | 616 tests, all passing |
 | Actually run today | Yes — this is the production bot | Not wired into any entrypoint |
 
 - **`run.py` is the live bot.** `gui.py:226` does `import run`; `fix_mt5.bat:17` runs `py run.py`.
@@ -40,7 +40,7 @@ writes its `trades` table into the single configured database via
 Run everything with `.venv/bin/python` — the repo has two virtualenvs and only `.venv` has pytest.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 612 passed
+.venv/bin/python -m pytest tests/ -q          # 616 passed
 .venv/bin/python -m pytest tests/unit/test_risk_engine.py -q   # single file
 .venv/bin/python -m pytest tests/unit -k approve -q            # single test by name
 ```
@@ -340,5 +340,5 @@ not overlooked — see `docs/PROJECT_STATUS.md` §0.0.
 
 - One coherent, testable phase at a time; run `.venv/bin/python -m pytest tests/ -q` after each change.
 - Never report a test as passing unless you actually ran it. Never let tests touch a live account.
-- Update `docs/PROJECT_STATUS.md` when behavior changes. The real count is now 612; keep that number honest.
+- Update `docs/PROJECT_STATUS.md` when behavior changes. The real count is now 616; keep that number honest.
 - `docs/ROADMAP.md` and `docs/ARCHITECTURE.md` are **aspirational** — they describe the intended 12-phase platform, not current state. `docs/ARCHITECTURE.md:9` is already stale (claims `run.py` is 1,535 lines; it is 1840). Don't treat any of it as implemented without checking the code.

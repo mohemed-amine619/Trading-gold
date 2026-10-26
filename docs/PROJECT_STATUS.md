@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**612 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**616 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -51,7 +51,7 @@ with a declared contract and adds the first real multi-stage risk ladder.
 | Loss-streak breaker | `run.py` | `max_consecutive_losses` consecutive losses start a `loss_streak_cooldown_minutes` cooldown. |
 | Fibonacci scoring | `run.py` `_fib_score` | Contributes `fib_weight` points at retracement confluence; with `fib_enabled=False` the scorer reproduces the legacy 45/30/15/10 formula exactly (guarded by a test). |
 | Dashboard | `dashboard.html` | "Master Parameters" panel renders `GET /api/config/schema`, so the UI cannot drift from the validator. Includes Reset DD Halt and the audit list. |
-| Optional write auth | `run.py` middleware | When `DASHBOARD_TOKEN` is set, every mutating `/api/*` call requires `X-Dashboard-Token`. Reads stay open. Unset ⇒ unchanged behaviour. |
+| Write auth (fail-closed) | `run.py` middleware | Every mutating `/api/*` call requires `X-Dashboard-Token` matching `DASHBOARD_TOKEN`; reads stay open. With `DASHBOARD_TOKEN` unset, mutating calls return `503` **except** `/api/emergency-stop`, so the kill switch stays reachable while config changes and resume stay locked. |
 
 ### Follow-up — the model that was promoted is not the model that is validated
 
@@ -102,7 +102,8 @@ absent stop).
 - No paper-soak promotion gate yet: nothing automatically promotes a validated
   model or blocks go-live on poor out-of-sample results.
 - `DASHBOARD_TOKEN` is a shared secret in `.env`, not per-user auth. Loopback
-  binding remains the real control.
+  binding remains the real control. The token is a single shared secret over
+  plain HTTP: do not expose the dashboard beyond loopback without TLS in front.
 
 ### Files
 
