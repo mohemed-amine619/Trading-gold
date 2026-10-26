@@ -55,7 +55,9 @@ class EmbeddedReasoningProvider(LLMProvider):
         prompt_lower = prompt.lower()
 
         # Case 1: Dynamic SL/TP and Position Management evaluation
-        if "action" in prompt_lower or "proposed_sl" in prompt_lower or "position management" in prompt_lower:
+        # Whole-word match: a bare substring test sent any prompt containing
+        # "reaction" or "transaction" down the position-management path.
+        if re.search(r"\baction\b", prompt_lower) or "proposed_sl" in prompt_lower or "position management" in prompt_lower:
             return self._evaluate_position_management(prompt, prompt_lower)
 
         # Case 2: Trade Entry SL/TP calculation
@@ -221,13 +223,25 @@ class EmbeddedReasoningProvider(LLMProvider):
         })
 
     def _evaluate_position_management(self, prompt: str, prompt_lower: str) -> str:
-        # Check profit / giveback / pinbars
-        is_pinbar_opp = "opposite pinbar" in prompt_lower or "rejection wick" in prompt_lower or "pinbar"
-        is_giveback = "giveback" in prompt_lower or "retracement" in prompt_lower
-        is_in_profit = "floating_pnl > 0" in prompt_lower or "in profit" in prompt_lower or "rr: " in prompt_lower
-        is_strong_profit = "rr: 1.5" in prompt_lower or "rr: 2" in prompt_lower or "+1" in prompt_lower
+        # Decide from the reported R-multiple, not loose substrings. A negative
+        # RR is a loss; the old checks treated any prompt containing "rr: " as
+        # profitable, and an always-true "pinbar" clause secured profit on every
+        # position it reached.
+        rr_match = re.search(r"\brr:\s*(-?\d+(?:\.\d+)?)", prompt_lower)
+        if rr_match:
+            rr = float(rr_match.group(1))
+            in_profit = rr > 0
+            strong_profit = rr >= 1.5
+        else:
+            rr = None
+            in_profit = "in profit" in prompt_lower
+            strong_profit = False
 
-        if is_pinbar_opp and is_in_profit:
+        is_pinbar_opp = "opposite pinbar" in prompt_lower or "rejection wick" in prompt_lower
+        is_giveback = "giveback" in prompt_lower or "retracement" in prompt_lower
+        at_breakeven = "breakeven" in prompt_lower or "break-even" in prompt_lower
+
+        if is_pinbar_opp and in_profit:
             return json.dumps({
                 "action": "SECURE_PROFIT",
                 "proposed_sl": None,
@@ -236,7 +250,7 @@ class EmbeddedReasoningProvider(LLMProvider):
                 "reasoning": "Rejection pinbar against position + profit - securing gains aggressively."
             })
 
-        if is_giveback and is_strong_profit:
+        if is_giveback and strong_profit:
             return json.dumps({
                 "action": "TIGHTEN_SL",
                 "proposed_sl": None,
@@ -254,7 +268,7 @@ class EmbeddedReasoningProvider(LLMProvider):
                 "reasoning": "Profit giveback detected; tightening stop to protect gains."
             })
 
-        if is_in_profit and "be" not in prompt_lower and "breakeven" not in prompt_lower:
+        if in_profit and not at_breakeven:
             return json.dumps({
                 "action": "MOVE_TO_BREAKEVEN",
                 "proposed_sl": None,

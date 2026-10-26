@@ -40,7 +40,13 @@ class TrendFollowingStrategy(BaseStrategy):
         # Require trending regime for strong signals
         if regime not in (MarketRegime.TRENDING, MarketRegime.BREAKOUT):
             return Signal(direction=0, score=0.0, reason="Not trending regime", invalidation="")
-            
+
+        # It reads the previous bar, so one bar of history is not enough. The
+        # backtest engine asks for a signal on a one-bar slice; abstain there
+        # rather than crash the whole run.
+        if len(df) < 2:
+            return Signal(direction=0, score=0.0, reason="Need two bars", invalidation="")
+
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         

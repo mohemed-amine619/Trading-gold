@@ -5,7 +5,7 @@
 
 ## 0. TEST BASELINE
 
-**616 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**636 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -29,6 +29,27 @@
 `MockMT5Adapter` or an in-memory scripted fake.
 
 ---
+
+## 0.0001 NEW — WALK-FORWARD EVALUATION HARNESS
+
+`core/backtesting/walkforward.py` runs each strategy and the ensemble on the
+same consecutive out-of-sample windows, and passes a strategy only when every
+window meets `GateRule` (minimum trades, profit factor, win rate). A
+position still open at a window's end is closed at that window's last close,
+so each window is judged on its own entries.
+
+**What is not established.** The repo contains no historical price data, and
+MetaTrader5 cannot run on Linux, so no strategy's edge has been measured.
+A smoke run on a synthetic random walk fails every strategy in at least one
+window, which is the expected result for data with no edge. Real results need
+OHLCV history exported from MT5 on Windows.
+
+Also fixed: `TrendFollowingStrategy` read `iloc[-2]` and crashed on a one-bar
+slice, which the backtest engine produces on its first step. It now abstains.
+
+Tests: 10 in `test_walkforward.py` and 1 in `test_backtesting.py` (windows
+contiguous and complete, too little data refused, warmup entries excluded,
+open-at-end counted, gate, ensemble adapter).
 
 ## 0.000 NEW — CONFIG PLANE, RISK LADDER & FIBONACCI SCORING
 
