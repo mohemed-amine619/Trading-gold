@@ -23,7 +23,7 @@ writes its `trades` table into the single configured database via
 |---|---|---|
 | Files | `run.py` (~4,680 lines) | `core/`, `api/` |
 | Imports `core/`? | **Yes, for market location only** — `core/market/location.py`, imported defensively at line ~108 | n/a |
-| Tests? | Integration-tested via a stubbed MT5 module | 587 tests, all passing |
+| Tests? | Integration-tested via a stubbed MT5 module | 612 tests, all passing |
 | Actually run today | Yes — this is the production bot | Not wired into any entrypoint |
 
 - **`run.py` is the live bot.** `gui.py:226` does `import run`; `fix_mt5.bat:17` runs `py run.py`.
@@ -40,7 +40,7 @@ writes its `trades` table into the single configured database via
 Run everything with `.venv/bin/python` — the repo has two virtualenvs and only `.venv` has pytest.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 587 passed
+.venv/bin/python -m pytest tests/ -q          # 612 passed
 .venv/bin/python -m pytest tests/unit/test_risk_engine.py -q   # single file
 .venv/bin/python -m pytest tests/unit -k approve -q            # single test by name
 ```
@@ -52,7 +52,7 @@ There is no `pyproject.toml`, `pytest.ini`, `conftest.py`, linter, or formatter 
 ## Environment
 
 - **MT5 / `MetaTrader5` is Windows-only and cannot be installed on this Linux box** (`pip install MetaTrader5` → no matching distribution). It is in `requirements.txt:1` anyway.
-- `run.py:89` and `run_pro.py:89` do `import MetaTrader5` at module level → **`run.py` cannot even be imported on Linux.** Never add a test that imports it.
+- `run.py:94` does `import MetaTrader5` at module level → **`run.py` cannot even be imported on Linux.** Never add a test that imports it.
 - `core/mt5/adapter.py` imports MT5 lazily inside `RealMT5Adapter._import_mt5()` and raises `RuntimeError` — this is the only pattern that works cross-platform. Keep it.
 - Use `MockMT5Adapter` (deterministic, seeded) for all tests. See `tests/unit/test_mt5_adapter.py:5-8` for the fixture pattern.
 - No `.env` exists in the repo; `.env.example` is the template. `core/settings.py` reads `.env` via pydantic-settings.
@@ -61,11 +61,29 @@ There is no `pyproject.toml`, `pytest.ini`, `conftest.py`, linter, or formatter 
 
 Treat these as blockers for any live-trading work, not trivia:
 
-1. **Hardcoded live broker credentials are in git history and on disk** — `run.py:114-116` and `run_pro.py:114-116` have real account `261009880`, password, and server `Exness-MT5Trail16` as `os.getenv()` fallbacks. The password must be rotated at the broker regardless of any code change; removing it from the file does not remove it from history. This inverts both policies already stated in the repo: `core/settings.py:53` ("NEVER add secrets as defaults") and `config.py:19-23` (credentials default to `None`).
-2. **`run.py` now defaults to PAPER mode.** This was fixed: `dry_run` is a real `CONFIG` key (`run.py:189`) driven by `_TRADING_MODE` (`run.py:111`). `TRADING_MODE` defaults to `paper`; real orders require `TRADING_MODE=live`, which prints a loud banner. Unrecognised values fall back to paper, never open. Locked by `tests/unit/test_safety_paper_default.py`. **Do not reintroduce a live default** — that test will fail.
-3. **The dashboard now reports the real mode.** It previously read `cfg.get("paper_trading")`, a key that exists nowhere, so the badge always showed LIVE. It now reads `cfg.get("dry_run")` (`run.py:1705`).
-4. **Hardcoded live broker credentials are still present** — `run.py:130-132` and `run_pro.py:114-116` have a real account number, password, and server as `os.getenv()` fallbacks. **This is unresolved and needs your action:** the password must be rotated at the broker regardless of any code change, and removing it from the file does not remove it from git history. It inverts both policies already stated in the repo: `core/settings.py:53` ("NEVER add secrets as defaults") and `config.py:19-23` (credentials default to `None`). Not changed in this phase because credential rotation requires confirmation.
-5. **`/api/emergency-stop` in `api/main.py:54` is a stub** — it returns a success message and stops nothing. `core/risk/engine.py:218` has a real kill switch (`trigger_emergency_stop` / `reset_emergency_stop`, checked at `engine.py:276`) but no route or caller wires it up. `run.py` `/api/control` has a working `emergency_stop` action.
+1. **The live broker password is still in git history** — commits `fda97e0`, `3113e04`
+   and `8bbfe0e` contain account `261009880` with its password and server
+   `Exness-MT5Trail16` as `os.getenv()` fallbacks. It is **no longer on disk**:
+   `run.py` now reads `os.getenv("MT5_PASSWORD") or None` and `config.py:20`
+   defaults to `None`, matching `core/settings.py:53` ("NEVER add secrets as
+   defaults"). **The password still must be rotated at the broker** — deleting a
+   line does not remove it from history. Do not reintroduce a literal fallback.
+2. **`run.py` now defaults to PAPER mode.** `dry_run` is a real `CONFIG` key
+   (`run.py:566`) driven by `_TRADING_MODE` (`run.py:206`). `TRADING_MODE`
+   defaults to `paper`; real orders require `TRADING_MODE=live`, which prints a
+   loud banner. Unrecognised values fall back to paper, never open. Locked by
+   `tests/unit/test_safety_paper_default.py`. **Do not reintroduce a live
+   default** — that test will fail.
+3. **The dashboard reports the real mode.** It previously read
+   `cfg.get("paper_trading")`, a key that exists nowhere, so the badge always
+   showed LIVE. It now reads `cfg.get("dry_run")` (`run.py:3994`).
+4. **Two emergency stops exist; only one gates real orders.** `run.py:4664`
+   serves `POST /api/emergency-stop` (closes all positions via `_close_all` and
+   pauses), and `/api/control {"action":"emergency_stop"}` does the same.
+   `api/main.py:132` wires the modular `RiskEngine.trigger_emergency_stop()`
+   (checked at `core/risk/engine.py:327`), but that engine is only constructed
+   by `core/trading/orchestrator.py`, which is **not an entrypoint**. Do not
+   assume the modular kill switch stops the live bot.
 5. **No martingale, grid, or automatic stop-widening.** Preserve this. `core/position/trailing.py` enforces "never loosen SL" — `tests/test_trailing.py::test_never_loosen_sl` guards it.
 
 ## Multi-asset
@@ -284,7 +302,7 @@ not overlooked — see `docs/PROJECT_STATUS.md` §0.0.
 - It expects `run.py`'s response shapes: `{status, markets, mode}`, `{positions}`, `{data}`, `{history}` (`dashboard.html:1050-1076`). The `markets` entries now also carry additive `locBias`, `locPosition`, `locRangeLow`, `locRangeHigh`, `locStructure`, `locSupport`, `locResistance` keys; the UI ignores unknown keys, so this is backward-compatible.
 - `run.py` now serves the schema-driven config plane: `GET /api/config/schema`, `GET /api/config`, `POST /api/config`, `GET /api/config/audit`, `POST /api/config/reset-halt`, plus the legacy `/api/config/{section}`. `POST /api/config` validates the whole batch against `core/config/schema.py` and rejects it atomically; `dry_run` requires `confirm: true`.
 - Set `DASHBOARD_TOKEN` in `.env` to require `X-Dashboard-Token` on every mutating `/api/*` call (reads stay open). Unset ⇒ unchanged, and loopback binding is the only control.
-- Still unserved: `/api/emergency-stop` (the dashboard calls it, but `run.py` exposes `/api/control`). Expect a silent 404.
+- `/api/emergency-stop` is now served by `run.py:4664` (closes all positions, pauses trading); it used to 404. `api/main.py:132` serves the same path on the *other* FastAPI app, wired to the modular `RiskEngine` — which does not gate `run.py`'s orders.
 - `api/main.py` is a **second, separate FastAPI app** (`version="2.0"`) that also serves `dashboard.html`'s path space. Two apps, one port, no auth on either. `dashboard.html` effectively targets `run.py`.
 - CORS is `allow_origins=["*"]` with `allow_credentials=True` in both apps (`api/main.py:25-30`) — insecure; note it if touching auth.
 - `core/notifications/__init__.py` is empty; Telegram is dead in the monolith because `CONFIG` has no `telegram_token` key (`run.py:112-166`), so `Notifier` reads `""` and silently no-ops.
@@ -322,5 +340,5 @@ not overlooked — see `docs/PROJECT_STATUS.md` §0.0.
 
 - One coherent, testable phase at a time; run `.venv/bin/python -m pytest tests/ -q` after each change.
 - Never report a test as passing unless you actually ran it. Never let tests touch a live account.
-- Update `docs/PROJECT_STATUS.md` when behavior changes. The real count is now 587; keep that number honest.
+- Update `docs/PROJECT_STATUS.md` when behavior changes. The real count is now 612; keep that number honest.
 - `docs/ROADMAP.md` and `docs/ARCHITECTURE.md` are **aspirational** — they describe the intended 12-phase platform, not current state. `docs/ARCHITECTURE.md:9` is already stale (claims `run.py` is 1,535 lines; it is 1840). Don't treat any of it as implemented without checking the code.

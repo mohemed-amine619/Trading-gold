@@ -1,11 +1,11 @@
 # PROJECT STATUS
 
 > **Target platform: native Windows 11.** No Docker, WSL, Linux host or VM is
-> required. Last updated: 2026-10-25.
+> required. Last updated: 2026-10-26.
 
 ## 0. TEST BASELINE
 
-**587 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**612 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -21,6 +21,7 @@
 | **Trading orchestrator (candles → orders)** | **19** | Implemented and tested |
 | **Dynamic AI SL/TP Reasoning & LLM Trader Council** | **19** | **Implemented and tested** |
 | **Config plane, risk ladder & Fibonacci scoring** | **80** | **Implemented and tested** |
+| **Live-log hardening (AI edge gate, entry cap, stop-step)** | **25** | **Implemented and tested** |
 | Manual trades isolation & order execution | 7 | Implemented and tested |
 | Other unit tests | 56 | Implemented and tested |
 
@@ -469,7 +470,7 @@ After that, in order:
 - **`run.py` now defaults to PAPER mode.** `dry_run` was read by every mutating
   method but was absent from the `CONFIG` dict, so `cfg.get("dry_run")` returned
   `None` → falsy → **the bot sent real orders by default**. Now resolved from
-  `TRADING_MODE` (`run.py:111`): `paper` (default, safe) | `live` | `backtest`.
+  `TRADING_MODE` (`run.py:206`): `paper` (default, safe) | `live` | `backtest`.
   Unrecognised values fall back to paper — the system fails *closed*, not open.
   Opting into live prints a banner.
 - **Dashboard mode badge was always wrong.** `/api/status` read
@@ -482,14 +483,16 @@ After that, in order:
 - Verified end-to-end with a stubbed MT5 module: in paper mode `_send_order`
   computes a full order (lot/SL/TP) but never calls `order_send`; forcing
   `dry_run=False` does reach `order_send` — proving the gate is load-bearing.
-- **STILL UNRESOLVED:** real broker credentials remain hardcoded as
-  `os.getenv` fallbacks at `run.py:130-132` and `run_pro.py:114-116`. This
-  requires broker-side password rotation and is not a code-only fix.
+- **Credentials on disk: resolved.** `run.py:369` now reads
+  `os.getenv("MT5_PASSWORD") or None` and `config.py:20` defaults to `None`;
+  no literal fallback remains in the tree. The account/password/server values
+  are still in git history (`fda97e0`, `3113e04`, `8bbfe0e`), so broker-side
+  password rotation is still required — it is not a code-only fix.
 
 ## 4. REMAINING CRITICAL RISKS
 - **Execution & Retry Resiliency**: The `ExecutionEngine` handles simple requotes but does not elegantly queue or backoff from transient broker disconnection loops.
-- **Main Loop Architecture**: The actual running bot (`run_pro.py` and `run.py`) is a monolithic script that does not fully utilize the modular `core/` architecture components yet.
-- **Credentials**: real MT5 account/password/server are hardcoded as `os.getenv` fallbacks in `run.py:130-132` and `run_pro.py:114-116`. Broker-side rotation required.
+- **Main Loop Architecture**: The actual running bot (`run.py`) is a monolithic script that does not fully utilize the modular `core/` architecture components yet. The `run_pro.py` fork has been removed.
+- **Credentials**: no longer hardcoded — `run.py` reads `MT5_LOGIN`/`MT5_PASSWORD`/`MT5_SERVER` from the environment. **Rotation is still required** because the values remain in git history.
 - **Packaging**: `requirements.txt` omits the entire `core/` stack (`sqlalchemy`, `alembic`, `pydantic`, `pydantic-settings`, `aiosqlite`) and has no PostgreSQL driver, so no container can be built from it yet.
 - **Deployment**: no `Dockerfile`, compose file, or `.dockerignore` exists. Target is Ubuntu + Compose + PostgreSQL with MT5 in a Windows 11 VM behind an authenticated bridge.
 - **Instrument registry**: `Symbol` model exists but is never populated; no asset-class field. Multi-asset support is not yet real.
