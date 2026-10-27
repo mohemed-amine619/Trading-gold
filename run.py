@@ -2167,6 +2167,9 @@ class StandaloneAIBot:
         self._peak_profit: dict = {}      # ticket -> peak favourable move (price units), POWER-UP (B)
         self._manual_sltp_failed: dict = {} # ticket -> epoch timestamp of last failed modification
         self._dd_positions_closed = False # one-shot equity protect close
+        self._weekly_halt_done = False
+        self._daily_halt_done = False
+        self._equity_halt_done = False
         # --- smarter manual trade intelligence ---
         self._manual_intel: dict = {}
         self._manual_flip_count: dict = {}
@@ -2636,13 +2639,23 @@ class StandaloneAIBot:
 
         hard_reason = self._hard_drawdown_reason(equity)
         if hard_reason:
-            logger.warning("%s – closing all positions and halting", hard_reason)
-            if (self.cfg.get("equity_protect_close_all", True) and
-                    not self._dd_positions_closed):
-                self._close_all(hard_reason)
+            if not self._dd_positions_closed:
+                logger.warning("%s – closing all positions and halting", hard_reason)
+                if self.cfg.get("equity_protect_close_all", True):
+                    try:
+                        self._close_all(hard_reason)
+                    except Exception as e:
+                        logger.error("equity protect close_all failed: %s", e)
                 self._dd_positions_closed = True
-                self.notifier.send(
-                    f"🛡️ {hard_reason} – all positions closed. Manual reset required.")
+                try:
+                    self.notifier.send(
+                        f"🛡️ {hard_reason} – all positions closed. Manual reset required.")
+                except Exception:
+                    pass
+            else:
+                if self._halt_reason != hard_reason:
+                    logger.warning("%s – already halted", hard_reason)
+                self._halt_reason = hard_reason
             return False
 
         if self.daily_start > 0:
