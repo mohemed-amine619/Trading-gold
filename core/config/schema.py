@@ -331,6 +331,23 @@ _add(_p("ai_protect_manual_trades", "Protect manual trades with a stop", "Execut
         env="AI_PROTECT_MANUAL_TRADES"))
 _add(_p("manual_trade_sl_atr", "Manual stop (ATR)", "Execution", "float", 2.0, 0.3, 10.0, 0.1,
         env="MANUAL_TRADE_SL_ATR"))
+_add(_p("manage_manual_trades_full", "Full management of manual trades", "Execution", "bool", False,
+        help="If true, manual trades are managed like bot trades (trailing/partials/opposite closes). If false, only protected."))
+_add(_p("smart_manage_manual_trades", "Smart intelligent management", "Execution", "bool", True,
+        help="If true and full management off, use AI/structure analysis to manage manual trades intelligently."))
+_add(_p("manual_intel_enabled", "Manual trade AI intelligence", "Execution", "bool", True,
+        help="Enable analysis-based prediction for manual trades (flip detection, H1 confluence, regime-aware)."))
+_add(_p("manual_intel_min_flip_conf", "Min AI flip confidence", "Execution", "float", 0.62, 0.5, 0.95, 0.01))
+_add(_p("manual_intel_allow_early_exit_on_flip", "Allow early exit on strong flip", "Execution", "bool", True))
+_add(_p("manual_intel_cut_on_momentum_death", "Cut on momentum exhaustion", "Execution", "bool", True))
+_add(_p("manual_intel_require_pnl_filter", "Require PnL filter for exits", "Execution", "bool", True))
+_add(_p("manual_intel_use_h1_confluence", "Use H1 structure confluence", "Execution", "bool", True))
+_add(_p("manual_intel_use_location", "Use market location analysis", "Execution", "bool", True))
+_add(_p("manual_intel_tighten_on_exhaustion", "Tighten on exhaustion", "Execution", "bool", True))
+_add(_p("manual_intel_runner_protect_atr", "Runner protection threshold (ATR)", "Execution", "float", 1.8, 0.5, 5.0, 0.1))
+_add(_p("manual_intel_strong_conf", "Strong flip confidence", "Execution", "float", 0.75, 0.6, 0.99, 0.01))
+_add(_p("manual_intel_mid_conf", "Mid flip confidence", "Execution", "float", 0.70, 0.55, 0.95, 0.01))
+_add(_p("manual_intel_log_verbose", "Verbose intel logging", "Execution", "bool", True))
 
 GROUP_ORDER: Tuple[str, ...] = (
     "Instrument",

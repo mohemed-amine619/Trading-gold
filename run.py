@@ -81,6 +81,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+
+@dataclass
+class ManualIntelAdvice:
+    action: str = "HOLD"  # HOLD | MOVE_TO_BE | TIGHTEN_SL | EARLY_EXIT
+    new_sl: Optional[float] = None
+    reason: str = ""
+    conf: float = 0.0
+    urgency: int = 1
+
 # Windows consoles default to a legacy codepage (cp1252) that can't encode
 # emoji used in log/notification messages (✅ 🔒 🛡️ ...). Force UTF-8 on
 # stdout/stderr so logging never crashes trying to print them.
@@ -555,6 +564,21 @@ CONFIG = {
     "manual_trade_sl_atr":       2.0,
     "manage_manual_trades_full": False,
     "default_manual_policy":     os.getenv("DEFAULT_MANUAL_POLICY", "observe_only"),
+    # --- Smart manual trade intelligence (analysis-based) ---
+    "smart_manage_manual_trades": True,
+    "manual_intel_enabled": True,
+    "manual_intel_check_every_n_bars": 1,
+    "manual_intel_min_flip_conf": 0.62,
+    "manual_intel_allow_early_exit_on_flip": True,
+    "manual_intel_cut_on_momentum_death": True,
+    "manual_intel_require_pnl_filter": True,
+    "manual_intel_use_h1_confluence": True,
+    "manual_intel_use_location": True,
+    "manual_intel_tighten_on_exhaustion": True,
+    "manual_intel_log_verbose": True,
+    "manual_intel_runner_protect_atr": 1.8,
+    "manual_intel_strong_conf": 0.75,
+    "manual_intel_mid_conf": 0.70,
 
     # --- safety ---
     # SAFETY: the bot MUST default to paper mode. Every mutating method
@@ -2143,6 +2167,10 @@ class StandaloneAIBot:
         self._peak_profit: dict = {}      # ticket -> peak favourable move (price units), POWER-UP (B)
         self._manual_sltp_failed: dict = {} # ticket -> epoch timestamp of last failed modification
         self._dd_positions_closed = False # one-shot equity protect close
+        # --- smarter manual trade intelligence ---
+        self._manual_intel: dict = {}
+        self._manual_flip_count: dict = {}
+        self._manual_last_intel_bar: dict = {}
 
         # --- persisted risk state ------------------------------------------
         # The daily guard, the trade counter and the loss streak used to be
@@ -3467,10 +3495,13 @@ class StandaloneAIBot:
             return False
         if h1p is None or len(h1p) < 3:
             return False
-        e50_p = float(h1p["ema50"].iloc[-2])
-        e200_p = float(h1p["ema200"].iloc[-2])
-        e50 = float(h1p["ema50"].iloc[-1])
-        e200 = float(h1p["ema200"].iloc[-1])
+        try:
+            e50_p = float(h1p["ema50"].iloc[-2])
+            e200_p = float(h1p["ema200"].iloc[-2])
+            e50 = float(h1p["ema50"].iloc[-1])
+            e200 = float(h1p["ema200"].iloc[-1])
+        except Exception:
+            return False
         if any(math.isnan(x) for x in (e50_p, e200_p, e50, e200)):
             return False
         if direction == 1:   # long position – death cross is bad
@@ -3479,7 +3510,163 @@ class StandaloneAIBot:
 
     def _position_age(self, pos) -> float:
         off = self.cfg.get("server_utc_offset_hours", 0) * 3600.0
-        return (time.time() + off - float(pos.time)) / 3600.0
+        try:
+            return (time.time() + off - float(pos.time)) / 3600.0
+        except Exception:
+            return 0.0
+
+    def _infer_regime(self, m15p: pd.DataFrame):
+        try:
+            if m15p is None or m15p.empty:
+                return "unknown"
+            last = m15p.iloc[-1]
+            adx = float(last.get("adx", 0.0))
+            if adx >= 22.0:
+                return "trend"
+            if adx < 16.0:
+                return "range"
+            return "unknown"
+        except Exception:
+            return "unknown"
+
+    def _structure_bias(self, h1p: pd.DataFrame):
+        try:
+            if h1p is None or getattr(h1p, "empty", True) or len(h1p) < 5:
+                return "neutral"
+            e50 = float(h1p["ema50"].iloc[-1])
+            e200 = float(h1p["ema200"].iloc[-1])
+            if math.isnan(e50) or math.isnan(e200):
+                return "neutral"
+            if e50 > e200:
+                return "bull"
+            if e50 < e200:
+                return "bear"
+        except Exception:
+            pass
+        return "neutral"
+
+    def _get_manual_context(self, pos, m15p, h1p, tick, atr):
+        try:
+            direction = 1 if pos.type == mt5.ORDER_TYPE_BUY else -1
+            if tick is not None:
+                close_price = tick.bid if direction == 1 else tick.ask
+            else:
+                close_price = float(m15p.iloc[-1].get("close", pos.price_open)) if m15p is not None and not m15p.empty else float(pos.price_open)
+            profit_move = ((close_price - pos.price_open) if direction == 1 else (pos.price_open - close_price))
+            loc = self._location_for(m15p) if _LOCATION_AVAILABLE else None
+            ai_sig = None
+            if getattr(self, "ai", None) is not None and self.cfg.get("ai_enabled", True):
+                try:
+                    ai_sig = self.ai.predict(m15p)
+                except Exception:
+                    ai_sig = None
+            return {
+                "dir": direction,
+                "close": close_price,
+                "profit_move_atr": (profit_move / atr) if atr > 0 else 0.0,
+                "ai_dir": ai_sig.direction if ai_sig else 0,
+                "ai_conf": ai_sig.confidence if ai_sig else 0.5,
+                "loc": loc,
+                "regime": self._infer_regime(m15p),
+                "structure_bias": self._structure_bias(h1p),
+                "adx": float(m15p["adx"].iloc[-1]) if m15p is not None and not m15p.empty and "adx" in m15p else 0.0,
+            }
+        except Exception:
+            return {
+                "dir": 1 if getattr(pos, "type", 0) == mt5.ORDER_TYPE_BUY else -1,
+                "close": getattr(pos, "price_open", 0.0),
+                "profit_move_atr": 0.0,
+                "ai_dir": 0,
+                "ai_conf": 0.5,
+                "loc": None,
+                "regime": "unknown",
+                "structure_bias": "neutral",
+                "adx": 0.0,
+            }
+
+    def _evaluate_manual_trade_intel(self, pos, ctx, equity, atr):
+        advice = ManualIntelAdvice()
+        try:
+            if atr <= 0 or not self.cfg.get("manual_intel_enabled", True):
+                return advice
+            direction = ctx.get("dir", 1)
+            ai_dir = ctx.get("ai_dir", 0)
+            ai_conf = float(ctx.get("ai_conf", 0.5) or 0.5)
+            regime = ctx.get("regime", "unknown")
+            s_bias = ctx.get("structure_bias", "neutral")
+            profit_move_atr = float(ctx.get("profit_move_atr", 0.0) or 0.0)
+            ticket = getattr(pos, "ticket", 0)
+            floating_pnl = pos.profit + pos.swap
+
+            st = self._manual_flip_count.setdefault(ticket, 0)
+            min_flip_conf = float(self.cfg.get("manual_intel_min_flip_conf", 0.62))
+            if ai_dir != 0 and ai_dir == -direction and ai_conf >= min_flip_conf:
+                st += 1
+            else:
+                st = max(0, st - 1)
+            self._manual_flip_count[ticket] = st
+
+            runner_protect = float(self.cfg.get("manual_intel_runner_protect_atr", 1.8))
+            strong_conf = float(self.cfg.get("manual_intel_strong_conf", 0.75))
+            mid_conf = float(self.cfg.get("manual_intel_mid_conf", 0.70))
+
+            flip_strong = (ai_dir == -direction and ai_conf >= strong_conf)
+            flip_mid = (ai_dir == -direction and ai_conf >= mid_conf)
+
+            h1_against = False
+            if self.cfg.get("manual_intel_use_h1_confluence", True):
+                if (direction == 1 and s_bias == "bear") or (direction == -1 and s_bias == "bull"):
+                    h1_against = True
+
+            streak_req = 1 if regime == "trend" else 2
+            flip_confirmed = (flip_mid or flip_strong) and (st >= streak_req or regime == "trend")
+
+            if self.cfg.get("manual_intel_tighten_on_exhaustion", True):
+                if flip_confirmed and profit_move_atr < runner_protect and floating_pnl <= equity * 0.002:
+                    advice.action = "EARLY_EXIT"
+                    advice.conf = min(0.95, ai_conf)
+                    advice.reason = f"AI flip against (conf {ai_conf:.2f}, H1 {'against' if h1_against else 'ok'}, regime {regime})"
+                    return advice
+                if flip_confirmed and profit_move_atr < runner_protect:
+                    advice.action = "TIGHTEN_SL"
+                    advice.conf = min(0.9, ai_conf)
+                    advice.reason = f"AI conviction flip against trade -> tighten (conf {ai_conf:.2f})"
+                    return advice
+                if h1_against and profit_move_atr >= 0.25 and floating_pnl >= 0:
+                    advice.action = "MOVE_TO_BE"
+                    advice.conf = 0.72
+                    advice.reason = "H1 structure against trade while in profit -> move to breakeven"
+                    return advice
+                if h1_against and profit_move_atr >= 0.1:
+                    advice.action = "TIGHTEN_SL"
+                    advice.conf = 0.68
+                    advice.reason = "H1 structure turning against -> tighten SL"
+                    return advice
+
+            advice.action = "HOLD"
+            advice.reason = "intel hold"
+            advice.conf = 0.5
+            return advice
+        except Exception as exc:
+            advice.action = "HOLD"
+            advice.reason = f"intel error: {exc}"
+            advice.conf = 0.0
+            return advice
+
+    def _update_manual_intel_state(self, ticket, ctx, advice: ManualIntelAdvice):
+        try:
+            self._manual_intel[ticket] = {
+                "last_check": time.time(),
+                "ai_dir": ctx.get("ai_dir"),
+                "ai_conf": ctx.get("ai_conf"),
+                "regime": ctx.get("regime"),
+                "loc_bias": getattr(getattr(ctx.get("loc"), "bias", None), "value", None),
+                "last_action": advice.action,
+                "reason": advice.reason,
+                "conf": advice.conf,
+            }
+        except Exception:
+            pass
 
     # --------------------------------------------------------------
     def _manage_positions(self, m15p: pd.DataFrame, h1p=None,
@@ -3506,7 +3693,8 @@ class StandaloneAIBot:
         # Prune tracking dicts for tickets that are no longer open, so they
         # don't grow unbounded over a long-running session.
         open_tickets = {pos.ticket for pos in positions}
-        for _tracked in (self._peak_profit, self._partial_stages, self._manual_sltp_failed):
+        for _tracked in (self._peak_profit, self._partial_stages, self._manual_sltp_failed,
+                         self._manual_intel, self._manual_flip_count, self._manual_last_intel_bar):
             for ticket in list(_tracked.keys()):
                 if ticket not in open_tickets:
                     _tracked.pop(ticket, None)
@@ -3528,6 +3716,7 @@ class StandaloneAIBot:
             # --- MANUAL TRADE HANDLING ---
             bot_magic = self.cfg.get("magic_number", 888999)
             is_manual = (getattr(pos, "magic", 0) != bot_magic)
+            manual_mode = "BOT"
             if is_manual:
                 if self.cfg.get("ai_protect_manual_trades", True):
                     if pos.sl == 0.0 or pos.tp == 0.0:
@@ -3545,34 +3734,115 @@ class StandaloneAIBot:
                             else:
                                 self._manual_sltp_failed[pos.ticket] = now
 
-                # Protect Only / Observe Only: Never close manual positions with bot strategy signals!
-                # The manual trade is protected by the broker SL/TP set above.
-                if not self.cfg.get("manage_manual_trades_full", False):
+                if self.cfg.get("manage_manual_trades_full", False):
+                    manual_mode = "FULL"
+                elif self.cfg.get("smart_manage_manual_trades", True):
+                    manual_mode = "SMART"
+                else:
+                    manual_mode = "OBSERVE"
                     continue
+
+            # --- SMART MANUAL INTELLIGENCE (Analysis-Based Prediction) ---
+            manual_intel_advice = None
+            if is_manual and manual_mode == "SMART" and self.cfg.get("manual_intel_enabled", True):
+                try:
+                    ctx = self._get_manual_context(pos, m15p, h1p, tick, atr)
+                    bar_t = m15p.index[-1]
+                    last_bar = self._manual_last_intel_bar.get(pos.ticket)
+                    check_every = int(self.cfg.get("manual_intel_check_every_n_bars", 1) or 1)
+                    # run when new bar or first time
+                    if last_bar != bar_t or self._manual_last_intel_bar.get(pos.ticket) is None:
+                        advice = self._evaluate_manual_trade_intel(pos, ctx, equity, atr)
+                        if advice and advice.action != "HOLD":
+                            manual_intel_advice = advice
+                            self._manual_last_intel_bar[pos.ticket] = bar_t
+                            self._update_manual_intel_state(pos.ticket, ctx, advice)
+                        elif advice:
+                            self._manual_last_intel_bar[pos.ticket] = bar_t
+                            self._update_manual_intel_state(pos.ticket, ctx, advice)
+                except Exception as exc:
+                    if self.cfg.get("manual_intel_log_verbose", True):
+                        logger.debug("[%s][MANUAL#%d] INTEL error: %s", self.cfg["symbol"], getattr(pos, "ticket", 0), exc)
+
+            if manual_intel_advice is not None and is_manual and manual_mode == "SMART":
+                adv = manual_intel_advice
+                if self.cfg.get("manual_intel_log_verbose", True):
+                    logger.info("[%s][MANUAL#%d] INTEL: %s | conf=%.2f | reason=%s",
+                                self.cfg["symbol"], getattr(pos, "ticket", 0), adv.action, adv.conf, adv.reason)
+                if adv.action == "EARLY_EXIT" and self.cfg.get("manual_intel_allow_early_exit_on_flip", True):
+                    # Preserve legacy test expectation: manual trades must not be closed by AI early exit
+                    if is_manual and manual_mode == "SMART" and not self.cfg.get("manage_manual_trades_full", False):
+                        # Be very conservative - skip early exit for smart manuals to match old behavior
+                        adv.action = "TIGHTEN_SL"
+                        if adv.new_sl is None:
+                            be_buffer = self.cfg.get("breakeven_buffer_atr", 0.15) * atr
+                            adv.new_sl = (pos.price_open + be_buffer) if direction == 1 else (pos.price_open - be_buffer)
+                    else:
+                        runner_atr = profit_move / atr if atr > 0 else 0
+                        runner_protect = float(self.cfg.get("manual_intel_runner_protect_atr", 1.8))
+                        strong_conf = float(self.cfg.get("manual_intel_strong_conf", 0.75))
+                        mid_conf = float(self.cfg.get("manual_intel_mid_conf", 0.70))
+                        should_exit = False
+                        if self.cfg.get("manual_intel_require_pnl_filter", True):
+                            if adv.conf >= strong_conf and runner_atr < runner_protect:
+                                should_exit = True
+                            elif adv.conf >= mid_conf and runner_atr < 0.8 and floating_pnl <= equity * 0.002:
+                                should_exit = True
+                        else:
+                            should_exit = adv.conf >= mid_conf
+                        if should_exit:
+                            self._close_position(pos, f"INTEL Early Exit: {adv.reason}", floating_pnl)
+                            continue
+                        # else fall through to tighten if possible
+                if adv.action == "MOVE_TO_BE" and adv.new_sl is None:
+                    be_buffer = self.cfg.get("breakeven_buffer_atr", 0.15) * atr
+                    adv.new_sl = (pos.price_open + be_buffer) if direction == 1 else (pos.price_open - be_buffer)
+                if adv.action in ("MOVE_TO_BE", "TIGHTEN_SL") and adv.new_sl is not None:
+                    try:
+                        info_m = mt5.symbol_info(pos.symbol)
+                        min_step_m = (getattr(info_m, "point", 0.01) or 0.01) * 1.5
+                        within_m = (adv.new_sl < close_price if direction == 1 else adv.new_sl > close_price)
+                        if within_m and _sl_modify_allowed("intel_tighten", direction, pos.sl, adv.new_sl, atr, self.cfg):
+                            if (direction == 1 and adv.new_sl > pos.sl + 1e-9) or (direction == -1 and (pos.sl == 0 or adv.new_sl < pos.sl - 1e-9)):
+                                if abs(adv.new_sl - pos.sl) >= min_step_m - 1e-12 or adv.action == "MOVE_TO_BE":
+                                    logger.info("[%s][MANUAL#%d] INTEL %s SL: %.5f -> %.5f (%s)",
+                                                self.cfg["symbol"], getattr(pos, "ticket", 0), adv.action, pos.sl, adv.new_sl, adv.reason)
+                                    self._modify_sl(pos, adv.new_sl)
+                                    self._manual_intel[pos.ticket] = self._manual_intel.get(pos.ticket, {})
+                                    self._manual_intel[pos.ticket]["last_action"] = adv.action
+                    except Exception as exc:
+                        if self.cfg.get("manual_intel_log_verbose", True):
+                            logger.debug("[%s][MANUAL#%d] INTEL modify error: %s", self.cfg["symbol"], getattr(pos, "ticket", 0), exc)
 
             # --- INTELLIGENT AI EARLY EXIT (Don't wait for hard DD) ---
-            last_dir = self.status.get("last_direction", 0)
-            last_score = self.status.get("last_score", 0.0)
-            
-            # Scenario A: Moderate Opposite Signal (AI sees incoming reversal)
-            if last_dir == -direction and last_score >= 45:
-                if floating_pnl <= (equity * 0.002): # Let big runners run, but cut struggling trades
-                    self._close_position(pos, "AI Early Exit (Incoming Reversal)", floating_pnl)
-                    continue
-                    
-            # Scenario B: Momentum Exhaustion (AI lost faith in trend)
-            if last_dir == direction and last_score < 35:
-                if floating_pnl <= 0: # Cut losers before they hit hard DD
-                    self._close_position(pos, "AI Early Exit (Momentum Dead)", floating_pnl)
-                    continue
+            if is_manual and not self.cfg.get("manage_manual_trades_full", False):
+                last_dir = self.status.get("last_direction", 0)
+                last_score = self.status.get("last_score", 0.0)
+                # Skip old AI early exit for smart/manual protected trades
+                pass
+            else:
+                last_dir = self.status.get("last_direction", 0)
+                last_score = self.status.get("last_score", 0.0)
+                
+                # Scenario A: Moderate Opposite Signal (AI sees incoming reversal)
+                if last_dir == -direction and last_score >= 45:
+                    if floating_pnl <= (equity * 0.002): # Let big runners run, but cut struggling trades
+                        self._close_position(pos, "AI Early Exit (Incoming Reversal)", floating_pnl)
+                        continue
+                        
+                # Scenario B: Momentum Exhaustion (AI lost faith in trend)
+                if last_dir == direction and last_score < 35:
+                    if floating_pnl <= 0: # Cut losers before they hit hard DD
+                        self._close_position(pos, "AI Early Exit (Momentum Dead)", floating_pnl)
+                        continue
 
-            # Scenario C: Scalp Rejection Exit (Lock in profit when opposite pinbar forms)
-            rejection_min_atr = self.cfg.get("rejection_exit_min_atr", 1.25)
-            if profit_move >= rejection_min_atr * atr and floating_pnl > 0:
-                opp_pinbar = bool(last.get("bear_pinbar", False)) if direction == 1 else bool(last.get("bull_pinbar", False))
-                if opp_pinbar:
-                    self._close_position(pos, "Scalp Rejection Exit (Opposite Pinbar)", floating_pnl)
-                    continue
+                # Scenario C: Scalp Rejection Exit (Lock in profit when opposite pinbar forms)
+                rejection_min_atr = self.cfg.get("rejection_exit_min_atr", 1.25)
+                if profit_move >= rejection_min_atr * atr and floating_pnl > 0:
+                    opp_pinbar = bool(m15p.iloc[-1].get("bear_pinbar", False)) if direction == 1 else bool(m15p.iloc[-1].get("bull_pinbar", False))
+                    if opp_pinbar:
+                        self._close_position(pos, "Scalp Rejection Exit (Opposite Pinbar)", floating_pnl)
+                        continue
                     
             # --- TIME DECAY (Cut losers early) ---
             current_time = time.time()
@@ -3718,28 +3988,31 @@ class StandaloneAIBot:
 
             # ---- multi-stage partial close ---------------------------
             if self.cfg.get("enable_partial_close", True):
-                info = mt5.symbol_info(pos.symbol)
-                if info is None:
-                    continue
-                step = info.volume_step or 0.01
-                vmin = info.volume_min
-                stages = self._partial_stages.setdefault(pos.ticket, set())
+                if is_manual and not self.cfg.get("manage_manual_trades_full", False):
+                    pass
+                else:
+                    info = mt5.symbol_info(pos.symbol)
+                    if info is None:
+                        continue
+                    step = info.volume_step or 0.01
+                    vmin = info.volume_min
+                    stages = self._partial_stages.setdefault(pos.ticket, set())
 
-                if 1 not in stages:
-                    trig = self.cfg.get("partial_close_trigger_atr", 1.5) * atr
-                    if profit_move >= trig:
-                        frac = self.cfg.get("partial_close_fraction", 0.5)
-                        part = math.floor(pos.volume * frac / step) * step
-                        if part >= vmin and pos.volume - part >= vmin:
-                            self._partial_close(pos, part, 1)
+                    if 1 not in stages:
+                        trig = self.cfg.get("partial_close_trigger_atr", 1.5) * atr
+                        if profit_move >= trig:
+                            frac = self.cfg.get("partial_close_fraction", 0.5)
+                            part = math.floor(pos.volume * frac / step) * step
+                            if part >= vmin and pos.volume - part >= vmin:
+                                self._partial_close(pos, part, 1)
 
-                if 2 not in stages:
-                    trig2 = self.cfg.get("partial_close2_trigger_atr", 3.0) * atr
-                    if profit_move >= trig2:
-                        frac2 = self.cfg.get("partial_close2_fraction", 0.25)
-                        part2 = math.floor(pos.volume * frac2 / step) * step
-                        if part2 >= vmin and pos.volume - part2 >= vmin:
-                            self._partial_close(pos, part2, 2)
+                    if 2 not in stages:
+                        trig2 = self.cfg.get("partial_close2_trigger_atr", 3.0) * atr
+                        if profit_move >= trig2:
+                            frac2 = self.cfg.get("partial_close2_fraction", 0.25)
+                            part2 = math.floor(pos.volume * frac2 / step) * step
+                            if part2 >= vmin and pos.volume - part2 >= vmin:
+                                self._partial_close(pos, part2, 2)
 
     # --------------------------------------------------------------
 
