@@ -159,7 +159,7 @@ LOG_LEVEL=INFO              # DEBUG | INFO | WARNING | ERROR
 LOG_DIR=logs                # created automatically
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
-LLM_PROVIDER=none           # none | openai | anthropic | ollama
+LLM_PROVIDER=none           # none | embedded | local_endpoint | openai_compatible
 ```
 
 Logs are **UTC**, rotated at 10 MB × 5, with credentials redacted.

@@ -339,55 +339,11 @@ class LocalEndpointProvider(LLMProvider):
             return self.fallback.generate(prompt, system_prompt, json_mode=json_mode)
 
 
-class OllamaProvider(LLMProvider):
-    """
-    Connects to native Ollama HTTP API (http://localhost:11434).
-    """
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:11434",
-        model: str = "llama3.2:3b",
-        timeout: float = 30.0,
-        fallback_provider: Optional[LLMProvider] = None,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.model = model or "llama3.2:3b"
-        self.timeout = timeout
-        self.fallback = fallback_provider or EmbeddedReasoningProvider()
-
-    def generate(self, prompt: str, system_prompt: str, json_mode: bool = False) -> str:
-        endpoint = f"{self.base_url}/api/generate"
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "system": system_prompt,
-            "prompt": prompt,
-            "stream": False,
-        }
-        if json_mode:
-            payload["format"] = "json"
-
-        try:
-            resp = requests.post(endpoint, json=payload, timeout=self.timeout)
-            resp.raise_for_status()
-            data = resp.json()
-            content = data.get("response", "")
-            if json_mode:
-                return _clean_json_markdown(content)
-            return content
-        except Exception as exc:
-            logger.warning(
-                "OllamaProvider failed at %s (%s). Falling back to embedded AI: %s",
-                endpoint, exc, exc
-            )
-            return self.fallback.generate(prompt, system_prompt, json_mode=json_mode)
-
-
 class OpenAICompatibleProvider(LLMProvider):
     """
     Connects to any OpenAI-compatible HTTP API:
     - Cloud: OpenAI, DeepSeek, Groq, Mistral, Together, OpenRouter
-    - Local: LM Studio, vLLM, LocalAI, Ollama (/v1)
+    - Local: LM Studio, vLLM, LocalAI
     """
 
     def __init__(
@@ -455,8 +411,9 @@ def get_llm_provider(
 ) -> LLMProvider:
     """Factory helper to obtain the configured LLM provider."""
     p = str(provider_name).strip().lower()
-    # Force embedded provider - built our own strong predictor, don't use Ollama
-    if p in ("embedded", "builtin", "internal", "none", "ollama"):
+    # Embedded is the default and the fallback for any unknown name. Ollama was
+    # removed: "ollama" now resolves here like every other unrecognised value.
+    if p in ("embedded", "builtin", "internal", "none"):
         return EmbeddedReasoningProvider()
     if p in ("local_endpoint", "local", "lmstudio", "vllm"):
         # Still use embedded as fallback but try local if explicitly requested

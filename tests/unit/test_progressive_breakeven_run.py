@@ -56,9 +56,10 @@ def test_breakeven_config_defaults(run_module):
     """Verify progressive breakeven defaults in CONFIG."""
     cfg = run_module.CONFIG
     assert cfg["enable_breakeven"] is True
-    assert cfg["breakeven_trigger_atr"] == 0.4
+    # Defaults are the money_printer profile, which is now the default profile.
+    assert cfg["breakeven_trigger_atr"] == 0.3
     assert cfg["breakeven_buffer_atr"] == 0.15
-    assert cfg["profit_lock_ratio"] == 0.50
+    assert cfg["profit_lock_ratio"] == 0.55
 
 
 def test_breakeven_config_env_overrides(tmp_path, monkeypatch):
@@ -185,12 +186,14 @@ def test_trading_profile_money_printer(tmp_path, monkeypatch):
     mod = importlib.import_module("run")
 
     cfg = mod.CONFIG
-    assert cfg["min_signal_score"] == 45.0
+    assert cfg["min_signal_score"] == 40.0
     assert cfg["adx_min"] == 15.0
     assert cfg["adx_strong"] == 25.0
-    assert cfg["risk_per_trade"] == 0.015
+    assert cfg["risk_per_trade"] == 0.02
+    assert cfg["max_risk_scale"] == 2.0
+    assert cfg["max_margin_usage"] == 0.60
     assert cfg["sl_atr_mult"] == 1.8
-    assert cfg["tp_rr_ratio"] == 2.0
+    assert cfg["tp_rr_ratio"] == 1.5
     assert cfg["breakeven_trigger_atr"] == 0.3
     assert cfg["profit_lock_ratio"] == 0.55
     assert cfg["partial_close_trigger_atr"] == 0.9
@@ -204,8 +207,12 @@ def test_ai_confidence_lot_sizing(run_module):
     cfg = run_module.CONFIG.copy()
     cfg["risk_per_trade"] = 0.01
     cfg["dynamic_risk"] = False
+    # Pin the tiers so the mid-band case (0.65) is neither upsized nor downsized,
+    # independent of which trading profile is the default.
+    cfg["ai_size_high_conf"] = 0.70
+    cfg["ai_size_low_conf"] = 0.60
 
-    base = run_module._size_lot(
+    base =run_module._size_lot(
         account_equity=10_000.0,
         sl_dist_price=10.0,
         tick_size=0.01,
@@ -410,8 +417,55 @@ def test_profile_default_still_applies_when_env_is_absent(tmp_path, monkeypatch)
 
     assert mod.CONFIG["adx_min"] == 15.0
     assert mod.CONFIG["partial_close_trigger_atr"] == 0.9
-    assert mod.CONFIG["risk_per_trade"] == 0.015
+    assert mod.CONFIG["risk_per_trade"] == 0.02
     assert mod.CONFIG["max_open_pos"] == 5
+    sys.modules.pop("run", None)
+
+
+def test_money_printer_is_the_default_profile(tmp_path, monkeypatch):
+    """With TRADING_PROFILE unset the bot runs the aggressive profile, not balanced."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TRADING_PROFILE", raising=False)
+    monkeypatch.delenv("AGGRESSIVE_MODE", raising=False)
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+
+    assert mod._PROFILE == "money_printer"
+    assert mod._IS_AGGRESSIVE is True
+    assert mod.CONFIG["risk_per_trade"] == 0.02
+    sys.modules.pop("run", None)
+
+
+def test_balanced_profile_is_still_selectable(tmp_path, monkeypatch):
+    """TRADING_PROFILE=balanced keeps the conservative values for anyone who wants them."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TRADING_PROFILE", "balanced")
+    monkeypatch.delenv("AGGRESSIVE_MODE", raising=False)
+    for key in ("RISK_PER_TRADE", "TP_RR_RATIO", "MIN_SIGNAL_SCORE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+
+    assert mod._IS_AGGRESSIVE is False
+    assert mod.CONFIG["risk_per_trade"] == 0.01
+    assert mod.CONFIG["tp_rr_ratio"] == 2.5
+    assert mod.CONFIG["min_signal_score"] == 50.0
+    sys.modules.pop("run", None)
+
+
+def test_ollama_keys_are_gone_from_run_config(tmp_path, monkeypatch):
+    """Ollama was removed; the live config must not carry its keys any more."""
+    _install_mt5_stub()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
+    sys.modules.pop("run", None)
+    mod = importlib.import_module("run")
+
+    assert not [k for k in mod.CONFIG if "ollama" in k.lower()]
     sys.modules.pop("run", None)
 
 

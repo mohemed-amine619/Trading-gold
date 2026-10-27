@@ -160,7 +160,7 @@ DATABASE_URL=sqlite:///./trading.db
 # LLM Provider  (leave LLM_PROVIDER=none to disable AI reasoning)
 # ──────────────────────────────────────────────────────────────────
 LLM_PROVIDER=none
-# Options: openai | anthropic | ollama | none
+# Options: embedded | local_endpoint | openai_compatible | none (Ollama removed)
 
 # OpenAI
 OPENAI_API_KEY=sk-proj-...
@@ -169,10 +169,6 @@ OPENAI_MODEL=gpt-4o
 # Anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
-
-# Local Ollama (no API key required)
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
 
 # ──────────────────────────────────────────────────────────────────
 # Notification Channels
@@ -488,7 +484,6 @@ If `LLM_PROVIDER` is not `none`, the system performs a health check on startup a
 |---|---|---|
 | `openai` | `GET https://api.openai.com/v1/models` | 10 s |
 | `anthropic` | `GET https://api.anthropic.com/v1/models` | 10 s |
-| `ollama` | `GET {OLLAMA_BASE_URL}/api/tags` | 5 s |
 
 ### 6.2 Fallback Activation
 

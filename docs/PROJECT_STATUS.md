@@ -271,7 +271,7 @@ liquidity magnets, or dynamic trade adaptation.
 
 | Module | Responsibility |
 |---|---|
-| `core/ai/provider.py` | Self-contained `EmbeddedReasoningProvider` (runs locally in pure Python with zero external model dependencies), plus `LocalEndpointProvider` (OpenAI-compatible) and `OllamaProvider`. |
+| `core/ai/provider.py` | Self-contained `EmbeddedReasoningProvider` (runs locally in pure Python with zero external model dependencies), plus `LocalEndpointProvider` (OpenAI-compatible). Ollama was removed; unknown provider names resolve to the embedded engine. |
 | `core/ai/dynamic_sltp.py` | `DynamicSLTPReasoner`: dynamic entry SL/TP (anchored to structural invalidation swings and liquidity pool magnets) + dynamic position ratcheting. |
 | `SLTPSafetyGuard` | Mathematical safety invariants: **Never Loosen SL** (one-way ratchet), ATR floor/ceiling bounds, broker stops level compliance, half-up tick grid price snapping. |
 | `run.py` & `core/settings.py` | Defensively wired into live bot order submission (`_send_order`) and continuous position management (`_manage_positions`). |

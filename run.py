@@ -217,7 +217,7 @@ if _TRADING_MODE == "live":
 # ---------------------------------------------------------------------------
 # Trading Profile resolution (balanced vs high-performance money_printer)
 # ---------------------------------------------------------------------------
-_PROFILE = os.getenv("TRADING_PROFILE", "balanced").strip().lower()
+_PROFILE = os.getenv("TRADING_PROFILE", "money_printer").strip().lower()
 _IS_SCALPER = _PROFILE in ("scalper", "ultra_scalper")
 _IS_AGGRESSIVE = (
     _IS_SCALPER
@@ -237,10 +237,11 @@ if _IS_AGGRESSIVE:
     else:
         print("  TRADING_PROFILE=money_printer (High-Performance Scalper / Compounding)")
         print("  - Multi-Symbol scanning active (Gold + Major FX pairs)")
-        print("  - High-frequency responsive entries (Confluence threshold: 45)")
-        print("  - Compound R:R risk structure: 1.8 ATR SL / 2.0 RR TP")
+        print("  - High-frequency responsive entries (Confluence threshold: 40)")
+        print("  - Compound R:R risk structure: 1.8 ATR SL / 1.5 RR TP (higher hit rate)")
+        print("  - Risk 2.0% per trade, up to 2.0x dynamic scale, 60% margin cap")
         print("  - Early partial TP @ 0.9 ATR + Progressive Breakeven ratchet @ 55%")
-        print("  - Dynamic AI lot scaling: +50% on high confidence setups")
+        print("  - Dynamic AI lot scaling: +100% on high confidence setups")
     print("=" * 70)
 
 def _profile_cfg(env_var: str, balanced_val, aggressive_val, val_type=float, scalper_val=None):
@@ -411,11 +412,11 @@ CONFIG = {
     # Expected-edge floor for AI-driven position upsizing, as a probability
     # margin over a coin flip. Size scales with edge, not with raw confidence.
     "ai_min_edge_for_size_up": float(os.getenv("AI_MIN_EDGE_FOR_SIZE_UP", "0.10")),
-    "ai_size_high_conf": _profile_cfg("AI_SIZE_HIGH_CONF", 0.85, 0.70),
-    "ai_size_low_conf":  _profile_cfg("AI_SIZE_LOW_CONF",  0.60, 0.60),
+    "ai_size_high_conf": _profile_cfg("AI_SIZE_HIGH_CONF", 0.85, 0.60),
+    "ai_size_low_conf":  _profile_cfg("AI_SIZE_LOW_CONF",  0.60, 0.55),
     
     # --- strategy scoring ---
-    "min_signal_score": _profile_cfg("MIN_SIGNAL_SCORE", 50.0, 45.0),
+    "min_signal_score": _profile_cfg("MIN_SIGNAL_SCORE", 50.0, 40.0),
     "adx_min": _profile_cfg("ADX_MIN", 18.0, 15.0),
     "adx_strong": _profile_cfg("ADX_STRONG", 30.0, 25.0),
     "use_session_filter": os.getenv("USE_SESSION_FILTER", "false").lower() in ("true", "1", "yes") if os.getenv("USE_SESSION_FILTER") is not None else False,
@@ -450,9 +451,9 @@ CONFIG = {
     "ny_start_utc":     12, "ny_end_utc":     21,
     
     # --- risk & money management ---
-    "risk_per_trade":   _profile_cfg("RISK_PER_TRADE", 0.01, 0.015),
+    "risk_per_trade":   _profile_cfg("RISK_PER_TRADE", 0.01, 0.02),
     "sl_atr_mult":      _profile_cfg("SL_ATR_MULT", 2.5, 1.8, scalper_val=1.5),
-    "tp_rr_ratio":      _profile_cfg("TP_RR_RATIO", 2.5, 2.0, scalper_val=2.0),
+    "tp_rr_ratio":      _profile_cfg("TP_RR_RATIO", 2.5, 1.5, scalper_val=2.0),
     
     # --- dynamic trade management ("never lose" once in profit) ---
     "trail_atr_mult":          _profile_cfg("TRAIL_ATR_MULT", 1.5, 1.2, scalper_val=1.0),
@@ -463,8 +464,8 @@ CONFIG = {
     "trail_tighten2_mult":     _profile_cfg("TRAIL_TIGHTEN2_MULT", 0.6, 0.5),
     "dynamic_risk":            True,
     "min_risk_scale":          0.5,
-    "max_risk_scale":          _profile_cfg("MAX_RISK_SCALE", 1.2, 1.5),
-    "max_margin_usage":        _profile_cfg("MAX_MARGIN_USAGE", 0.30, 0.45),
+    "max_risk_scale":          _profile_cfg("MAX_RISK_SCALE", 1.2, 2.0),
+    "max_margin_usage":        _profile_cfg("MAX_MARGIN_USAGE", 0.30, 0.60),
     "max_open_pos":            _profile_cfg("MAX_OPEN_POS", 3, 5, val_type=int),
     # One idea, one position. max_open_pos is a stacking ceiling; this is the
     # per-symbol cap that stops the same signal being re-fired on consecutive
@@ -495,8 +496,6 @@ CONFIG = {
     "llm_provider":            os.getenv("LLM_PROVIDER", "embedded"),
     "local_llm_url":           os.getenv("LOCAL_LLM_URL", "http://localhost:1234/v1"),
     "local_llm_model":         os.getenv("LOCAL_LLM_MODEL", "local-model"),
-    "ollama_base_url":         os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-    "ollama_model":            os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
     "local_llm_api_key":       os.getenv("LOCAL_LLM_API_KEY", "") or os.getenv("LLM_API_KEY", ""),
     "local_llm_timeout":       float(os.getenv("LOCAL_LLM_TIMEOUT", "3.0")),
     "scalp_micro_trailing":    os.getenv("SCALP_MICRO_TRAILING", "true").lower() in ("1", "true", "yes"),
@@ -524,8 +523,8 @@ CONFIG = {
     # --- instrument-specific thresholds --------------------------------
     # Gold deserves stricter gates than FX; the branches below only apply
     # when the symbol looks like gold.
-    "gold_min_signal_score":   _profile_cfg("GOLD_MIN_SIGNAL_SCORE", 58.0, 58.0),
-    "gold_min_ai_conf":        _profile_cfg("GOLD_MIN_AI_CONF", 0.55, 0.55),
+    "gold_min_signal_score":   _profile_cfg("GOLD_MIN_SIGNAL_SCORE", 58.0, 50.0),
+    "gold_min_ai_conf":        _profile_cfg("GOLD_MIN_AI_CONF", 0.55, 0.50),
 
     # --- structure-aware management ------------------------------------
     "structure_trailing":      os.getenv("STRUCTURE_TRAILING", "true").lower() in ("1", "true", "yes"),
@@ -2100,7 +2099,7 @@ def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
     # driven by the model's EDGE over a coin flip, not by how sure the model
     # sounds: a model that is confidently wrong is the expensive case, and an
     # unvalidated confidence must never be allowed to upsize a position.
-    high_tier = cfg.get("ai_size_high_conf", 0.85 if _IS_AGGRESSIVE else 0.70)
+    high_tier = cfg.get("ai_size_high_conf", 0.85 if _IS_AGGRESSIVE else 0.60)
     low_tier  = cfg.get("ai_size_low_conf", 0.60)
     edge      = ai_conf - 0.5
     min_edge  = cfg.get("ai_min_edge_for_size_up", 0.10)
@@ -2254,12 +2253,8 @@ class StandaloneAIBot:
         if self._sltp_reasoner is None and _DYNAMIC_SLTP_AVAILABLE:
             try:
                 p_name = self.cfg.get("llm_provider", "embedded")
-                if p_name == "ollama":
-                    b_url = self.cfg.get("ollama_base_url", "http://localhost:11434")
-                    model_name = self.cfg.get("ollama_model", "llama3.2:3b")
-                else:
-                    b_url = self.cfg.get("local_llm_url", "http://localhost:1234/v1")
-                    model_name = self.cfg.get("local_llm_model", "")
+                b_url = self.cfg.get("local_llm_url", "http://localhost:1234/v1")
+                model_name = self.cfg.get("local_llm_model", "")
                 provider = _get_llm_provider(
                     provider_name=p_name,
                     base_url=b_url,
@@ -2270,7 +2265,7 @@ class StandaloneAIBot:
                 self._sltp_reasoner = _DynamicSLTPReasoner(provider=provider, config=self.cfg)
                 logger.info("[%s] Dynamic AI SL/TP Reasoner initialized (provider=%s, url=%s)",
                             self.cfg.get("symbol", ""), p_name, b_url)
-                if p_name in ("local_endpoint", "local", "lmstudio", "vllm", "ollama", "openai_compatible"):
+                if p_name in ("local_endpoint", "local", "lmstudio", "vllm", "openai_compatible"):
                     try:
                         provider.generate("ping", "Reply with {\"status\":\"ok\"}", json_mode=True)
                         logger.info("[%s] 🧠 Local LLM connected successfully at %s", self.cfg.get("symbol", ""), b_url)
@@ -4119,8 +4114,6 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             "llm_provider": str(cfg.get("llm_provider", "embedded")),
             "local_llm_url": str(cfg.get("local_llm_url", "http://localhost:1234/v1")),
             "local_llm_model": str(cfg.get("local_llm_model", "local-model")),
-            "ollama_base_url": str(cfg.get("ollama_base_url", "http://localhost:11434")),
-            "ollama_model": str(cfg.get("ollama_model", "llama3.2:3b")),
             "default_manual_policy": cfg.get("default_manual_policy", "observe_only"),
             "ai_enabled": cfg.get("ai_enabled", True),
             "ai_confidence_threshold": cfg.get("ai_confidence_threshold", 0.55),
@@ -4234,22 +4227,6 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
                 b.cfg["local_llm_model"] = llm_m
                 b._sltp_reasoner = None
             env_updates["LOCAL_LLM_MODEL"] = llm_m
-
-        if "ollama_base_url" in new_cfg and new_cfg["ollama_base_url"]:
-            ollama_u = str(new_cfg["ollama_base_url"]).strip()
-            CONFIG["ollama_base_url"] = ollama_u
-            for b in bots:
-                b.cfg["ollama_base_url"] = ollama_u
-                b._sltp_reasoner = None
-            env_updates["OLLAMA_BASE_URL"] = ollama_u
-
-        if "ollama_model" in new_cfg and new_cfg["ollama_model"]:
-            ollama_m = str(new_cfg["ollama_model"]).strip()
-            CONFIG["ollama_model"] = ollama_m
-            for b in bots:
-                b.cfg["ollama_model"] = ollama_m
-                b._sltp_reasoner = None
-            env_updates["OLLAMA_MODEL"] = ollama_m
 
         # 3. Max daily DD
         raw_dd = new_cfg.get("max_daily_drawdown_pct") if "max_daily_drawdown_pct" in new_cfg else new_cfg.get("max_daily_dd")
@@ -4695,12 +4672,8 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             body = {}
         cfg = bots[0].cfg if bots else CONFIG
         provider_name = body.get("provider") or cfg.get("llm_provider", "embedded")
-        if provider_name == "ollama":
-            base_url = body.get("url") or cfg.get("ollama_base_url", "http://localhost:11434")
-            model = body.get("model") or cfg.get("ollama_model", "llama3.2:3b")
-        else:
-            base_url = body.get("url") or cfg.get("local_llm_url", "http://localhost:1234/v1")
-            model = body.get("model") or cfg.get("local_llm_model", "local-model")
+        base_url = body.get("url") or cfg.get("local_llm_url", "http://localhost:1234/v1")
+        model = body.get("model") or cfg.get("local_llm_model", "local-model")
         api_key = cfg.get("local_llm_api_key", "")
 
         start = time.time()

@@ -24,7 +24,6 @@ class TradingMode(str, Enum):
 class LLMProvider(str, Enum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
-    OLLAMA = "ollama"
     LOCAL_ENDPOINT = "local_endpoint"
     EMBEDDED = "embedded"
     NONE = "none"
@@ -171,8 +170,6 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4o")
     anthropic_api_key: str = Field(default="")
     anthropic_model: str = Field(default="claude-3-5-sonnet-20241022")
-    ollama_base_url: str = Field(default="http://localhost:11434")
-    ollama_model: str = Field(default="llama3.2:3b")
     local_llm_url: str = Field(default="http://localhost:1234/v1")
     local_llm_model: str = Field(default="local-model")
     local_llm_api_key: str = Field(default="lm-studio")
@@ -507,8 +504,6 @@ class Settings(BaseSettings):
             "local_llm_model": self.local_llm_model,
             "local_llm_api_key": self.local_llm_api_key,
             "local_llm_timeout": self.local_llm_timeout,
-            "ollama_base_url": self.ollama_base_url,
-            "ollama_model": self.ollama_model,
             "dynamic_sltp_enabled": self.dynamic_sltp_enabled,
             "scalp_micro_trailing": self.scalp_micro_trailing,
         }

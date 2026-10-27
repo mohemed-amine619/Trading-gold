@@ -690,6 +690,9 @@ def test_size_downsizes_weak_confidence(run_module):
 def test_edge_gate_defaults_to_half_a_confidence_point(run_module):
     """Default edge requirement is 0.10, i.e. confidence must reach 0.60."""
     cfg = dict(run_module.CONFIG)
+    # Pin the balanced 0.60 downsize tier this assertion was written against;
+    # the money_printer default downsizes below 0.55 instead.
+    cfg["ai_size_low_conf"] = 0.60
     assert cfg["ai_min_edge_for_size_up"] == pytest.approx(0.10)
     baseline = _lot(run_module, cfg, 0.0)
     # 0.59 confidence -> edge 0.09, just under the floor.

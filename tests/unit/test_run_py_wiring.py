@@ -310,7 +310,11 @@ class TestSendOrderStructuralStop:
 
     def test_long_stop_is_below_entry(self, run_and_stub, caplog):
         run_module, stub = run_and_stub
-        bot = build_bot(run_module, location_stop=True)
+        # Pin the balanced stop settings these expected prices were derived from.
+        # The money_printer default uses a 1.8-ATR stop and a 2.5-ATR structural
+        # ceiling, which rejects this structure as too distant.
+        bot = build_bot(run_module, location_stop=True, sl_atr_mult=2.5,
+                        location_stop_max_atr=3.0)
         frame = run_module._prepare(uptrend_frame(), bot.cfg)
         stub.price = 202.0
 
@@ -508,8 +512,11 @@ class TestAbstainedAiSkipsConfidenceGate:
     """
 
     def _bot(self, run_module, ai):
+        # Pin the balanced AI threshold (0.55) that these assertions were written
+        # against, rather than inheriting whichever trading profile is the default.
         bot = build_bot(run_module, location_gate=False, use_session_filter=False,
-                        min_signal_score=0, adx_min=0, fib_enabled=False)
+                        min_signal_score=0, adx_min=0, fib_enabled=False,
+                        ai_confidence_threshold=0.55)
         bot.ai = ai
         return bot
 
