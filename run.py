@@ -127,6 +127,27 @@ except Exception as _loc_import_error:  # pragma: no cover - defensive
         f"falling back to ATR-only stops and no location gate."
     )
 
+# Phase-1 intelligence helpers (core/ai/validation, core/ai/labels,
+# core/risk/streak). Same contract as the location layer: if they fail to
+# import, the bot must keep trading exactly as it did before. The fallbacks
+# below reproduce the old behaviour, so a broken import can only ever undo
+# the improvement, never change what the bot does on its own.
+try:
+    from core.ai.validation import purged_split as _purged_split
+    from core.ai.labels import first_barrier_labels as _first_barrier_labels
+    from core.risk.streak import streak_multiplier as _streak_multiplier
+    _PHASE1_AVAILABLE = True
+except Exception as _phase1_import_error:  # pragma: no cover - defensive
+    _PHASE1_AVAILABLE = False
+    _first_barrier_labels = None
+    _streak_multiplier = None
+    # Legacy split: no gap, validation is the tail of the window.
+    _purged_split = lambda n, n_val, gap: (slice(0, n - n_val), slice(n - n_val, n))
+    print(
+        f"WARNING: phase-1 AI/risk helpers unavailable ({_phase1_import_error!r}); "
+        f"using legacy label, split and sizing."
+    )
+
 try:
     from core.ai.dynamic_sltp import DynamicSLTPReasoner as _DynamicSLTPReasoner
     from core.ai.provider import get_llm_provider as _get_llm_provider
@@ -418,6 +439,14 @@ CONFIG = {
     # probabilities are systematically overconfident; calibrating them is what
     # makes "confidence 0.62" mean something before it is used to size a trade.
     "ai_calibrate":            os.getenv("AI_CALIBRATE", "true").lower() in ("true", "1", "yes"),
+    # Training label. "close" is the legacy best-close-in-5-bars label. "barrier"
+    # is first-touch on ±(sl_atr_mult × ATR) within ai_label_horizon bars, using
+    # wicks. Opt-in until it has been measured on this symbol: switching it
+    # invalidates the saved model, and the promotion gate re-judges from scratch.
+    "ai_label_mode":           os.getenv("AI_LABEL_MODE", "close").strip().lower(),
+    "ai_label_horizon":        int(os.getenv("AI_LABEL_HORIZON", "12")),
+    # Losing-streak size reduction (anti-martingale). Off by default.
+    "streak_sizing":           os.getenv("STREAK_SIZING", "false").lower() in ("true", "1", "yes"),
     # Expected-edge floor for AI-driven position upsizing, as a probability
     # margin over a coin flip. Size scales with edge, not with raw confidence.
     "ai_min_edge_for_size_up": float(os.getenv("AI_MIN_EDGE_FOR_SIZE_UP", "0.10")),
@@ -1315,6 +1344,52 @@ class AIEnsemble:
             items = list(self._feature_importance.items())
         return items[:n]
 
+    def _label_mode(self) -> str:
+        """``"close"`` (legacy) or ``"barrier"``. Anything unrecognised is legacy."""
+        mode = str(getattr(self.config, "AI_LABEL_MODE", "close")).strip().lower()
+        if mode == "barrier" and _first_barrier_labels is not None:
+            return "barrier"
+        return "close"
+
+    def _label_horizon(self) -> int:
+        """Bars a label looks forward. The close label is fixed at 5 bars; the
+        barrier label uses its own horizon. The same number sizes the purge gap
+        between training and validation, because that gap must cover the window
+        a label can see into."""
+        if self._label_mode() == "barrier":
+            return max(1, int(getattr(self.config, "AI_LABEL_HORIZON", 12)))
+        return 5
+
+    def _label_signature(self) -> str:
+        """Identifies the label definition a model was trained on."""
+        return f"{self._label_mode()}:{self._label_horizon()}"
+
+    def _close_label(self, cl, atr):
+        """Legacy label: 1 if the best close in the next 5 bars is at least
+        0.4 ATR above the current close, 0 if the worst is at least 0.4 ATR
+        below. Bars where both hold are dropped as chop."""
+        threshold = 0.40  # ATR multiples
+
+        # Best & worst close over next 5 bars (forward-looking horizon allowing correction absorption)
+        fwd_max = (cl.shift(-1).combine(cl.shift(-2), max)
+                               .combine(cl.shift(-3), max)
+                               .combine(cl.shift(-4), max)
+                               .combine(cl.shift(-5), max))
+        fwd_min = (cl.shift(-1).combine(cl.shift(-2), min)
+                               .combine(cl.shift(-3), min)
+                               .combine(cl.shift(-4), min)
+                               .combine(cl.shift(-5), min))
+
+        move_up   = (fwd_max - cl) / (atr + _EP)
+        move_down = (cl - fwd_min) / (atr + _EP)
+
+        target = pd.Series(float("nan"), index=cl.index)
+        target[move_up   >= threshold] = 1.0
+        target[move_down >= threshold] = 0.0
+        # Conflicted bars (both sides move ≥ threshold) → drop (chop)
+        target[(move_up >= threshold) & (move_down >= threshold)] = float("nan")
+        return target
+
     def _build_xy(self, df):
         """Build feature matrix X and label vector y.
 
@@ -1333,29 +1408,16 @@ class AIEnsemble:
         df = build_features(df)
         cl  = df["close"]
         atr = df.get("atr", pd.Series(0.0, index=df.index))
-        threshold = 0.40  # ATR multiples — tune via ATR_LABEL_MULT env var if needed
-
-        # Best & worst close over next 5 bars (forward-looking horizon allowing correction absorption)
-        fwd_max = (cl.shift(-1).combine(cl.shift(-2), max)
-                               .combine(cl.shift(-3), max)
-                               .combine(cl.shift(-4), max)
-                               .combine(cl.shift(-5), max))
-        fwd_min = (cl.shift(-1).combine(cl.shift(-2), min)
-                               .combine(cl.shift(-3), min)
-                               .combine(cl.shift(-4), min)
-                               .combine(cl.shift(-5), min))
-
-        move_up   = (fwd_max - cl) / (atr + _EP)
-        move_down = (cl - fwd_min) / (atr + _EP)
-
-        target = pd.Series(float("nan"), index=df.index)
-        target[move_up   >= threshold] = 1.0
-        target[move_down >= threshold] = 0.0
-        # Conflicted bars (both sides move ≥ threshold) → drop (chop)
-        target[(move_up >= threshold) & (move_down >= threshold)] = float("nan")
-
-        df["_target"] = target
-        df = df.iloc[:-5].copy()   # drop last 5 rows (no forward data)
+        horizon = self._label_horizon()
+        if self._label_mode() == "barrier":
+            # First-touch on ±(stop distance). Uses wicks, so the label sees the
+            # same excursions a stop would. See core/ai/labels.py.
+            df["_target"] = _first_barrier_labels(
+                df["high"].values, df["low"].values, cl.values, atr.values,
+                float(self.config.AI_SL_ATR_MULT), horizon)
+        else:
+            df["_target"] = self._close_label(cl, atr)
+        df = df.iloc[:-horizon].copy()   # drop last rows: no forward data
         avail = [c for c in FEATURE_COLS if c in df.columns]
         df_clean = df[avail + ["_target"]].dropna()
         if len(df_clean) < _MIN_TRAIN:
@@ -1393,10 +1455,15 @@ class AIEnsemble:
         # --- time-ordered train / validation split -------------------------
         val_frac = min(max(float(self.config.AI_VALIDATION_FRACTION), 0.0), 0.5)
         n_val = int(len(X) * val_frac)
+        gap = self._label_horizon()
         y_va = None
-        if n_val >= _MIN_VALIDATION and (len(X) - n_val) >= _MIN_TRAIN:
-            X_tr, y_tr = X[:-n_val], y[:-n_val]
-            X_va, y_va = X[-n_val:], y[-n_val:]
+        if n_val >= _MIN_VALIDATION and (len(X) - n_val - gap) >= _MIN_TRAIN:
+            # Purged split: the last `gap` training rows have labels that look
+            # into the validation window, so they are dropped. Without this the
+            # out-of-sample score is optimistic. See core/ai/validation.py.
+            tr, va = _purged_split(len(X), n_val, gap)
+            X_tr, y_tr = X[tr], y[tr]
+            X_va, y_va = X[va], y[va]
         else:
             # Window too small to validate honestly. Still train, but record
             # that there is no measured edge rather than implying one.
@@ -1613,6 +1680,7 @@ class AIEnsemble:
                 "oos_edge": self._last_oos_edge,
                 "n_trains": self._n_trains,
                 "n_promotions": self._n_promotions,
+                "label_signature": self._label_signature(),
             }
         try:
             parent = os.path.dirname(os.path.abspath(path))
@@ -1648,6 +1716,16 @@ class AIEnsemble:
                     self.symbol, payload.get("version"), self.MODEL_FORMAT_VERSION)
                 return False
             if payload.get("symbol") not in (None, self.symbol):
+                return False
+            # A model fitted on a different label definition answers a different
+            # question. Restoring it would let it sit as champion against
+            # challengers judged on other labels, so it is discarded. Files
+            # written before this tag existed were close-labelled, hence the default.
+            saved_sig = payload.get("label_signature", "close:5")
+            if saved_sig != self._label_signature():
+                logger.warning(
+                    "[AI] %s ignoring persisted model: label %s != current %s",
+                    self.symbol, saved_sig, self._label_signature())
                 return False
             cols = list(payload.get("feature_cols") or [])
             # If the feature builder stopped producing a column the model was
@@ -2151,6 +2229,11 @@ def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
 # Main bot class
 # ---------------------------------------------------------------------------
 
+# How many recent closed trades the streak brake looks back over. The brake
+# only ever reads the unbroken run at the end, so a short window is enough.
+_STREAK_HISTORY = 20
+
+
 class StandaloneAIBot:
     """Single-symbol AI trading bot with close + trailing management."""
 
@@ -2190,6 +2273,8 @@ class StandaloneAIBot:
         self._week_key: Optional[str] = None
         self._halt_reason: Optional[str] = None
         self._risk_state_path: Optional[str] = None
+        # Recent closed-trade P&L, oldest first, for the losing-streak brake.
+        self._recent_pnls: list = self._load_recent_pnls()
 
         # --- GUI hook: thread-safe status snapshot. Only this bot thread
         # ever writes to it; any other thread (e.g. a GUI) should only read
@@ -2321,8 +2406,42 @@ class StandaloneAIBot:
         with self._status_lock:
             self.status.update(kwargs)
 
-    def _record_trade_result(self, pnl: float) -> None:
+    def _load_recent_pnls(self) -> list:
+        """Last closed-trade P&L for this symbol, oldest first.
+
+        Seeds the streak brake after a restart. Without it, a bot restarted in
+        the middle of a losing streak would size its first trades at full size.
+        """
+        db_path = _get_sqlite_db_path()
+        if not os.path.exists(db_path):
+            return []
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path, timeout=10.0)
+            try:
+                rows = conn.execute(
+                    "SELECT pnl FROM trades WHERE symbol = ? ORDER BY id DESC LIMIT ?",
+                    (self.cfg.get("symbol", ""), _STREAK_HISTORY)).fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            # No trades table yet, or the database is unreadable: start with an
+            # empty history rather than refuse to trade.
+            return []
+        return [float(r[0]) for r in reversed(rows)]
+
+    def _streak_size_factor(self) -> float:
+        """Size multiplier from the losing streak. 1.0 unless streak_sizing is on."""
+        if not self.cfg.get("streak_sizing") or _streak_multiplier is None:
+            return 1.0
         with self._status_lock:
+            pnls = list(self._recent_pnls)
+        return _streak_multiplier(pnls)
+
+    def _record_trade_result(self, pnl: float, reason: str = "") -> None:
+        with self._status_lock:
+            self._recent_pnls.append(float(pnl))
+            del self._recent_pnls[:-_STREAK_HISTORY]
             self.status["closed_trades"] += 1
             self.status["total_pnl"] += pnl
             if pnl > 1e-9:
@@ -2350,8 +2469,15 @@ class StandaloneAIBot:
                              symbol TEXT, 
                              pnl REAL,
                              balance REAL)''')
-            cursor.execute("INSERT INTO trades (timestamp, symbol, pnl, balance) VALUES (?, ?, ?, ?)",
-                         (datetime.now().isoformat(), self.cfg["symbol"], pnl, self.status.get("balance", 0.0)))
+            # Additive migration: a database created before exit_reason existed
+            # gets the column here. The error on an already-migrated database is expected.
+            try:
+                cursor.execute("ALTER TABLE trades ADD COLUMN exit_reason TEXT")
+            except sqlite3.OperationalError:
+                pass
+            cursor.execute("INSERT INTO trades (timestamp, symbol, pnl, balance, exit_reason) VALUES (?, ?, ?, ?, ?)",
+                         (datetime.now().isoformat(), self.cfg["symbol"], pnl,
+                          self.status.get("balance", 0.0), str(reason or "")))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -2739,6 +2865,12 @@ class StandaloneAIBot:
                     "AI_PROMOTE_TOLERANCE":    self.cfg["ai_promote_tolerance"],
                     "AI_CALIBRATE":            self.cfg["ai_calibrate"],
                     "AI_MIN_EDGE_FOR_SIZE_UP": self.cfg["ai_min_edge_for_size_up"],
+                    # Label definition. AI_SL_ATR_MULT ties the barrier label to
+                    # the real stop distance, so the model learns the same move
+                    # the position would have to survive.
+                    "AI_LABEL_MODE":           self.cfg.get("ai_label_mode", "close"),
+                    "AI_LABEL_HORIZON":        self.cfg.get("ai_label_horizon", 12),
+                    "AI_SL_ATR_MULT":          self.cfg["sl_atr_mult"],
                     "AI_MODEL_PERSIST":        self.cfg.get("ai_model_persist", True),
                     "MODEL_TIMEFRAME":         self.cfg.get("timeframe"),
                 })())
@@ -3285,7 +3417,7 @@ class StandaloneAIBot:
                         pos.ticket, pos.symbol, calc_pnl, reason)
             self._peak_profit.pop(pos.ticket, None)
             self._partial_stages.pop(pos.ticket, None)
-            self._record_trade_result(calc_pnl)
+            self._record_trade_result(calc_pnl, reason)
             return True
         is_buy = pos.type == mt5.ORDER_TYPE_BUY
         tick   = mt5.symbol_info_tick(pos.symbol)
@@ -3323,7 +3455,7 @@ class StandaloneAIBot:
                 self.notifier.send(msg)
                 self._peak_profit.pop(pos.ticket, None)
                 self._partial_stages.pop(pos.ticket, None)
-                self._record_trade_result(pnl)
+                self._record_trade_result(pnl, reason)
                 return True
 
             # If MT5 Python binding rejected comment specifically (err -2), retry with minimal "close"
@@ -3340,7 +3472,7 @@ class StandaloneAIBot:
                         self.notifier.send(msg)
                         self._peak_profit.pop(pos.ticket, None)
                         self._partial_stages.pop(pos.ticket, None)
-                        self._record_trade_result(pnl)
+                        self._record_trade_result(pnl, reason)
                         return True
             if result and result.retcode in (mt5.TRADE_RETCODE_REQUOTE,
                                              mt5.TRADE_RETCODE_PRICE_CHANGED,
@@ -3370,7 +3502,7 @@ class StandaloneAIBot:
                             self.notifier.send(msg)
                             self._peak_profit.pop(pos.ticket, None)
                             self._partial_stages.pop(pos.ticket, None)
-                            self._record_trade_result(pnl)
+                            self._record_trade_result(pnl, reason)
                             return True
 
             retcode_str = result.retcode if result else "None"
@@ -4150,6 +4282,11 @@ class StandaloneAIBot:
                 elif gate_reason:
                     logger.info("[%s] %s", self.cfg["symbol"], gate_reason)
                 if allowed:
+                    streak = self._streak_size_factor()
+                    if streak < 1.0:
+                        size_mult *= streak
+                        logger.info("[%s] Losing streak: size x%.2f",
+                                    self.cfg["symbol"], size_mult)
                     self._send_order(direction, equity, m15p, ai_conf,
                                      size_multiplier=size_mult)
 

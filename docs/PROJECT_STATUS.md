@@ -1,11 +1,11 @@
 # PROJECT STATUS
 
 > **Target platform: native Windows 11.** No Docker, WSL, Linux host or VM is
-> required. Last updated: 2026-10-26.
+> required. Last updated: 2026-10-28.
 
 ## 0. TEST BASELINE
 
-**636 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**688 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -23,7 +23,17 @@
 | **Config plane, risk ladder & Fibonacci scoring** | **80** | **Implemented and tested** |
 | **Live-log hardening (AI edge gate, entry cap, stop-step)** | **25** | **Implemented and tested** |
 | Manual trades isolation & order execution | 7 | Implemented and tested |
+| **Phase-1 intelligence: purged split, barrier labels, streak brake** | **45** | **Implemented and tested. Barrier labels and streak brake are opt-in** |
 | Other unit tests | 56 | Implemented and tested |
+
+**Phase 1 changes (behavior):**
+
+- **Purged validation split** (`core/ai/validation.py`). The last `h` training rows are dropped, where `h` is the label horizon, so no training label looks into the validation window. On by default. This changes the measured out-of-sample numbers slightly, and it is a correctness fix.
+- **First-barrier labels** (`core/ai/labels.py`, `AI_LABEL_MODE=barrier`). Label 1 if price touches +`sl_atr_mult`×ATR before −`sl_atr_mult`×ATR within `AI_LABEL_HORIZON` bars, using wicks. Ambiguous candles and timeouts are dropped. Opt-in, default `close` (legacy). A saved model trained on other labels is discarded at load, so a challenger is never judged against a champion built on different labels.
+- **Losing-streak size brake** (`core/risk/streak.py`, `STREAK_SIZING=true`). After two consecutive losses the next entries are sized at half. It only reduces size. The recent P&L is reloaded from the `trades` table on restart. Off by default.
+- **Trade exit reason.** The `trades` table gains an `exit_reason` column (additive migration).
+
+**Not yet measured.** None of the opt-in changes has been run against live or historical XAUUSDm data. Enable them only after an offline comparison.
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter` or an in-memory scripted fake.
