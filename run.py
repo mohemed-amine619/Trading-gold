@@ -467,6 +467,7 @@ CONFIG = {
     # --- dynamic trade management ("never lose" once in profit) ---
     "trail_atr_mult":          _profile_cfg("TRAIL_ATR_MULT", 1.5, 1.2, scalper_val=1.0),
     "trail_activate_atr":      _profile_cfg("TRAIL_ACTIVATE_ATR", 1.0, 0.8, scalper_val=0.7),
+    "early_protect_atr":       float(os.getenv("EARLY_PROTECT_ATR", "0.3")),
     "trail_tighten1_atr":      _profile_cfg("TRAIL_TIGHTEN1_ATR", 2.0, 1.5),
     "trail_tighten1_mult":     _profile_cfg("TRAIL_TIGHTEN1_MULT", 1.0, 0.8),
     "trail_tighten2_atr":      _profile_cfg("TRAIL_TIGHTEN2_ATR", 3.0, 2.2),
@@ -3980,6 +3981,25 @@ class StandaloneAIBot:
                         target_sl = max(target_sl, close_price + min_dist)
                         if (pos.sl == 0 or target_sl < pos.sl - min_step) and target_sl <= be_sl:
                             self._modify_sl(pos, target_sl)
+
+            # ---- EARLY PROTECTION: move SL closer at small profit to survive corrections ----
+            # Before trailing fully activates, protect against pullbacks by tightening
+            # SL toward breakeven at a smaller profit threshold. This prevents the
+            # original wide SL from being hit during a routine correction.
+            early_protect_atr = self.cfg.get("early_protect_atr", 0.3) * atr
+            if 0 < profit_move < (self.cfg.get("trail_activate_atr", 1.0) * atr):
+                if profit_move >= early_protect_atr:
+                    # Move SL to a protective level (halfway between entry and current price)
+                    if direction == 1:
+                        protect_sl = pos.price_open + (profit_move * 0.4)
+                        if protect_sl > pos.sl + 1e-9:
+                            if _sl_modify_allowed("early_protect", direction, pos.sl, protect_sl, atr, self.cfg):
+                                self._modify_sl(pos, protect_sl)
+                    else:
+                        protect_sl = pos.price_open - (profit_move * 0.4)
+                        if pos.sl == 0 or protect_sl < pos.sl - 1e-9:
+                            if _sl_modify_allowed("early_protect", direction, pos.sl, protect_sl, atr, self.cfg):
+                                self._modify_sl(pos, protect_sl)
 
             # ---- trailing stop (accelerating, never falls below breakeven)
             trail_atr  = self.cfg.get("trail_atr_mult", 1.5) * atr
