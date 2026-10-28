@@ -534,6 +534,7 @@ CONFIG = {
     # when the symbol looks like gold.
     "gold_min_signal_score":   _profile_cfg("GOLD_MIN_SIGNAL_SCORE", 58.0, 50.0),
     "gold_min_ai_conf":        _profile_cfg("GOLD_MIN_AI_CONF", 0.55, 0.50),
+    "gold_macro_veto_enabled": os.getenv("GOLD_MACRO_VETO", "true").lower() in ("1", "true", "yes"),
 
     # --- structure-aware management ------------------------------------
     "structure_trailing":      os.getenv("STRUCTURE_TRAILING", "true").lower() in ("1", "true", "yes"),
@@ -2793,12 +2794,14 @@ class StandaloneAIBot:
         is_gold = "XAU" in sym_upper or "GOLD" in sym_upper
         if is_gold:
             # 1. Macro Trend Veto: Never scalp counter to established H4 trend
-            if h4p is not None and not h4p.empty and len(h4p) >= 20:
-                h4_opp = _trend_score(h4p, -best_dir)
-                if h4_opp >= 0.65:
-                    logger.info("[%s] Gold macro trend VETO: H4 opposes %s (score %.2f >= 0.65)",
-                                self.cfg["symbol"], "BUY" if best_dir == 1 else "SELL", h4_opp)
-                    return 0, best_score, ai_conf, f"gold macro veto: H4 opposes {'BUY' if best_dir == 1 else 'SELL'}"
+            #    (disable with GOLD_MACRO_VETO=false for testing)
+            if self.cfg.get("gold_macro_veto_enabled", True):
+                if h4p is not None and not h4p.empty and len(h4p) >= 20:
+                    h4_opp = _trend_score(h4p, -best_dir)
+                    if h4_opp >= 0.65:
+                        logger.info("[%s] Gold macro trend VETO: H4 opposes %s (score %.2f >= 0.65)",
+                                    self.cfg["symbol"], "BUY" if best_dir == 1 else "SELL", h4_opp)
+                        return 0, best_score, ai_conf, f"gold macro veto: H4 opposes {'BUY' if best_dir == 1 else 'SELL'}"
 
             # 2. Gold High-Confluence Minimum Score: Gold demands minimum 58 confluence
             gold_min_score = float(self.cfg.get("gold_min_signal_score", 58.0))

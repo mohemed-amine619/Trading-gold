@@ -279,6 +279,9 @@ _add(_p("ai_confidence_threshold", "AI confidence threshold", "AI", "float", 0.5
         env="AI_CONFIDENCE_THRESHOLD"))
 _add(_p("gold_min_ai_conf", "AI confidence threshold (gold)", "AI", "float", 0.55, 0.50, 0.99, 0.01,
         env="GOLD_MIN_AI_CONF"))
+_add(_p("gold_macro_veto_enabled", "Gold H4 macro trend veto", "AI", "bool", True,
+        env="GOLD_MACRO_VETO",
+        help="Veto gold trades when H4 trend opposes. Disable for testing."))
 _add(_p("ai_train_bars", "Training window (bars)", "AI", "int", 800, 200, 5000, 50,
         env="AI_TRAIN_BARS"))
 _add(_p("ai_retrain_bars", "Retrain every N bars", "AI", "int", 50, 5, 1000, 5,
