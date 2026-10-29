@@ -158,6 +158,9 @@ _add(_p("max_consecutive_losses", "Loss-streak cooldown trigger", "Risk", "int",
         env="MAX_CONSECUTIVE_LOSSES"))
 _add(_p("loss_streak_cooldown_minutes", "Cooldown after loss streak (min)", "Risk", "int", 60, 0, 1440, 5,
         env="LOSS_STREAK_COOLDOWN_MIN"))
+_add(_p("streak_sizing", "Halve size after a losing streak", "Risk", "bool", False,
+        env="STREAK_SIZING",
+        help="After two consecutive losses, new entries are sized at half. Only ever reduces size."))
 _add(_p("dynamic_risk", "Scale risk with ADX", "Risk", "bool", True,
         env="DYNAMIC_RISK"))
 _add(_p("min_risk_scale", "Minimum risk scale", "Risk", "float", 0.5, 0.0, 1.0, 0.05,
@@ -301,6 +304,11 @@ _add(_p("ai_promote_tolerance", "Promotion tolerance", "AI", "float", 0.01, 0.0,
         env="AI_PROMOTE_TOLERANCE"))
 _add(_p("ai_calibrate", "Calibrate probabilities", "AI", "bool", True,
         env="AI_CALIBRATE"))
+_add(_p("ai_label_mode", "Training label", "AI", "enum", "close",
+        choices=("close", "barrier"), env="AI_LABEL_MODE",
+        help="'close' = best close in 5 bars (legacy). 'barrier' = first touch of ±stop distance, using wicks. Switching discards the saved model."))
+_add(_p("ai_label_horizon", "Barrier label horizon (bars)", "AI", "int", 12, 1, 60, 1,
+        env="AI_LABEL_HORIZON", help="Used only when the training label is 'barrier'."))
 _add(_p("ai_min_edge_for_size_up", "Min edge to upsize", "AI", "float", 0.10, 0.0, 0.50, 0.01,
         env="AI_MIN_EDGE_FOR_SIZE_UP"))
 _add(_p("ai_size_high_conf", "Upsize above confidence", "AI", "float", 0.85, 0.50, 0.99, 0.01,

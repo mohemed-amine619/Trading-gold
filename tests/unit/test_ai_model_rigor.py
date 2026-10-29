@@ -454,8 +454,12 @@ def test_validation_split_is_time_ordered(run_module, monkeypatch):
 
     if captured:  # only asserts when a model was actually promoted
         frac = run_module.CONFIG["ai_validation_fraction"]
+        # The purge gap drops the last `label horizon` training rows so that no
+        # training label looks into the validation window. Expected leftover
+        # rows = validation block + gap.
+        gap = ai._label_horizon()
         assert captured["n_total"] - captured["n_train"] == pytest.approx(
-            captured["n_total"] * frac, abs=2)
+            captured["n_total"] * frac + gap, abs=2)
         assert captured["n_train"] > 0
 
 
