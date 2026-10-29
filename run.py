@@ -2257,6 +2257,7 @@ class StandaloneAIBot:
         self._peak_profit: dict = {}      # ticket -> peak favourable move (price units), POWER-UP (B)
         self._manual_sltp_failed: dict = {} # ticket -> epoch timestamp of last failed modification
         self._dd_positions_closed = False # one-shot equity protect close
+        self._daily_dd_logged = False     # log the daily-cap warning once per day, not every tick
         self._weekly_halt_done = False
         self._daily_halt_done = False
         self._equity_halt_done = False
@@ -2777,6 +2778,7 @@ class StandaloneAIBot:
             self.daily_date  = today
             self.daily_start = equity
             self._dd_positions_closed = False
+            self._daily_dd_logged = False
             self._persist_risk_state()
 
         hard_reason = self._hard_drawdown_reason(equity)
@@ -2803,8 +2805,10 @@ class StandaloneAIBot:
         if self.daily_start > 0:
             dd = (self.daily_start - equity) / self.daily_start
             if dd >= self.cfg["max_daily_dd"]:
-                logger.warning("Daily DD limit hit (%.1f%%) – no new trades today",
-                               dd * 100)
+                if not self._daily_dd_logged:
+                    logger.warning("Daily DD limit hit (%.1f%%) – no new trades today",
+                                   dd * 100)
+                    self._daily_dd_logged = True
                 if (self.cfg.get("equity_protect_close_all", True) and
                         not self._dd_positions_closed):
                     self._close_all("daily DD limit")
