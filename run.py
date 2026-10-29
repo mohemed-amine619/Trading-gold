@@ -3053,10 +3053,12 @@ class StandaloneAIBot:
                                 self.cfg["symbol"], critique.reasoning, critique.confidence)
                     return 0, best_score, ai_conf, f"LLM critic veto: {critique.reasoning}"
                 else:
-                    logger.info("[%s] 🧠 LLM Trader Confirmed: %s (Risk: %s)",
-                                self.cfg["symbol"], critique.reasoning, critique.risk_assessment)
-                    if critique.confidence > 0:
-                        ai_conf = max(ai_conf, min(0.95, critique.confidence / 100.0))
+                    # The critic may approve or veto. Its confidence is logged but
+                    # never becomes the sizing confidence: it is an unvalidated
+                    # opinion, and sizing must rest on the measured model alone.
+                    logger.info("[%s] 🧠 LLM Trader Confirmed (critic conf %.0f): %s (Risk: %s)",
+                                self.cfg["symbol"], critique.confidence,
+                                critique.reasoning, critique.risk_assessment)
 
         return best_dir, best_score, ai_conf, "signal"
 
