@@ -136,11 +136,13 @@ try:
     from core.ai.validation import purged_split as _purged_split
     from core.ai.labels import first_barrier_labels as _first_barrier_labels
     from core.risk.streak import streak_multiplier as _streak_multiplier
+    from core.risk.daily_target import profit_lock_reached as _profit_lock_reached
     _PHASE1_AVAILABLE = True
 except Exception as _phase1_import_error:  # pragma: no cover - defensive
     _PHASE1_AVAILABLE = False
     _first_barrier_labels = None
     _streak_multiplier = None
+    _profit_lock_reached = None
     # Legacy split: no gap, validation is the tail of the window.
     _purged_split = lambda n, n_val, gap: (slice(0, n - n_val), slice(n - n_val, n))
     print(
@@ -582,6 +584,9 @@ CONFIG = {
     # fraction of max_daily_dd so it scales with whatever cap is configured.
     "reduce_size_at_dd":       float(os.getenv("REDUCE_SIZE_AT_DD", "0.50")),
     "halt_at_dd":              float(os.getenv("HALT_AT_DD", "0.80")),
+    # Profit lock: stop opening for the day once this share of gain is banked.
+    # 0 = off. Blocks new entries only; open positions are still managed.
+    "daily_profit_target":     float(os.getenv("DAILY_PROFIT_TARGET", "0") or 0.0),
     # Drawdown ceilings measured against the equity peak / the week's start.
     "max_weekly_dd":           _profile_cfg("MAX_WEEKLY_DD", 0.08, 0.10),
     "max_total_dd":            _profile_cfg("MAX_TOTAL_DD", 0.20, 0.25),
@@ -2732,6 +2737,15 @@ class StandaloneAIBot:
                 return False, 0.0, f"loss-streak cooldown ({left} min left)"
             self._cooldown_until = None
             self._persist_risk_state()
+
+        # Profit lock: a good day is banked by not opening more risk. Only
+        # new entries stop here; _manage_positions still runs every tick.
+        target = float(self.cfg.get("daily_profit_target", 0.0) or 0.0)
+        if (target > 0 and _profit_lock_reached is not None
+                and _profit_lock_reached(self.daily_start, equity, target)):
+            return False, 0.0, (
+                f"daily profit target {target*100:.1f}% reached – "
+                "new entries paused, gains protected")
 
         cap = float(self.cfg.get("max_daily_dd", 0.03))
         if cap <= 0 or self.daily_start <= 0:
