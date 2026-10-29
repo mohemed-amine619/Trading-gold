@@ -174,6 +174,9 @@ _add(_p("reduce_size_at_dd", "Halve size at this share of daily cap", "Risk", "f
         help="At this fraction of the daily drawdown cap, new positions are sized at 50%."))
 _add(_p("halt_at_dd", "Stop new trades at this share of daily cap", "Risk", "float", 0.80, 0.0, 1.0, 0.05,
         env="HALT_AT_DD", percent=True))
+_add(_p("daily_profit_target", "Daily profit target (lock gains)", "Risk", "float", 0.0, 0.0, 0.50, 0.005,
+        env="DAILY_PROFIT_TARGET", percent=True,
+        help="Once the day's equity is this far above its start, no new trades are opened for the rest of the day. Open positions are still managed. 0 disables."))
 
 # ── Stops / targets ────────────────────────────────────────────────────────
 _add(_p("sl_atr_mult", "Stop distance (ATR multiple)", "Stops & Targets", "float", 2.5, 0.3, 8.0, 0.1,
