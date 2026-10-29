@@ -614,3 +614,86 @@ class ConfigAudit(Base):
     new_value: Mapped[str] = mapped_column(Text)
     changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     changed_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Users, licences and dashboard access
+#
+# Who owns a licence, which machines may run the bot on it, who may sign in to
+# the dashboard, and every settings change made on the customer's behalf.
+#
+# Broker credentials are deliberately NOT stored here. The bot keeps its MT5
+# login in the local .env on the customer's own machine. Only hashes are stored
+# for secrets that this server must check: passwords, licence keys, session
+# tokens and machine fingerprints.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16), default="customer")  # owner | admin | customer
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    licences: Mapped[list["Licence"]] = relationship(back_populates="user", lazy="dynamic")
+
+
+class Licence(Base):
+    __tablename__ = "licences"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sha256 of the key
+    plan: Mapped[str] = mapped_column(String(32), default="standard")
+    max_installations: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active | revoked
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="licences")
+    installations: Mapped[list["Installation"]] = relationship(back_populates="licence", lazy="dynamic")
+
+
+class Installation(Base):
+    """One bot installation (one machine) activated against a licence."""
+    __tablename__ = "installations"
+    __table_args__ = (UniqueConstraint("licence_id", "fingerprint_hash"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    licence_id: Mapped[str] = mapped_column(ForeignKey("licences.id"), index=True)
+    fingerprint_hash: Mapped[str] = mapped_column(String(64))  # sha256 of the machine id
+    label: Mapped[str] = mapped_column(String(128), default="")
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    licence: Mapped["Licence"] = relationship(back_populates="installations")
+
+
+class DashboardSession(Base):
+    __tablename__ = "dashboard_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sha256 of the token
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class SettingsRevision(Base):
+    """Append-only history of a customer's bot settings. Never updated in place."""
+    __tablename__ = "settings_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    installation_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("installations.id"), nullable=True)
+    settings_json: Mapped[str] = mapped_column(Text)  # validated against core/config/schema.py
+    changed_by: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

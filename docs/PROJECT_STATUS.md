@@ -3,9 +3,34 @@
 > **Target platform: native Windows 11.** No Docker, WSL, Linux host or VM is
 > required. Last updated: 2026-10-28.
 
+## 0. ACCOUNTS & LICENSING (server side, self-hosted model)
+
+Built: users, licence keys, machine activation with seat limits, dashboard
+sessions, and an append-only settings history. Trading logic is not changed.
+
+| Piece | Where | Status |
+|---|---|---|
+| Tables: users, licences, installations, dashboard_sessions, settings_revisions | `core/database/models.py`, migration `c3d9e1f0a7b2` | Implemented; `alembic check` shows no drift |
+| Password hashing (scrypt) and secret hashing (SHA-256) | `core/accounts/security.py` | Implemented and tested |
+| Service: users, sessions, licences, activation, settings | `core/accounts/service.py` | Implemented and tested |
+| Admin CLI: create owner/customer, issue licence, list users | `core/accounts/cli.py` | Implemented and tested |
+| Account tests | `tests/unit/test_accounts.py` | 43 tests |
+
+**Not yet built, in order:**
+
+1. HTTP API and dashboard login screens (no web UI calls these services yet).
+2. Licence check at bot start-up. Deliberately not wired into `run.py`: a
+   licence-server outage must never stop a live bot mid-trade. It needs an
+   offline grace period first.
+3. Trade-history and status sync from installations to the server.
+4. Billing. Out of scope until the self-hosted model is sold.
+
+**Not a hosted service.** Broker credentials never reach this server. Each
+customer runs the bot on their own machine with their own MT5 login.
+
 ## 0. TEST BASELINE
 
-**690 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**733 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
