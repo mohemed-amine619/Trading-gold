@@ -225,6 +225,28 @@ def test_total_drawdown_halts_and_requires_a_manual_reset(run_and_stub, tmp_path
     assert bot._entry_gate(9_900.0)[0] is True
 
 
+def test_manual_reset_clears_a_weekly_halt_for_good(run_and_stub, tmp_path):
+    run_module, _ = run_and_stub
+    bot = make_bot(run_module, str(tmp_path / "r.json"),
+                   max_weekly_dd=0.08, max_total_dd=0.90)
+    bot._week_key = date.today().strftime("%G-W%V")
+    bot._week_start_equity = 548.0
+
+    # Equity 29% below a stale week start: weekly halt.
+    assert bot._hard_drawdown_reason(388.83) is not None
+    assert "weekly" in bot._halt_reason
+
+    # The reset must hold on the next tick, not re-arm from the stale baseline.
+    bot.reset_risk_halt("test")
+    assert bot._hard_drawdown_reason(388.83) is None
+    assert bot._halt_reason is None
+    assert bot._entry_gate(388.83)[0] is True
+
+    # The new baseline still protects: a real 9% drop from here halts again.
+    assert bot._hard_drawdown_reason(388.83 * 0.91) is not None
+    assert "weekly" in bot._halt_reason
+
+
 def test_loss_streak_starts_a_cooldown(run_and_stub, tmp_path, monkeypatch):
     run_module, _ = run_and_stub
     monkeypatch.setattr(run_module, "_get_sqlite_db_path",

@@ -2673,6 +2673,10 @@ class StandaloneAIBot:
         self._cooldown_until = None
         self._consecutive_losses = 0
         self._peak_equity = self.start_balance or self.daily_start or 0.0
+        # Re-baseline the week at the next tick's equity. Without this a weekly
+        # halt re-armed on the very next tick, because the stale week-start
+        # equity (e.g. before a withdrawal) still showed the same drawdown.
+        self._week_key = None
         self._persist_risk_state()
         logger.warning("Risk halt reset (was: %s) by %s", previous or "-", reason or "operator")
 
