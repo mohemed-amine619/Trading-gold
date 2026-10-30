@@ -30,7 +30,7 @@ customer runs the bot on their own machine with their own MT5 login.
 
 ## 0. TEST BASELINE
 
-**755 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**797 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -39,6 +39,7 @@ customer runs the bot on their own machine with their own MT5 login.
 | Safety tripwires & fail-closed regressions | 54 | Implemented and tested |
 | Execution safety & idempotency | 34 | Implemented and tested |
 | Daily profit lock (gain protection) | 15 | Implemented and tested |
+| Position sizing within risk budget (opt-in refusal) | 41 | Implemented and tested |
 | Bridge contract and auth | 31 | Implemented, tested against a mock |
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 22 | Implemented and tested |

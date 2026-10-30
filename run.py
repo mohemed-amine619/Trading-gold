@@ -137,12 +137,14 @@ try:
     from core.ai.labels import first_barrier_labels as _first_barrier_labels
     from core.risk.streak import streak_multiplier as _streak_multiplier
     from core.risk.daily_target import profit_lock_reached as _profit_lock_reached
+    from core.risk.sizing import size_within_budget as _size_within_budget
     _PHASE1_AVAILABLE = True
 except Exception as _phase1_import_error:  # pragma: no cover - defensive
     _PHASE1_AVAILABLE = False
     _first_barrier_labels = None
     _streak_multiplier = None
     _profit_lock_reached = None
+    _size_within_budget = None
     # Legacy split: no gap, validation is the tail of the window.
     _purged_split = lambda n, n_val, gap: (slice(0, n - n_val), slice(n - n_val, n))
     print(
@@ -587,6 +589,9 @@ CONFIG = {
     # Profit lock: stop opening for the day once this share of gain is banked.
     # 0 = off. Blocks new entries only; open positions are still managed.
     "daily_profit_target":     float(os.getenv("DAILY_PROFIT_TARGET", "0") or 0.0),
+    # Refuse an entry when the broker's minimum lot would risk more than this
+    # multiple of the per-trade budget. 0 = off (legacy: always allow min lot).
+    "max_risk_overshoot":      float(os.getenv("MAX_RISK_OVERSHOOT", "0") or 0.0),
     # Drawdown ceilings measured against the equity peak / the week's start.
     "max_weekly_dd":           _profile_cfg("MAX_WEEKLY_DD", 0.08, 0.10),
     "max_total_dd":            _profile_cfg("MAX_TOTAL_DD", 0.20, 0.25),
@@ -2221,13 +2226,35 @@ def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
     # drawdown has consumed half the daily budget.
     scale *= max(0.0, float(size_multiplier))
     risk_amt = account_equity * cfg["risk_per_trade"] * scale
-    sl_ticks = sl_dist_price / (tick_size + 1e-10)
-    rpl      = sl_ticks * tick_value
-    if rpl <= 0:
-        return vol_min
-    raw = risk_amt / rpl
-    vol = math.floor(raw / vol_step) * vol_step
-    return max(vol_min, min(vol, vol_max))
+
+    if _size_within_budget is None:  # pragma: no cover - import fallback
+        sl_ticks = sl_dist_price / (tick_size + 1e-10)
+        rpl      = sl_ticks * tick_value
+        if rpl <= 0:
+            return vol_min
+        raw = risk_amt / rpl
+        vol = math.floor(raw / vol_step) * vol_step
+        return max(vol_min, min(vol, vol_max))
+
+    # Returns None ("cannot size") instead of silently using the minimum lot
+    # when broker data is unusable, and when max_risk_overshoot is set and the
+    # minimum lot would risk more than that multiple of the budget.
+    result = _size_within_budget(
+        risk_amt, sl_dist_price, tick_size, tick_value,
+        vol_min, vol_max, vol_step,
+        max_overshoot=float(cfg.get("max_risk_overshoot", 0.0) or 0.0),
+    )
+    if result.volume is None:
+        logger.warning("Entry refused: %s", result.reason)
+        return None
+    if result.forced_min_lot and account_equity > 0:
+        logger.info(
+            "Minimum lot %s risks %.2f (%.2f%% of equity) against a %.2f budget "
+            "(%.2f%% configured)",
+            result.volume, result.risk_amount,
+            100.0 * result.risk_amount / account_equity, result.budget,
+            100.0 * result.budget / account_equity)
+    return result.volume
 
 
 # ---------------------------------------------------------------------------
@@ -3345,6 +3372,9 @@ class StandaloneAIBot:
             self.cfg, adx=adx, ai_conf=ai_conf,
             size_multiplier=size_multiplier,
         )
+        if volume is None:
+            logger.info("[%s] Entry skipped: cannot size within the risk budget", sym)
+            return False
 
         if not self._margin_ok(price, volume, equity):
             return False
