@@ -172,14 +172,14 @@ class TestWalkForward:
 class TestArtifactAndPredictor:
     def test_artifact_carries_the_measured_oos_result(self, trained):
         _, art, _ = trained
-        assert set(["state_dict", "scaler", "temperature", "config", "oos"]) <= set(art)
+        assert set(["members", "scaler", "config", "oos", "trained_through"]) <= set(art)
         assert "edge" in art["oos"] and "n_folds" in art["oos"]
 
     def test_file_round_trips_with_weights_only_loading(self, trained):
         _, art, path = trained
         loaded = load_artifact(path)
         assert loaded["config"]["window"] == SMALL.window
-        assert loaded["temperature"] == pytest.approx(art["temperature"])
+        assert loaded["members"][0]["temperature"] == pytest.approx(art["members"][0]["temperature"])
 
     def _predictor(self, path, edge, **kw):
         p = ModelPredictor(path, **kw)

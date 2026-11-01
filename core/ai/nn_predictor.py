@@ -10,6 +10,9 @@ return "no trade" with a reason, never a guess.
 torch is imported only when a model is first loaded, so importing this module
 is safe on a machine without torch.
 
+The model file is re-checked on every call (one ``stat``). When a continuous
+trainer replaces it, the next prediction loads the new model, with no restart.
+
 Direction follows the bot's convention: +1 long, -1 short, 0 no trade.
 """
 
@@ -31,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Rows needed so the EWM features have converged to the values seen in training.
 _WARMUP_ROWS = 400
+_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -57,38 +61,43 @@ class ModelPredictor:
         self.min_oos_edge = float(min_oos_edge)
         self._loaded = False
         self._load_error: Optional[str] = None
-        self._model = None
+        self._members = None
+        self._ensemble_proba = None
         self._scaler: Optional[FeatureScaler] = None
-        self._temperature = 1.0
         self._window = 0
         self._oos_edge: Optional[float] = None
-        self._torch = None
+        self._mtime = _UNSET
 
     # -- loading ---------------------------------------------------------
+    def _file_mtime(self) -> Optional[float]:
+        try:
+            return os.path.getmtime(self.path)
+        except OSError:
+            return None
+
     def _load(self) -> None:
+        current = self._file_mtime()
+        if current != self._mtime:        # first call, or the file was replaced
+            self._mtime = current
+            self._loaded = False
+            self._load_error = None
+            self._members = None
         if self._loaded or self._load_error:
             return
-        if not os.path.exists(self.path):
+        if current is None:
             self._load_error = f"no model file at {self.path}"
             return
         try:
-            import torch
-            from core.ai.nn_model import SeqClassifier, load_artifact
+            from core.ai.nn_model import ensemble_proba, load_artifact, members_from_artifact
         except Exception as exc:                      # torch not installed
             self._load_error = f"torch unavailable: {exc!r}"
             return
         try:
             art = load_artifact(self.path)
-            cfg = art["config"]
-            model = SeqClassifier(len(art["feature_names"]), cfg["hidden"], cfg["layers"],
-                                  cfg["dropout"])
-            model.load_state_dict(art["state_dict"])
-            model.eval()
-            self._torch = torch
-            self._model = model
+            self._members = members_from_artifact(art)
+            self._ensemble_proba = ensemble_proba
             self._scaler = FeatureScaler.from_dict(art["scaler"])
-            self._temperature = float(art["temperature"])
-            self._window = int(cfg["window"])
+            self._window = int(art["config"]["window"])
             self._oos_edge = (art.get("oos") or {}).get("edge")
             self._loaded = True
         except Exception as exc:
@@ -124,11 +133,7 @@ class ModelPredictor:
             return _neutral("not enough finite history for the model window")
 
         x = self._scaler.transform(window)[None, :, :]
-        with self._torch.no_grad():
-            logits = self._model(self._torch.tensor(x, dtype=self._torch.float32)).numpy()
-        z = logits[0] / self._temperature
-        e = np.exp(z - z.max())
-        p = e / e.sum()
+        p = self._ensemble_proba(self._members, x)[0]
 
         trade_class = LONG if p[LONG] >= p[SHORT] else SHORT
         conf = float(p[trade_class])

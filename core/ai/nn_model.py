@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import copy
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -58,6 +58,7 @@ class TrainConfig:
     patience: int = 5
     seed: int = 7
     threshold: float = 0.72
+    n_models: int = 1                 # seeds averaged; more = lower variance
 
 
 class SeqClassifier(nn.Module):
@@ -179,6 +180,26 @@ def softmax_np(logits: np.ndarray, temperature: float = 1.0) -> np.ndarray:
     return e / e.sum(axis=1, keepdims=True)
 
 
+def fit_ensemble(x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray,
+                 y_val: np.ndarray, cfg: TrainConfig) -> list:
+    """Train ``cfg.n_models`` models that differ only by seed, each calibrated
+    on the validation rows. Averaging them lowers the variance of one unlucky
+    initialisation; it does not create information the data does not hold."""
+    members = []
+    for i in range(max(1, cfg.n_models)):
+        model, info = fit_sequence_model(x_train, y_train, x_val, y_val,
+                                         replace(cfg, seed=cfg.seed + 101 * i))
+        temp = fit_temperature(logits_for(model, x_val), y_val)
+        members.append({"model": model, "temperature": temp, "info": info})
+    return members
+
+
+def ensemble_proba(members: list, x: np.ndarray) -> np.ndarray:
+    """Mean of the members' calibrated class probabilities (rows sum to 1)."""
+    return np.mean([softmax_np(logits_for(m["model"], x), m["temperature"])
+                    for m in members], axis=0)
+
+
 MIN_TRADES_FOR_EDGE = 30
 
 
@@ -234,13 +255,13 @@ def walk_forward_evaluate(df: pd.DataFrame, cfg: TrainConfig, train_bars: int,
         # Validation = the newest windows, separated from training by the horizon.
         cut = int(len(x_tr) * (1.0 - cfg.val_fraction))
         keep = e_tr < e_tr[cut] - cfg.horizon
-        model, info = fit_sequence_model(x_tr[keep], y_tr[keep], x_tr[cut:], y_tr[cut:], cfg)
-        temp = fit_temperature(logits_for(model, x_tr[cut:]), y_tr[cut:])
-        proba = softmax_np(logits_for(model, x[te_mask]), temp)
+        members = fit_ensemble(x_tr[keep], y_tr[keep], x_tr[cut:], y_tr[cut:], cfg)
+        proba = ensemble_proba(members, x[te_mask])
         pooled_p.append(proba)
         pooled_y.append(y[te_mask])
         folds.append({"train": (tr.start, tr.stop), "test": (te.start, te.stop),
-                      "temperature": temp, **trade_metrics(proba, y[te_mask], cfg.threshold)})
+                      "temperatures": [m["temperature"] for m in members],
+                      **trade_metrics(proba, y[te_mask], cfg.threshold)})
 
     if not folds:
         return {"folds": [], "trades": 0, "coverage": 0.0, "precision": None, "edge": None,
@@ -249,35 +270,91 @@ def walk_forward_evaluate(df: pd.DataFrame, cfg: TrainConfig, train_bars: int,
     return {"folds": folds, "windows": int(len(yy)), **trade_metrics(p, yy, cfg.threshold)}
 
 
+def fit_artifact(df: pd.DataFrame, cfg: TrainConfig) -> dict:
+    """Fit the model that would go live on ``df``, with no out-of-sample test.
+
+    ``oos`` is left empty on purpose: the caller must measure it on bars the
+    model never saw (``evaluate_artifact``). ``trained_through`` records the
+    last bar used, so later evaluation can start strictly after it.
+    """
+    feats = build_features(df).to_numpy()
+    labels = make_labels(df, cfg.barrier_mult, cfg.horizon)
+    finite = np.isfinite(feats).all(axis=1) & (labels >= 0)
+    rows = np.flatnonzero(finite)
+    if len(rows) < 2:
+        raise ValueError("not enough usable rows to train")
+    scaler = FeatureScaler().fit(feats[rows])
+    x, y, ends = _scaled_windows(feats, labels, scaler, cfg.window)
+    if len(x) < 100:
+        raise ValueError(f"not enough training windows ({len(x)})")
+    cut = int(len(x) * (1.0 - cfg.val_fraction))
+    keep = ends < ends[cut] - cfg.horizon
+    members = fit_ensemble(x[keep], y[keep], x[cut:], y[cut:], cfg)
+    return {
+        "members": [{"state_dict": m["model"].state_dict(), "temperature": m["temperature"]}
+                    for m in members],
+        "scaler": scaler.to_dict(),
+        "config": asdict(cfg),
+        "feature_names": list(FEATURE_NAMES),
+        "oos": {},
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "trained_through": str(df.index[-1]),
+        "n_bars": int(len(df)),
+    }
+
+
 def train_final(df: pd.DataFrame, cfg: TrainConfig, train_bars: int, test_bars: int) -> dict:
-    """Measure out-of-sample edge, then fit the model that would go live.
+    """Measure out-of-sample edge by walk-forward, then fit the model for use.
 
     The returned artifact carries the measured walk-forward result in ``oos``.
     The predictor refuses a model whose edge is unmeasured or below its floor.
     """
     oos = walk_forward_evaluate(df, cfg, train_bars, test_bars)
+    art = fit_artifact(df, cfg)
+    art["oos"] = {k: v for k, v in oos.items() if k != "folds"} | {"n_folds": len(oos["folds"])}
+    return art
 
+
+def members_from_artifact(art: dict) -> list:
+    """Rebuild the ensemble members (models in eval mode + temperatures).
+
+    Reads the legacy single-model layout (``state_dict`` / ``temperature``) too.
+    """
+    cfg = art["config"]
+    raw = art.get("members") or [{"state_dict": art["state_dict"],
+                                  "temperature": art["temperature"]}]
+    members = []
+    for m in raw:
+        model = SeqClassifier(len(art["feature_names"]), cfg["hidden"], cfg["layers"],
+                              cfg["dropout"])
+        model.load_state_dict(m["state_dict"])
+        model.eval()
+        members.append({"model": model, "temperature": float(m["temperature"])})
+    return members
+
+
+def evaluate_artifact(art: dict, df: pd.DataFrame, start_row: int,
+                      threshold: Optional[float] = None,
+                      min_trades: int = MIN_TRADES_FOR_EDGE) -> dict:
+    """Score a saved model on the windows of ``df`` that END at or after
+    ``start_row``. Rows before it are used only as history for the features.
+
+    This is how a champion and a challenger are compared fairly: the same
+    function, the same bars, bars that neither model was trained on.
+    """
+    cfg = art["config"]
     feats = build_features(df).to_numpy()
-    labels = make_labels(df, cfg.barrier_mult, cfg.horizon)
-    finite = np.isfinite(feats).all(axis=1) & (labels >= 0)
-    rows = np.flatnonzero(finite)
-    scaler = FeatureScaler().fit(feats[rows])
-    x, y, ends = _scaled_windows(feats, labels, scaler, cfg.window)
-    cut = int(len(x) * (1.0 - cfg.val_fraction))
-    keep = ends < ends[cut] - cfg.horizon
-    model, info = fit_sequence_model(x[keep], y[keep], x[cut:], y[cut:], cfg)
-    temp = fit_temperature(logits_for(model, x[cut:]), y[cut:])
-
-    return {
-        "state_dict": model.state_dict(),
-        "scaler": scaler.to_dict(),
-        "temperature": temp,
-        "config": asdict(cfg),
-        "feature_names": list(FEATURE_NAMES),
-        "oos": {k: v for k, v in oos.items() if k != "folds"} | {"n_folds": len(oos["folds"])},
-        "trained_at": datetime.now(timezone.utc).isoformat(),
-        "train": info,
-    }
+    labels = make_labels(df, cfg["barrier_mult"], cfg["horizon"])
+    scaler = FeatureScaler.from_dict(art["scaler"])
+    x, y, ends = make_windows(scaler.transform(feats), labels, cfg["window"])
+    mask = ends >= start_row
+    n = int(mask.sum())
+    if n == 0:
+        return {"windows": 0, "trades": 0, "coverage": 0.0, "precision": None, "edge": None}
+    proba = ensemble_proba(members_from_artifact(art), x[mask])
+    return {"windows": n, **trade_metrics(proba, y[mask],
+                                          threshold if threshold is not None else cfg["threshold"],
+                                          min_trades)}
 
 
 def save_artifact(path: str, artifact: dict) -> None:
