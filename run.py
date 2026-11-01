@@ -137,6 +137,7 @@ try:
     from core.ai.labels import first_barrier_labels as _first_barrier_labels
     from core.risk.streak import streak_multiplier as _streak_multiplier
     from core.risk.daily_target import profit_lock_reached as _profit_lock_reached
+    from core.risk.daily_target import money_target_reached as _money_target_reached
     from core.risk.sizing import size_within_budget as _size_within_budget
     _PHASE1_AVAILABLE = True
 except Exception as _phase1_import_error:  # pragma: no cover - defensive
@@ -144,6 +145,7 @@ except Exception as _phase1_import_error:  # pragma: no cover - defensive
     _first_barrier_labels = None
     _streak_multiplier = None
     _profit_lock_reached = None
+    _money_target_reached = None
     _size_within_budget = None
     # Legacy split: no gap, validation is the tail of the window.
     _purged_split = lambda n, n_val, gap: (slice(0, n - n_val), slice(n - n_val, n))
@@ -589,6 +591,9 @@ CONFIG = {
     # Profit lock: stop opening for the day once this share of gain is banked.
     # 0 = off. Blocks new entries only; open positions are still managed.
     "daily_profit_target":     float(os.getenv("DAILY_PROFIT_TARGET", "0") or 0.0),
+    # Same lock expressed in account currency (e.g. 70 = stop at +$70). 0 = off.
+    # Either target trips the lock; whichever is reached first wins.
+    "daily_profit_target_money": float(os.getenv("DAILY_PROFIT_TARGET_MONEY", "0") or 0.0),
     # Refuse an entry when the broker's minimum lot would risk more than this
     # multiple of the per-trade budget. 0 = off (legacy: always allow min lot).
     "max_risk_overshoot":      float(os.getenv("MAX_RISK_OVERSHOOT", "0") or 0.0),
@@ -2777,6 +2782,13 @@ class StandaloneAIBot:
                 and _profit_lock_reached(self.daily_start, equity, target)):
             return False, 0.0, (
                 f"daily profit target {target*100:.1f}% reached – "
+                "new entries paused, gains protected")
+
+        money = float(self.cfg.get("daily_profit_target_money", 0.0) or 0.0)
+        if (money > 0 and _money_target_reached is not None
+                and _money_target_reached(self.daily_start, equity, money)):
+            return False, 0.0, (
+                f"daily profit target {money:.2f} reached – "
                 "new entries paused, gains protected")
 
         cap = float(self.cfg.get("max_daily_dd", 0.03))

@@ -177,6 +177,9 @@ _add(_p("halt_at_dd", "Stop new trades at this share of daily cap", "Risk", "flo
 _add(_p("daily_profit_target", "Daily profit target (lock gains)", "Risk", "float", 0.0, 0.0, 0.50, 0.005,
         env="DAILY_PROFIT_TARGET", percent=True,
         help="Once the day's equity is this far above its start, no new trades are opened for the rest of the day. Open positions are still managed. 0 disables."))
+_add(_p("daily_profit_target_money", "Daily profit target (account currency)", "Risk", "float", 0.0, 0.0, 100000.0, 1.0,
+        env="DAILY_PROFIT_TARGET_MONEY",
+        help="Same lock in money, e.g. 70 stops new trades once the day is up 70. Open positions are still managed. 0 disables."))
 _add(_p("max_risk_overshoot", "Max risk overshoot at minimum lot", "Risk", "float", 0.0, 0.0, 20.0, 0.5,
         env="MAX_RISK_OVERSHOOT",
         help="Refuse an entry when the broker's minimum lot would risk more than this multiple of the per-trade budget. 0 disables (a trade may risk more than the budget on a small account)."))

@@ -43,6 +43,12 @@ numpy==2.2.6
 scikit-learn==1.9.1
 scipy==1.18.1
 
+# ── Neural-network challenger (core/ai/nn_*.py) ─────────────────────────────
+# Optional at run time: the bot and the modular core import without it, and the
+# predictor returns "no trade" if torch is missing. On Windows the PyPI wheel
+# is CPU-only, which is all this model needs. Tested against 2.15.0 (CPU).
+torch==2.15.0
+
 # ── Networking ───────────────────────────────────────────────────────────────
 requests==2.34.2
 httpx==0.28.1

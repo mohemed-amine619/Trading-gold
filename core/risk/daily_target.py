@@ -38,3 +38,16 @@ def profit_lock_reached(daily_start: float, equity: float, target: float) -> boo
     if target is None or target <= 0:
         return False
     return daily_gain(daily_start, equity) >= target
+
+
+def money_target_reached(daily_start: float, equity: float, target_money: float) -> bool:
+    """True when the day's gain in account currency has reached ``target_money``.
+
+    A ``target_money`` of 0 or less disables it. A missing or non-positive
+    baseline never trips it, for the same reason as ``daily_gain``.
+    """
+    if target_money is None or target_money <= 0:
+        return False
+    if daily_start is None or daily_start <= 0:
+        return False
+    return (equity - daily_start) >= target_money
