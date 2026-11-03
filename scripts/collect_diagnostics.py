@@ -48,6 +48,7 @@ from core.diagnostics.redact import (                                 # noqa: E4
     login_from_env, mask_account, redact_env_text, scrub_text, secret_values_from_env,
 )
 from core.diagnostics.report import build_summary                     # noqa: E402
+from core.diagnostics.compare import compare_variants, render as render_compare, split_by_magic    # noqa: E402
 from core.diagnostics.trades import Trade, pair_deals, trade_stats    # noqa: E402
 
 _DEAL_FIELDS = ("position_id", "type", "entry", "time", "volume", "price", "profit",
@@ -133,7 +134,8 @@ def _env_value(env_text: str, key: str) -> Optional[str]:
 
 def collect(root: Path, out_dir: Path, days: int = 7, tail: int = 20000,
             magic: Optional[int] = None, use_env_magic: bool = True, mt5=None,
-            now: Optional[datetime] = None, log_name: str = "trading_bot.log") -> Path:
+            now: Optional[datetime] = None, log_name: str = "trading_bot.log",
+            compare: Optional[List[int]] = None) -> Path:
     now = now or datetime.now(timezone.utc)
     env_text = read_env(root)
     secrets = secret_values_from_env(env_text)
@@ -179,10 +181,17 @@ def collect(root: Path, out_dir: Path, days: int = 7, tail: int = 20000,
             "account_type": account.get("type", "unknown"), "account": account.get("login", ""),
             "balance": account.get("balance", "?"), "equity": account.get("equity", "?")}
 
+    summary = build_summary(meta, stats, log, notes, conf, excursion)
+    ab = None
+    if compare:
+        everyone = pair_deals(history["deals"], magic=None)      # the magic filter above would hide B
+        ab = compare_variants({str(m): v for m, v in split_by_magic(everyone, compare).items()})
+        summary += "\n## A/B comparison (first magic = baseline)\n\n" + render_compare(ab)
+
     members: Dict[str, str] = {
-        "summary.md": build_summary(meta, stats, log, notes, conf, excursion),
+        "summary.md": summary,
         "stats.json": json.dumps({"meta": meta, "trades": stats, "log": log, "confidence": conf,
-                                  "excursion": excursion}, indent=2, default=str),
+                                  "excursion": excursion, "compare": ab}, indent=2, default=str),
         "closed_trades.csv": _csv_text([t.to_row() for t in trades],
                                        list(Trade.__dataclass_fields__)),
         "log_tail.txt": "".join(log_lines),
@@ -222,12 +231,26 @@ def main(argv: Optional[List[str]] = None, mt5=None) -> int:
     parser.add_argument("--magic", type=int, default=None)
     parser.add_argument("--all-magics", action="store_true",
                         help="include manual trades and other bots, not just the bot's magic number")
+    parser.add_argument("--compare", default=None,
+                        help="A/B: comma-separated magic numbers of two or more variants, the first "
+                             "is the baseline, e.g. --compare 888992,888993")
     args = parser.parse_args(argv)
+
+    compare = None
+    if args.compare:
+        try:
+            compare = [int(x) for x in args.compare.split(",") if x.strip()]
+        except ValueError:
+            print("error: --compare takes comma-separated integers, e.g. 888992,888993")
+            return 2
+        if len(compare) < 2 or len(set(compare)) != len(compare):
+            print("error: --compare needs two or more different magic numbers")
+            return 2
 
     root = args.root.resolve()
     try:
         path = collect(root, args.out or root / "diagnostics", args.days, args.tail,
-                       args.magic, use_env_magic=not args.all_magics, mt5=mt5)
+                       args.magic, use_env_magic=not args.all_magics, mt5=mt5, compare=compare)
     except RuntimeError as exc:
         print(f"error: {exc}")
         return 1

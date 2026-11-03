@@ -205,3 +205,26 @@ class TestDegradedCases:
         assert cli.main(["--root", str(bot_dir), "--days", "3"], mt5=FakeMT5()) == 0
         out = capsys.readouterr().out
         assert "wrote" in out and "latest_summary.md" in out
+
+
+class TestCompare:
+    def test_no_compare_section_unless_asked(self, cli, bot_dir):
+        files = members(run(cli, bot_dir))
+        assert "A/B comparison" not in files["summary.md"]
+        assert json.loads(files["stats.json"])["compare"] is None
+
+    def test_compare_uses_all_magics_even_though_the_default_filter_hides_them(self, cli, bot_dir):
+        files = members(run(cli, bot_dir, compare=[888992, 0]))
+        ab = json.loads(files["stats.json"])["compare"]
+        assert ab["baseline"] == "888992"
+        assert ab["variants"]["888992"]["trades"] == 2 and ab["variants"]["0"]["trades"] == 1
+        assert ab["variants"]["888992"]["net"] == pytest.approx(3.34, abs=0.005)    # -8.59 - 0.07 + 12.0
+        assert "A/B comparison" in files["summary.md"] and "Too few trades" in files["summary.md"]
+
+    def test_main_rejects_a_bad_compare_list(self, cli, bot_dir, capsys):
+        for bad in ("888992", "888992,888992", "a,b"):
+            assert cli.main(["--root", str(bot_dir), "--compare", bad], mt5=FakeMT5()) == 2
+        assert "error" in capsys.readouterr().out
+
+    def test_main_accepts_a_compare_list(self, cli, bot_dir, capsys):
+        assert cli.main(["--root", str(bot_dir), "--compare", "888992,0"], mt5=FakeMT5()) == 0

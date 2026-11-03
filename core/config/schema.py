@@ -313,6 +313,13 @@ _add(_p("skip_first_bar", "Do not trade the first bar after start", "Risk", "boo
 _add(_p("reentry_cooldown_bars", "Pause after a loss (bars, same direction)", "Risk", "int", 0, 0, 48, 1,
         env="REENTRY_COOLDOWN_BARS",
         help="After a losing trade, no new entry in that direction for this many closed bars. The other direction is not delayed. 0 = off."))
+_add(_p("news_blackout", "News blackout events (UTC)", "Risk", "str", "",
+        env="NEWS_BLACKOUT",
+        help="Comma-separated 'YYYY-MM-DD HH:MM' in UTC, e.g. NFP and CPI releases. No new entries inside each window; open trades are still managed. An unreadable item is logged as an error and ignored."))
+_add(_p("news_blackout_before_min", "News blackout: minutes before", "Risk", "float", 15.0, 0.0, 240.0, 5.0,
+        env="NEWS_BLACKOUT_BEFORE_MIN"))
+_add(_p("news_blackout_after_min", "News blackout: minutes after", "Risk", "float", 15.0, 0.0, 240.0, 5.0,
+        env="NEWS_BLACKOUT_AFTER_MIN"))
 _add(_p("nn_enabled", "Neural-network vote", "Strategies", "bool", True,
         env="NN_ENABLED",
         help="Use the saved neural-network model as one more vote. It is absent from the score unless a model exists with a measured positive out-of-sample edge and is confident."))

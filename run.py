@@ -194,6 +194,12 @@ try:
 except Exception as _cooldown_import_error:  # pragma: no cover - defensive
     _DirectionCooldown = None
 
+# No new entries around scheduled news. Without the import there is no blackout.
+try:
+    from core.risk.news_blackout import active_event as _news_active_event, parse_events as _news_parse
+except Exception as _news_import_error:  # pragma: no cover - defensive
+    _news_active_event = _news_parse = None
+
 # MT5 deal reasons, for the TRADE END log line.
 _DEAL_REASONS = {0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "sl", 5: "tp", 6: "stop_out"}
 
@@ -727,6 +733,11 @@ CONFIG = {
     # (a restart on a closed market acts on Friday's bar at Sunday's open). A bar
     # that closes while the bot is running is fresh by definition.
     "skip_first_bar":          os.getenv("SKIP_FIRST_BAR", "true").lower() in ("1", "true", "yes"),
+    # Scheduled news (UTC, "YYYY-MM-DD HH:MM", comma separated): no NEW entries from
+    # `before` minutes ahead to `after` minutes behind each. Open trades are still managed.
+    "news_blackout":           os.getenv("NEWS_BLACKOUT", ""),
+    "news_blackout_before_min": float(os.getenv("NEWS_BLACKOUT_BEFORE_MIN", "15") or 15),
+    "news_blackout_after_min": float(os.getenv("NEWS_BLACKOUT_AFTER_MIN", "15") or 15),
     "loss_streak_cooldown_minutes": int(os.getenv("LOSS_STREAK_COOLDOWN_MIN", "60")),
 
     # --- manual trade management ---
@@ -862,10 +873,34 @@ class Notifier:
     good — so alerts recover automatically once connectivity returns.
     """
 
-    def __init__(self, cfg: dict):
+    DUPLICATE_WINDOW_S = 30.0
+
+    def __init__(self, cfg: dict, post=None):
         self.cfg = cfg
         self._telegram_cooldown_until = 0.0   # epoch seconds; retry after this
         self._lock = threading.Lock()
+        # The token lives on the notifier, NOT in CONFIG: GET /api/config/<unknown section>
+        # returns the whole CONFIG, so a token there would be served to the dashboard.
+        self._token = (cfg.get("telegram_token") or os.getenv("TELEGRAM_BOT_TOKEN")
+                       or os.getenv("TELEGRAM_TOKEN") or "").strip()
+        self._chat_id = str(cfg.get("telegram_chat_id") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+        self._post = post or requests.post     # injectable so tests never touch the network
+        self._last_sent: dict = {}             # message -> time, to drop an identical repeat
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return bool(self._token and self._chat_id)
+
+    def _is_repeat(self, msg: str) -> bool:
+        now = time.time()
+        with self._lock:
+            if now - self._last_sent.get(msg, 0.0) < self.DUPLICATE_WINDOW_S:
+                return True
+            self._last_sent[msg] = now
+            if len(self._last_sent) > 200:
+                self._last_sent = {m: t for m, t in self._last_sent.items()
+                                   if now - t < self.DUPLICATE_WINDOW_S}
+        return False
 
     def send(self, msg: str) -> None:
         """Non-blocking send – a network hang must never kill the bot."""
@@ -884,29 +919,28 @@ class Notifier:
             pass
 
     def _send_telegram(self, msg: str) -> None:
-        token   = self.cfg.get("telegram_token", "")
-        chat_id = self.cfg.get("telegram_chat_id", "")
-        if not (token and chat_id):
+        if not self.telegram_enabled or self._is_repeat(msg):
             return
 
         with self._lock:
             if time.time() < self._telegram_cooldown_until:
                 return  # still cooling down from a recent failure, skip quietly
 
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        url = f"https://api.telegram.org/bot{self._token}/sendMessage"
         attempts = 3
         for attempt in range(attempts):
             try:
-                resp = requests.post(
-                    url, data={"chat_id": chat_id, "text": msg}, timeout=(5, 10)
+                resp = self._post(
+                    url, data={"chat_id": self._chat_id, "text": msg}, timeout=(5, 10)
                 )
                 if resp.status_code == 200:
                     return
                 logger.warning("Telegram HTTP %s on attempt %d/%d",
                                resp.status_code, attempt + 1, attempts)
             except Exception as exc:
+                # Never log the exception text: requests embeds the full URL, which holds the token.
                 logger.warning("Telegram send failed (attempt %d/%d): %s",
-                               attempt + 1, attempts, exc)
+                               attempt + 1, attempts, type(exc).__name__)
             if attempt < attempts - 1:
                 time.sleep(1.5 * (attempt + 1))
 
@@ -2951,6 +2985,23 @@ class StandaloneAIBot:
 
         return None
 
+    def _news_blackout_reason(self, now: Optional[datetime] = None) -> str:
+        """Non-empty while inside a scheduled-news window; "" otherwise."""
+        text = str(self.cfg.get("news_blackout", "") or "").strip()
+        if not text or _news_parse is None:
+            return ""
+        cached = getattr(self, "_news_cache", None)
+        if cached is None or cached[0] != text:
+            events, bad = _news_parse(text)
+            if bad:
+                logger.error("NEWS_BLACKOUT: ignoring unreadable item(s) %s - expected "
+                             "'YYYY-MM-DD HH:MM' in UTC", bad)
+            self._news_cache = cached = (text, events)
+        ev = _news_active_event(now or datetime.now(timezone.utc), cached[1],
+                                float(self.cfg.get("news_blackout_before_min", 15) or 0),
+                                float(self.cfg.get("news_blackout_after_min", 15) or 0))
+        return f"news blackout around {ev:%Y-%m-%d %H:%M} UTC" if ev else ""
+
     def _entry_gate(self, equity: float) -> tuple:
         """Return ``(allowed, size_multiplier, reason)`` for a NEW entry.
 
@@ -2960,6 +3011,10 @@ class StandaloneAIBot:
         """
         if self._halt_reason:
             return False, 0.0, self._halt_reason
+
+        news = self._news_blackout_reason()
+        if news:
+            return False, 0.0, news
 
         if self._cooldown_until is not None:
             now = datetime.utcnow()

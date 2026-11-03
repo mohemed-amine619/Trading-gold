@@ -32,6 +32,28 @@ Send `latest_summary.md` first. It is short and holds the findings.
 | `account.json` | demo / real, balance, equity, masked login |
 | `trades_db.csv`, `risk_state/`, `nn/` | The bot's trade table, saved risk state, model-training history, if present |
 
+## A/B comparison and management replay
+
+Two bots with different settings and different `MAGIC_NUMBER`s on one account:
+
+    py scripts\collect_diagnostics.py --compare 888992,888993
+
+adds an "A/B comparison" section (the first magic is the baseline) with per-trade
+expectancy, the difference and a z-score. |z| below 2, or fewer than 10 trades on a side,
+is reported as "not distinguishable yet", never as a winner.
+
+To test break-even / trailing settings offline on your real entries:
+
+    py scripts\export_bars.py --symbol XAUUSDm --timeframe M1 --days 30 --out data\history\XAUUSDm_M1.csv
+    py scripts\export_bars.py --symbol XAUUSDm --timeframe M5 --days 30 --out data\history\XAUUSDm_M5.csv
+    py scripts\replay_management.py --log trading_bot.log --trades diagnostics\closed_trades.csv ^
+        --bars data\history\XAUUSDm_M1.csv --atr-bars data\history\XAUUSDm_M5.csv
+
+Read the CALIBRATION line first: it replays today's settings and compares with what really
+happened. The replay is pessimistic (stop before target inside one bar) and does not model
+the structure trail, AI exits or partial closes, so it ranks settings; it does not forecast.
+Only entries logged with a ticket can be replayed.
+
 ## Safety
 
 * **Read-only.** It reads MT5 history and local files. It never sends an order

@@ -30,7 +30,7 @@ customer runs the bot on their own machine with their own MT5 login.
 
 ## 0. TEST BASELINE
 
-**1269 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**1410 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -117,6 +117,11 @@ with a declared contract and adds the first real multi-stage risk ladder.
 | Audit trail | `core/config/audit.py` | One row per changed key in `config_audit` inside `data/trading.db` — still exactly one SQLite file. Fail-safe: an audit error never blocks a settings change. |
 | Persisted risk state | `core/risk/state.py` | Daily/weekly/peak equity, cooldown and loss streak survive a restart (`data/state/risk_<symbol>.json`). |
 | Risk ladder | `run.py` | At `reduce_size_at_dd` of the daily cap new size is halved; at `halt_at_dd` entries stop; at `max_daily_dd` / `max_weekly_dd` / `max_total_dd` the hard stop fires. |
+| News blackout | `core/risk/news_blackout.py`, `run.py` `_entry_gate` | `NEWS_BLACKOUT` (UTC list) blocks NEW entries from `news_blackout_before_min` before to `news_blackout_after_min` after each event; open trades are still managed; a typo is logged, not silently dropped. |
+| Telegram alerts | `run.py` `Notifier` | Reads `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`; the token is kept out of `CONFIG` (the API would serve it) and out of every log line; identical messages within 30 s are sent once. |
+| A/B comparison | `core/diagnostics/compare.py` | `collect_diagnostics.py --compare magicA,magicB`: Welch z per trade; fewer than 10 trades or `|z| < 2` is reported as undecided. |
+| Management replay | `core/backtesting/management_replay.py`, `scripts/replay_management.py` | Re-runs real entries under other break-even/trailing settings on M1 bars (pessimistic), with a calibration line against what happened. Not a forecast. |
+| Lock distance | `run.py` progressive lock | `lock_min_distance_atr` (0 = legacy 0.55/0.40). The effective break-even trigger is that distance plus the buffer. |
 | Loss-streak breaker | `run.py` | `max_consecutive_losses` consecutive losses start a `loss_streak_cooldown_minutes` cooldown. |
 | Fibonacci scoring | `run.py` `_fib_score` | Contributes `fib_weight` points at retracement confluence; with `fib_enabled=False` the scorer reproduces the legacy 45/30/15/10 formula exactly (guarded by a test). |
 | Dashboard | `dashboard.html` | "Master Parameters" panel renders `GET /api/config/schema`, so the UI cannot drift from the validator. Includes Reset DD Halt and the audit list. |
