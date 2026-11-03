@@ -30,7 +30,7 @@ customer runs the bot on their own machine with their own MT5 login.
 
 ## 0. TEST BASELINE
 
-**917 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**982 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -44,6 +44,7 @@ customer runs the bot on their own machine with their own MT5 login.
 | NN challenger: features, labels, scaler, splits | 26 | Implemented and tested |
 | NN challenger: model, calibration, walk-forward, predictor, trainer CLI | 32 | Implemented and tested (not wired into run.py) |
 | NN continuous trainer: seed ensemble, champion/challenger gate, hot reload, loop script | 47 | Implemented and tested (not wired into run.py) |
+| Diagnostics collector: secret scrubbing, deal pairing, trade/log statistics, findings, zip bundle | 65 | Implemented and tested (MT5 history read is untested against a real terminal) |
 | Bridge contract and auth | 31 | Implemented, tested against a mock |
 | Instrument registry | 55 | Implemented and tested |
 | Windows compatibility & SQLite persistence | 22 | Implemented and tested |

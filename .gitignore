@@ -179,3 +179,6 @@ data/cache/
 run/
 # Backups produced by scripts/windows/backup.ps1
 backups/
+
+# Diagnostics bundles (account balances, trade history) - never commit
+/diagnostics/
