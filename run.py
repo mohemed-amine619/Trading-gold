@@ -3094,9 +3094,12 @@ class StandaloneAIBot:
                 self._halt_reason = hard_reason
             return False
 
-        if self.daily_start > 0:
+        # A cap of 0 (or less) means "no daily stop", like the weekly/total caps and the
+        # soft ladder in _entry_gate. Without this guard 0.0 >= 0.0 halted every day.
+        daily_cap = float(self.cfg.get("max_daily_dd", 0.03) or 0.0)
+        if self.daily_start > 0 and daily_cap > 0:
             dd = (self.daily_start - equity) / self.daily_start
-            if dd >= self.cfg["max_daily_dd"]:
+            if dd >= daily_cap:
                 if not self._daily_dd_logged:
                     logger.warning("Daily DD limit hit (%.1f%%) – no new trades today",
                                    dd * 100)

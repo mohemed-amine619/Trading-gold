@@ -30,7 +30,7 @@ customer runs the bot on their own machine with their own MT5 login.
 
 ## 0. TEST BASELINE
 
-**1410 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**1413 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
