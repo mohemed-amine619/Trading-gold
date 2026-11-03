@@ -107,6 +107,8 @@ class HelperSettings:
     nn_reason: str                  # why it is off, for the startup banner
     nn_interval_min: float
     nn_models: int
+    nn_bars: int                    # history bars fetched for each training cycle
+    nn_epochs: int                  # maximum epochs per model (early stopping applies)
     timeframe: str
     diag_enabled: bool
     diag_interval_min: float
@@ -132,6 +134,8 @@ class HelperSettings:
             nn_enabled=nn_on, nn_reason=reason,
             nn_interval_min=_number(env.get("NN_TRAINER_INTERVAL_MIN"), 60.0, 1.0),
             nn_models=int(_number(env.get("NN_TRAINER_MODELS"), 3, 1)),
+            nn_bars=int(_number(env.get("NN_TRAINER_BARS"), 30000, 3000)),
+            nn_epochs=int(_number(env.get("NN_TRAINER_EPOCHS"), 50, 5)),
             timeframe=timeframe,
             diag_enabled=diag_on,
             diag_interval_min=_number(env.get("DIAGNOSTICS_INTERVAL_MIN"), 360.0, 1.0),
@@ -144,6 +148,7 @@ def nn_command(python: str, root: Path, symbol: str, s: HelperSettings, parent_p
             "--symbol", symbol, "--timeframe", s.timeframe,
             "--out", str(root / "data" / "models" / f"nn_{symbol}_{s.timeframe}.pt"),
             "--interval-min", f"{s.nn_interval_min:g}", "--models", str(s.nn_models),
+            "--bars", str(s.nn_bars), "--epochs", str(s.nn_epochs),
             "--parent-pid", str(parent_pid)]
 
 

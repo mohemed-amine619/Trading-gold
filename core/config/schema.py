@@ -301,6 +301,40 @@ _add(_p("analog_check_bars", "History repeats: bars replayed to prove itself", "
         env="ANALOG_CHECK_BARS"))
 _add(_p("analog_min_calls", "History repeats: calls needed to trust the proof", "Strategies", "int", 30, 10, 300, 5,
         env="ANALOG_MIN_CALLS"))
+_add(_p("nn_enabled", "Neural-network vote", "Strategies", "bool", True,
+        env="NN_ENABLED",
+        help="Use the saved neural-network model as one more vote. It is absent from the score unless a model exists with a measured positive out-of-sample edge and is confident."))
+_add(_p("nn_weight", "Neural-network weight (pts)", "Strategies", "float", 15.0, 0.0, 40.0, 1.0,
+        env="NN_WEIGHT"))
+_add(_p("nn_min_confidence", "Neural network: confidence needed", "Strategies", "float", 0.72, 0.5, 0.99, 0.01,
+        env="NN_MIN_CONFIDENCE", percent=True))
+_add(_p("nn_min_oos_edge", "Neural network: minimum measured edge", "Strategies", "float", 0.05, 0.0, 1.0, 0.01,
+        env="NN_MIN_OOS_EDGE",
+        help="Mean R-multiple of the model's trades on bars it never saw (at least 30 trades). A model below this, or with no measurement, does not vote."))
+_add(_p("scalp_enabled", "Scalping strategies", "Strategies", "bool", True,
+        env="SCALP_ENABLED",
+        help="Opening-range breakout, VWAP fade, squeeze, RSI(2), momentum burst, EMA pullback and liquidity sweep. Each votes only while its own replay over the recent bars shows a statistically clear edge; with none proven and live the score is exactly as if this were off."))
+_add(_p("scalp_weight", "Scalping weight (pts)", "Strategies", "float", 15.0, 0.0, 40.0, 1.0,
+        env="SCALP_WEIGHT"))
+_add(_p("scalp_strategies", "Scalping strategies in use", "Strategies", "str",
+        "orb,vwap_fade,squeeze,rsi2,burst,ema_pullback,sweep", env="SCALP_STRATEGIES",
+        help="Comma-separated. Names: orb, vwap_fade, squeeze, rsi2, burst, ema_pullback, sweep."))
+_add(_p("scalp_horizon", "Scalping: outcome horizon (bars)", "Strategies", "int", 12, 3, 48, 1,
+        env="SCALP_HORIZON"))
+_add(_p("scalp_check_bars", "Scalping: bars replayed to prove a strategy", "Strategies", "int", 900, 200, 4000, 50,
+        env="SCALP_CHECK_BARS",
+        help="Limited by the candles the bot loads (HISTORY_CANDLES). Rare strategies such as the opening-range breakout need several days of bars to prove themselves."))
+_add(_p("scalp_min_calls", "Scalping: independent calls needed", "Strategies", "int", 15, 5, 100, 1,
+        env="SCALP_MIN_CALLS"))
+_add(_p("scalp_min_edge", "Scalping: minimum proven edge", "Strategies", "float", 0.10, 0.0, 1.0, 0.01,
+        env="SCALP_MIN_EDGE"))
+_add(_p("scalp_min_z", "Scalping: significance (sigmas)", "Strategies", "float", 2.7, 0.0, 6.0, 0.1,
+        env="SCALP_MIN_Z",
+        help="Seven strategies are tested at once, so 2.7 keeps the chance that one proves itself by luck near 1%. Lowering it lets noise through."))
+_add(_p("scalp_valid_bars", "Scalping: bars a signal stays live", "Strategies", "int", 2, 1, 6, 1,
+        env="SCALP_VALID_BARS"))
+_add(_p("scalp_open_hour", "Scalping: opening-range hour (data clock)", "Strategies", "int", 7, 0, 23, 1,
+        env="SCALP_OPEN_HOUR"))
 _add(_p("fib_zone_low", "Fib discount zone start", "Strategies", "float", 0.382, 0.0, 1.0, 0.001,
         env="FIB_ZONE_LOW"))
 _add(_p("fib_zone_high", "Fib discount zone end", "Strategies", "float", 0.786, 0.0, 1.0, 0.001,

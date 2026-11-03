@@ -104,6 +104,12 @@ class ModelPredictor:
             self._load_error = f"model file unusable: {exc!r}"
 
     @property
+    def oos_edge(self) -> Optional[float]:
+        """The out-of-sample edge measured for the loaded model (``None`` = unmeasured)."""
+        self._load()
+        return self._oos_edge if self._loaded else None
+
+    @property
     def status(self) -> str:
         self._load()
         return "ready" if self._loaded else (self._load_error or "not loaded")

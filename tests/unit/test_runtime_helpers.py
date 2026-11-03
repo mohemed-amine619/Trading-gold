@@ -102,6 +102,14 @@ class TestSettings:
         assert HelperSettings.from_env({}, False).diag_enabled is True
         assert HelperSettings.from_env({"DIAGNOSTICS_ENABLED": "false"}, False).diag_enabled is False
 
+    def test_training_volume_defaults_and_limits(self):
+        s = HelperSettings.from_env({}, True)
+        assert (s.nn_bars, s.nn_epochs) == (30000, 50)
+        small = HelperSettings.from_env({"NN_TRAINER_BARS": "100", "NN_TRAINER_EPOCHS": "1"}, True)
+        assert (small.nn_bars, small.nn_epochs) == (30000, 50)          # below the minimums: defaults
+        more = HelperSettings.from_env({"NN_TRAINER_BARS": "60000", "NN_TRAINER_EPOCHS": "120"}, True)
+        assert (more.nn_bars, more.nn_epochs) == (60000, 120)
+
     def test_numbers_are_read(self):
         s = HelperSettings.from_env({"NN_TRAINER_INTERVAL_MIN": "30", "NN_TRAINER_MODELS": "5",
                                      "DIAGNOSTICS_INTERVAL_MIN": "120", "DIAGNOSTICS_DAYS": "14"}, True)
@@ -118,6 +126,13 @@ class TestCommands:
         assert cmd[cmd.index("--out") + 1] == str(Path("/bot/data/models/nn_XAUUSDm_M5.pt"))
         assert cmd[cmd.index("--interval-min") + 1] == "30"
         assert cmd[cmd.index("--parent-pid") + 1] == "777"
+
+    def test_the_trainer_command_carries_the_training_volume(self):
+        s = HelperSettings.from_env({"NN_TRAINER_ENABLED": "true", "NN_TRAINER_BARS": "45000",
+                                     "NN_TRAINER_EPOCHS": "80"}, True)
+        cmd = nn_command("py", Path("/bot"), "XAUUSDm", s, 1)
+        assert cmd[cmd.index("--bars") + 1] == "45000"
+        assert cmd[cmd.index("--epochs") + 1] == "80"
 
     def test_the_diagnostics_command(self):
         s = HelperSettings.from_env({"DIAGNOSTICS_DAYS": "3"}, True)

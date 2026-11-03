@@ -162,6 +162,31 @@ except Exception as _analog_import_error:  # pragma: no cover - defensive
     _AnalogConfig = None
     _AnalogEngine = None
 
+# Scalping strategies (opening-range breakout, VWAP fade, squeeze, RSI(2), momentum
+# burst, EMA pullback, liquidity sweep). Each must prove itself on recent bars
+# before it may vote. If the import fails the bot scores exactly as before.
+try:
+    from core.strategy.scalp import (
+        ScalpConfig as _ScalpConfig, ScalpEngine as _ScalpEngine, scalp_support as _scalp_support,
+    )
+except Exception as _scalp_import_error:  # pragma: no cover - defensive
+    _ScalpConfig = None
+    _ScalpEngine = None
+    _scalp_support = None
+
+# Neural-network vote. The predictor imports torch lazily and fails neutral on a
+# missing file, a missing torch, or a model whose out-of-sample edge was never
+# measured; neutral means the component is absent from the score.
+try:
+    from core.ai.nn_predictor import ModelPredictor as _NNPredictor
+except Exception as _nn_import_error:  # pragma: no cover - defensive
+    _NNPredictor = None
+
+_NN_KEYS = ("nn_min_confidence", "nn_min_oos_edge")
+
+_SCALP_KEYS = ("scalp_strategies", "scalp_horizon", "scalp_check_bars", "scalp_min_calls",
+               "scalp_min_edge", "scalp_min_z", "scalp_valid_bars", "scalp_open_hour")
+
 _ANALOG_KEYS = ("analog_window", "analog_k", "analog_horizon", "analog_vote",
                 "analog_min_edge", "analog_min_z", "analog_check_bars", "analog_min_calls")
 
@@ -608,6 +633,28 @@ CONFIG = {
     "analog_min_z":            float(os.getenv("ANALOG_MIN_Z", "2.0")),
     "analog_check_bars":       int(os.getenv("ANALOG_CHECK_BARS", "400")),
     "analog_min_calls":        int(os.getenv("ANALOG_MIN_CALLS", "30")),
+    # Scalping strategies. Each one votes only while its own replay over the recent
+    # bars shows a statistically clear edge (min_z is 2.7, not 2.0, because seven
+    # strategies are tested at once). No proven strategy with a live signal means
+    # the component is absent and the score is exactly as without it.
+    # Neural-network vote (model trained by scripts/train_nn_loop.py, which run.py
+    # starts when NN_TRAINER_ENABLED allows). Absent unless a saved model has a
+    # measured out-of-sample edge of at least nn_min_oos_edge and is confident.
+    "nn_enabled":              os.getenv("NN_ENABLED", "true").lower() in ("1", "true", "yes"),
+    "nn_weight":               float(os.getenv("NN_WEIGHT", "15")),
+    "nn_min_confidence":       float(os.getenv("NN_MIN_CONFIDENCE", "0.72")),
+    "nn_min_oos_edge":         float(os.getenv("NN_MIN_OOS_EDGE", "0.05")),
+    "scalp_enabled":           os.getenv("SCALP_ENABLED", "true").lower() in ("1", "true", "yes"),
+    "scalp_weight":            float(os.getenv("SCALP_WEIGHT", "15")),
+    "scalp_strategies":        os.getenv("SCALP_STRATEGIES",
+                                         "orb,vwap_fade,squeeze,rsi2,burst,ema_pullback,sweep"),
+    "scalp_horizon":           int(os.getenv("SCALP_HORIZON", "12")),
+    "scalp_check_bars":        int(os.getenv("SCALP_CHECK_BARS", "900")),
+    "scalp_min_calls":         int(os.getenv("SCALP_MIN_CALLS", "15")),
+    "scalp_min_edge":          float(os.getenv("SCALP_MIN_EDGE", "0.10")),
+    "scalp_min_z":             float(os.getenv("SCALP_MIN_Z", "2.7")),
+    "scalp_valid_bars":        int(os.getenv("SCALP_VALID_BARS", "2")),
+    "scalp_open_hour":         int(os.getenv("SCALP_OPEN_HOUR", "7")),
     "fib_zone_low":            float(os.getenv("FIB_ZONE_LOW", "0.382")),
     "fib_zone_high":           float(os.getenv("FIB_ZONE_HIGH", "0.786")),
     "fib_extension_target":    float(os.getenv("FIB_EXTENSION_TARGET", "1.618")),
@@ -2146,7 +2193,8 @@ def _fib_score(location, direction: int, cfg: dict) -> float:
 
 def _score_direction(ai_direction: int, ai_conf: float,
                      m15: pd.DataFrame, h1: pd.DataFrame, h4: pd.DataFrame,
-                     direction: int, cfg: dict, location=None, analog=None) -> float:
+                     direction: int, cfg: dict, location=None, analog=None, scalp=None,
+                     nn=None) -> float:
     """Total confluence score (0-100) for the given direction.
 
     The score is a fixed 100-point budget split between evidence sources. The
@@ -2160,6 +2208,10 @@ def _score_direction(ai_direction: int, ai_conf: float,
       Fibonacci     0 pts  — off by default in the budget; takes its share
                              from the total when ``fib_enabled``
 
+    Neural net     ``nn_weight`` (15) pts — only while a saved model with a MEASURED
+                             positive out-of-sample edge is confident; otherwise absent.
+    Scalping       ``scalp_weight`` (15) pts — only while a PROVEN scalping strategy
+                             has a live signal; an opposing live signal scores 0.
     History repeats ``analog_weight`` (12) pts — only while the engine is voting.
                              An abstaining or disabled engine takes NO share, so
                              the other components are scaled exactly as before.
@@ -2185,7 +2237,15 @@ def _score_direction(ai_direction: int, ai_conf: float,
     if (analog is not None and not getattr(analog, "abstained", True)
             and cfg.get("analog_enabled", True)):
         analog_w = max(0.0, float(cfg.get("analog_weight", 12.0)))
-    nominal = ai_w + trend_w + mom_w + entry_w + fib_w + analog_w
+    scalp_w, scalp_share = 0.0, None
+    if scalp and cfg.get("scalp_enabled", True) and _scalp_support is not None:
+        scalp_share = _scalp_support(scalp, direction)
+        if scalp_share is not None:
+            scalp_w = max(0.0, float(cfg.get("scalp_weight", 15.0)))
+    nn_w = 0.0
+    if (nn is not None and getattr(nn, "direction", 0) != 0 and cfg.get("nn_enabled", True)):
+        nn_w = max(0.0, float(cfg.get("nn_weight", 15.0)))
+    nominal = ai_w + trend_w + mom_w + entry_w + fib_w + analog_w + scalp_w + nn_w
     factor  = (100.0 / nominal) if nominal > 0 else 0.0
 
     # AI component: 0..ai_w
@@ -2220,7 +2280,13 @@ def _score_direction(ai_direction: int, ai_conf: float,
             analog_pts = 0.30 * analog_w     # proven, but no call on this bar: neutral
         # analog.direction == -direction: the analogues disagree -> 0 points
 
-    return (ai_pts + trend + momentum + entry + fib + analog_pts) * factor
+    scalp_pts = scalp_w * scalp_share if scalp_w > 0 else 0.0
+
+    nn_pts = 0.0
+    if nn_w > 0 and nn.direction == direction:
+        nn_pts = nn_w * float(nn.confidence)         # opposing the network scores 0 points
+
+    return (ai_pts + trend + momentum + entry + fib + analog_pts + scalp_pts + nn_pts) * factor
 
 
 # ---------------------------------------------------------------------------
@@ -2362,6 +2428,14 @@ class StandaloneAIBot:
         self._analog_engine = None        # "history repeats" engine, built on first use
         self._analog_key = None
         self._analog_failed = False
+        self._scalp_engine = None         # scalping engine, built on first use
+        self._scalp_key = None
+        self._scalp_failed = False
+        self._scalp_proven: tuple = ()
+        self._nn_predictor = None         # neural-network predictor, built on first use
+        self._nn_key = None
+        self._nn_failed = False
+        self._nn_note = None
         self._daily_dd_logged = False     # log the daily-cap warning once per day, not every tick
         self._weekly_halt_done = False
         self._daily_halt_done = False
@@ -2989,6 +3063,74 @@ class StandaloneAIBot:
                                self.cfg.get("symbol"), exc)
             return None
 
+    def _nn_model_path(self) -> str:
+        """Where scripts/train_nn_loop.py (started by this process) saves its model."""
+        tf = os.getenv("TIMEFRAME", "M5").strip().upper() or "M5"
+        root = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(root, "data", "models", f"nn_{self.cfg['symbol']}_{tf}.pt")
+
+    def _get_nn(self, m15p):
+        """The neural-network vote for the newest bar, or ``None`` when it is off or
+        failed. A neutral signal (no model, no measured edge, not confident) is
+        returned as is and scores as absent. Never raises into the signal path; the
+        predictor itself notices a replaced model file and reloads it."""
+        if not self.cfg.get("nn_enabled", True) or _NNPredictor is None:
+            return None
+        try:
+            path = self._nn_model_path()
+            key = (path,) + tuple(self.cfg.get(k) for k in _NN_KEYS)
+            if self._nn_key != key:
+                self._nn_predictor = _NNPredictor(
+                    path, min_confidence=float(self.cfg["nn_min_confidence"]),
+                    min_oos_edge=float(self.cfg["nn_min_oos_edge"]))
+                self._nn_key = key
+            sig = self._nn_predictor.predict_signal(m15p)
+            note = None if sig.direction != 0 and sig.reason == "signal" else sig.reason
+            if sig.direction == 0 and note != self._nn_note:      # say why, once per change
+                self._nn_note = note
+                logger.info("[%s] NN not voting: %s", self.cfg.get("symbol"), note)
+            elif sig.direction != 0:
+                self._nn_note = None
+            return sig
+        except Exception as exc:
+            if not self._nn_failed:
+                self._nn_failed = True
+                logger.warning("[%s] NN vote failed and is skipped: %r", self.cfg.get("symbol"), exc)
+            return None
+
+    def _get_scalp(self, m15p):
+        """Live votes from the scalping strategies that have proven themselves, or
+        ``None`` when the component is off or failed. Never raises into the signal
+        path; the engine is rebuilt if any of its settings change."""
+        if not self.cfg.get("scalp_enabled", True) or _ScalpEngine is None:
+            return None
+        try:
+            key = tuple(self.cfg.get(k) for k in _SCALP_KEYS)
+            if self._scalp_key != key:
+                names = tuple(s.strip() for s in str(self.cfg["scalp_strategies"]).split(",")
+                              if s.strip())
+                self._scalp_engine = _ScalpEngine(_ScalpConfig(
+                    strategies=names, horizon=int(self.cfg["scalp_horizon"]),
+                    check_bars=int(self.cfg["scalp_check_bars"]),
+                    min_calls=int(self.cfg["scalp_min_calls"]),
+                    min_edge=float(self.cfg["scalp_min_edge"]), min_z=float(self.cfg["scalp_min_z"]),
+                    valid_bars=int(self.cfg["scalp_valid_bars"]),
+                    open_hour=int(self.cfg["scalp_open_hour"])))
+                self._scalp_key = key
+            result = self._scalp_engine.evaluate(m15p)
+            proven = tuple(sorted(n for n, r in result.report.items() if r.get("proven")))
+            if proven != self._scalp_proven:                  # say so when the set changes
+                self._scalp_proven = proven
+                logger.info("[%s] Scalping strategies proven on recent bars: %s",
+                            self.cfg.get("symbol"), ", ".join(proven) or "none")
+            return result.votes
+        except Exception as exc:
+            if not self._scalp_failed:
+                self._scalp_failed = True
+                logger.warning("[%s] Scalping strategies failed and are skipped: %r",
+                               self.cfg.get("symbol"), exc)
+            return None
+
     def _get_signal(self, m15p, h1p, h4p) -> tuple:
         """Return (direction, score, ai_conf, reason).  direction 0 = no trade.
 
@@ -3068,11 +3210,24 @@ class StandaloneAIBot:
                         "BUY" if analog.direction == 1 else "SELL", analog.strength * 100.0,
                         analog.n_neighbours, analog.edge or 0.0, analog.calls)
 
+        nn = self._get_nn(m15p)
+        if nn is not None and nn.direction != 0:
+            logger.info("[%s] NN vote: %s (confidence %.2f, out-of-sample edge %+.2f)",
+                        self.cfg["symbol"], "BUY" if nn.direction == 1 else "SELL", nn.confidence,
+                        self._nn_predictor.oos_edge or 0.0)
+
+        scalp = self._get_scalp(m15p)
+        if scalp:
+            logger.info("[%s] Scalping signals: %s", self.cfg["symbol"], ", ".join(
+                f"{v.name} {'BUY' if v.direction == 1 else 'SELL'} (edge {v.edge:+.2f} over "
+                f"{v.n_independent} independent calls)" for v in scalp))
+
         # Score both directions (confluence, independent of gates)
         best_dir, best_score = 0, 0.0
         for d in [1, -1]:
             score = _score_direction(ai_direction, ai_conf, m15p, h1p, h4p,
-                                     d, self.cfg, location=location, analog=analog)
+                                     d, self.cfg, location=location, analog=analog,
+                                     scalp=scalp, nn=nn)
             if score > best_score:
                 best_score, best_dir = score, d
 
