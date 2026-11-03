@@ -180,6 +180,9 @@ _add(_p("daily_profit_target", "Daily profit target (lock gains)", "Risk", "floa
 _add(_p("daily_profit_target_money", "Daily profit target (account currency)", "Risk", "float", 0.0, 0.0, 100000.0, 1.0,
         env="DAILY_PROFIT_TARGET_MONEY",
         help="Same lock in money, e.g. 70 stops new trades once the day is up 70. Open positions are still managed. 0 disables."))
+_add(_p("min_profit_before_tighten_atr", "Profit before structure/AI tightening (ATR)", "Stops & Targets", "float", 0.0, 0.0, 3.0, 0.05,
+        env="MIN_PROFIT_BEFORE_TIGHTEN_ATR",
+        help="The structure and AI-ratchet stops wait until the trade is this many ATR in profit before tightening. 0 tightens as soon as the trade is in profit (old behaviour)."))
 _add(_p("max_risk_overshoot", "Max risk overshoot at minimum lot", "Risk", "float", 0.0, 0.0, 20.0, 0.5,
         env="MAX_RISK_OVERSHOOT",
         help="Refuse an entry when the broker's minimum lot would risk more than this multiple of the per-trade budget. 0 disables (a trade may risk more than the budget on a small account)."))

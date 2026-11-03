@@ -201,6 +201,22 @@ except Exception as _cfg_import_error:  # pragma: no cover - defensive
         f"the dashboard schema editor will be disabled."
     )
 
+# Stop-change rules. If this import fails the inline fallbacks below keep the
+# one rule that must never be lost: a stop may only move toward price.
+try:
+    from core.position.sl_guard import is_tighter as _is_tighter, step_ok as _step_ok
+except Exception as _sl_guard_import_error:  # pragma: no cover - defensive
+    def _is_tighter(is_buy, current_sl, new_sl):
+        if new_sl is None or new_sl <= 0:
+            return False
+        current = float(current_sl or 0.0)
+        if current <= 0:
+            return True
+        return new_sl > current + 1e-9 if is_buy else new_sl < current - 1e-9
+
+    def _step_ok(is_buy, current_sl, new_sl, min_step, breakeven_sl=None):
+        return _is_tighter(is_buy, current_sl, new_sl)
+
 # Helper processes (NN trainer, diagnostics) started from the manager below.
 # If this import fails the bot runs exactly as before, without them.
 try:
@@ -587,6 +603,12 @@ CONFIG = {
     # ratchet from spending a broker call on a one-tick drift of the rolling
     # swing anchor. 0 disables the threshold (old behaviour).
     "min_sl_step_atr":         float(os.getenv("MIN_SL_STEP_ATR", "0.05")),
+    # The structure and AI-ratchet stops used to clamp the stop to ~0.55 ATR from
+    # price the moment a trade showed any profit, cutting a 1.8 ATR stop to
+    # ~0.55 ATR within seconds. They now wait until the trade has this much
+    # profit (ATR multiple). 0 = old behaviour. Break-even and the trailing stop
+    # keep their own thresholds.
+    "min_profit_before_tighten_atr": float(os.getenv("MIN_PROFIT_BEFORE_TIGHTEN_ATR", "0") or 0.0),
     "max_spread_points":       float(os.getenv("MAX_SPREAD_POINTS", "0") or 0.0),
 
     # --- capital preservation ladder -----------------------------------
@@ -2296,6 +2318,7 @@ class StandaloneAIBot:
         self._peak_profit: dict = {}      # ticket -> peak favourable move (price units), POWER-UP (B)
         self._manual_sltp_failed: dict = {} # ticket -> epoch timestamp of last failed modification
         self._dd_positions_closed = False # one-shot equity protect close
+        self._loosen_logged: dict = {}    # ticket -> last time a refused loosening was logged
         self._daily_dd_logged = False     # log the daily-cap warning once per day, not every tick
         self._weekly_halt_done = False
         self._daily_halt_done = False
@@ -3638,6 +3661,22 @@ class StandaloneAIBot:
                      pos.ticket, retcode_str, last_err, sl_val, tp_val)
         return False
 
+    def _live_sl(self, pos, digits: int) -> float:
+        """The stop the broker holds RIGHT NOW (0 = none).
+
+        ``pos`` is a snapshot taken at the start of the management pass. Several
+        stop paths run in sequence on it, and each compares against that
+        snapshot, so a later path could "improve" on the old stop while actually
+        loosening the one an earlier path had just set. The broker is the truth.
+        """
+        try:
+            got = mt5.positions_get(ticket=pos.ticket)
+            if got:
+                return round(float(got[0].sl or 0.0), digits)
+        except Exception:
+            pass
+        return round(float(pos.sl), digits) if getattr(pos, "sl", 0.0) else 0.0
+
     def _modify_sl(self, pos, new_sl: float) -> bool:
         if self.cfg.get("dry_run"):
             logger.info("[DRY-RUN] Modify SL ticket=%s → %.5f", pos.ticket, new_sl)
@@ -3645,11 +3684,21 @@ class StandaloneAIBot:
         info = mt5.symbol_info(pos.symbol)
         digits = getattr(info, "digits", 2) or 2
         sl_val = round(float(new_sl), digits)
-        current_sl = round(float(pos.sl), digits) if getattr(pos, "sl", 0.0) else 0.0
+        current_sl = self._live_sl(pos, digits)
 
         # Avoid redundant order sends if SL is identical to current broker SL
         if abs(current_sl - sl_val) <= 1e-6:
             return True
+
+        # Never widen a stop, whatever path asked for it.
+        is_buy = pos.type == mt5.ORDER_TYPE_BUY
+        if current_sl > 0 and not _is_tighter(is_buy, current_sl, sl_val):
+            now = time.time()
+            if now - self._loosen_logged.get(pos.ticket, 0.0) >= 60.0:
+                self._loosen_logged[pos.ticket] = now
+                logger.info("Stop change refused (would loosen) ticket=%s live=%.5f proposed=%.5f",
+                            pos.ticket, current_sl, sl_val)
+            return False
 
         req = {
             "action":   mt5.TRADE_ACTION_SLTP,
@@ -3934,6 +3983,9 @@ class StandaloneAIBot:
             # Track peak profit reached for dynamic ratchets, giveback cuts and SL reasoning
             peak = max(self._peak_profit.get(pos.ticket, 0.0), profit_move)
             self._peak_profit[pos.ticket] = peak
+            # Structure/AI tightening waits until the trade has this much profit
+            # (in ATR). 0 = tighten as soon as the trade is in profit.
+            tighten_after = float(self.cfg.get("min_profit_before_tighten_atr", 0.0) or 0.0) * atr
 
             # --- MANUAL TRADE HANDLING ---
             bot_magic = self.cfg.get("magic_number", 888999)
@@ -4074,7 +4126,8 @@ class StandaloneAIBot:
                     continue
 
             # --- DYNAMIC AI SL/TP RATCHET (One-Way Market Reasoner) ---
-            if self.cfg.get("dynamic_sltp_enabled", True) and _DYNAMIC_SLTP_AVAILABLE and floating_pnl > 0:
+            if (self.cfg.get("dynamic_sltp_enabled", True) and _DYNAMIC_SLTP_AVAILABLE
+                    and floating_pnl > 0 and profit_move >= tighten_after):
                 reasoner = self._get_sltp_reasoner()
                 if reasoner is not None:
                     loc = self._location_for(m15p) if _LOCATION_AVAILABLE else None
@@ -4099,7 +4152,8 @@ class StandaloneAIBot:
                             self._modify_sl(pos, adj.new_sl)
 
             # --- MARKET STRUCTURE TRAILING STOP ---
-            if floating_pnl > 0 and self.cfg.get("structure_trailing", True):
+            if (floating_pnl > 0 and profit_move >= tighten_after
+                    and self.cfg.get("structure_trailing", True)):
                 info = mt5.symbol_info(pos.symbol)
                 min_step = max((getattr(info, "point", 0.01) or 0.01) * 1.5,
                                float(self.cfg.get("min_sl_step_atr", 0.05) or 0.0) * atr)
@@ -4176,15 +4230,19 @@ class StandaloneAIBot:
                     min_dist = (info.trade_stops_level * info.point) if info and info.trade_stops_level else (atr * 0.1)
                     is_gold = "XAU" in pos.symbol.upper() or "GOLD" in pos.symbol.upper()
                     min_dist = max(min_dist, atr * 0.55 if is_gold else atr * 0.40)
-                    min_step = (getattr(info, "point", 0.01) or 0.01) * 1.5
+                    # min_sl_step_atr applies here too: this path used a 1.5-point
+                    # step, which sent dozens of ~0.05-price-unit modifications a
+                    # minute. Reaching break-even is exempt (see _step_ok).
+                    min_step = max((getattr(info, "point", 0.01) or 0.01) * 1.5,
+                                   float(self.cfg.get("min_sl_step_atr", 0.05) or 0.0) * atr)
 
                     if direction == 1:
                         target_sl = min(target_sl, close_price - min_dist)
-                        if target_sl > pos.sl + min_step and target_sl >= be_sl:
+                        if target_sl >= be_sl and _step_ok(True, pos.sl, target_sl, min_step, be_sl):
                             self._modify_sl(pos, target_sl)
                     else:
                         target_sl = max(target_sl, close_price + min_dist)
-                        if (pos.sl == 0 or target_sl < pos.sl - min_step) and target_sl <= be_sl:
+                        if target_sl <= be_sl and _step_ok(False, pos.sl, target_sl, min_step, be_sl):
                             self._modify_sl(pos, target_sl)
 
             # ---- EARLY PROTECTION: move SL closer at small profit to survive corrections ----
@@ -4223,8 +4281,12 @@ class StandaloneAIBot:
                 else:
                     new_sl = min(new_sl, be_sl)
 
-                if ((direction == 1  and new_sl > pos.sl + 1e-9) or
-                        (direction == -1 and (pos.sl == 0 or new_sl < pos.sl - 1e-9))):
+                # Same floor as the other paths: the trailing stop used to send
+                # every tick that improved the stop by any amount at all.
+                trail_info = mt5.symbol_info(pos.symbol)
+                trail_step = max((getattr(trail_info, "point", 0.01) or 0.01) * 1.5,
+                                 float(self.cfg.get("min_sl_step_atr", 0.05) or 0.0) * atr)
+                if _step_ok(direction == 1, pos.sl, new_sl, trail_step, be_sl):
                     self._modify_sl(pos, new_sl)
 
             # ---- multi-stage partial close ---------------------------
