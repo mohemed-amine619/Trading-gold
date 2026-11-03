@@ -201,6 +201,13 @@ except Exception as _cfg_import_error:  # pragma: no cover - defensive
         f"the dashboard schema editor will be disabled."
     )
 
+# Helper processes (NN trainer, diagnostics) started from the manager below.
+# If this import fails the bot runs exactly as before, without them.
+try:
+    from core.runtime.helpers import build_supervisor as _build_helpers
+except Exception as _helpers_import_error:  # pragma: no cover - defensive
+    _build_helpers = None
+
 try:
     from core.risk.state import (
         RiskState as _RiskState,
@@ -5299,7 +5306,23 @@ if __name__ == "__main__":
             b.running = True
             if hasattr(b, 'notifier') and hasattr(b.notifier, 'send'):
                 b.notifier.send(f"🤖 AI Bot started | {b.cfg['symbol']}")
-    
+
+    # Helper processes: the NN trainer and the diagnostics collector run as
+    # separate processes, so heavy training cannot slow this loop. They never
+    # send orders, and a failure in them never stops the bot.
+    helpers = None
+    if _build_helpers is not None:
+        try:
+            helpers = _build_helpers(
+                os.path.dirname(os.path.abspath(__file__)),
+                [b.cfg["symbol"] for b in bots if getattr(b, "running", False)], os.environ)
+            helpers.start()
+            for line in helpers.describe():
+                logger.info(line)
+        except Exception as exc:
+            logger.warning("helper processes unavailable: %r", exc)
+            helpers = None
+
     try:
         while True:
             for b in bots:
@@ -5308,8 +5331,12 @@ if __name__ == "__main__":
                         b.step()
                     except Exception as exc:
                         logger.exception("Error in bot step (%s): %s", b.cfg["symbol"], exc)
+            if helpers is not None:
+                helpers.tick()
             time.sleep(CONFIG.get("sleep_interval", 1.0))
     except KeyboardInterrupt:
         logger.info("Manager stopping…")
     finally:
+        if helpers is not None:
+            helpers.stop()
         mt5.shutdown()
