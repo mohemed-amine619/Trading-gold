@@ -279,6 +279,28 @@ _add(_p("fib_enabled", "Fibonacci strategy", "Strategies", "bool", True,
         help="Score entries at Fibonacci retracement/extension confluence."))
 _add(_p("fib_weight", "Fibonacci weight (pts)", "Strategies", "float", 10.0, 0.0, 40.0, 1.0,
         env="FIB_WEIGHT"))
+_add(_p("analog_enabled", "History repeats strategy", "Strategies", "bool", True,
+        env="ANALOG_ENABLED",
+        help="Vote with what followed the most similar past price shapes. It only votes while its own replay over the recent bars shows a statistically clear edge; otherwise it abstains and the score is exactly as if it were off."))
+_add(_p("analog_weight", "History repeats weight (pts)", "Strategies", "float", 12.0, 0.0, 40.0, 1.0,
+        env="ANALOG_WEIGHT"))
+_add(_p("analog_window", "History repeats: shape length (bars)", "Strategies", "int", 24, 8, 96, 1,
+        env="ANALOG_WINDOW"))
+_add(_p("analog_k", "History repeats: neighbours", "Strategies", "int", 15, 5, 50, 1,
+        env="ANALOG_K"))
+_add(_p("analog_horizon", "History repeats: outcome horizon (bars)", "Strategies", "int", 12, 3, 48, 1,
+        env="ANALOG_HORIZON"))
+_add(_p("analog_vote", "History repeats: agreement needed", "Strategies", "float", 0.60, 0.5, 0.95, 0.01,
+        env="ANALOG_VOTE", percent=True))
+_add(_p("analog_min_edge", "History repeats: minimum proven edge", "Strategies", "float", 0.10, 0.0, 1.0, 0.01,
+        env="ANALOG_MIN_EDGE"))
+_add(_p("analog_min_z", "History repeats: significance (sigmas)", "Strategies", "float", 2.0, 0.0, 6.0, 0.1,
+        env="ANALOG_MIN_Z",
+        help="The recent edge must also beat chance by this many standard errors. Lowering it lets a random series look predictive."))
+_add(_p("analog_check_bars", "History repeats: bars replayed to prove itself", "Strategies", "int", 400, 100, 800, 10,
+        env="ANALOG_CHECK_BARS"))
+_add(_p("analog_min_calls", "History repeats: calls needed to trust the proof", "Strategies", "int", 30, 10, 300, 5,
+        env="ANALOG_MIN_CALLS"))
 _add(_p("fib_zone_low", "Fib discount zone start", "Strategies", "float", 0.382, 0.0, 1.0, 0.001,
         env="FIB_ZONE_LOW"))
 _add(_p("fib_zone_high", "Fib discount zone end", "Strategies", "float", 0.786, 0.0, 1.0, 0.001,

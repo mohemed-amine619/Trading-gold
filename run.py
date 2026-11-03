@@ -154,6 +154,17 @@ except Exception as _phase1_import_error:  # pragma: no cover - defensive
         f"using legacy label, split and sizing."
     )
 
+# "History repeats" strategy. If the import fails the bot scores exactly as it
+# did before: an absent strategy takes no share of the score budget.
+try:
+    from core.strategy.analog import AnalogConfig as _AnalogConfig, AnalogEngine as _AnalogEngine
+except Exception as _analog_import_error:  # pragma: no cover - defensive
+    _AnalogConfig = None
+    _AnalogEngine = None
+
+_ANALOG_KEYS = ("analog_window", "analog_k", "analog_horizon", "analog_vote",
+                "analog_min_edge", "analog_min_z", "analog_check_bars", "analog_min_calls")
+
 try:
     from core.ai.dynamic_sltp import DynamicSLTPReasoner as _DynamicSLTPReasoner
     from core.ai.provider import get_llm_provider as _get_llm_provider
@@ -584,6 +595,19 @@ CONFIG = {
     "momentum_weight":         _profile_cfg("MOMENTUM_WEIGHT", 15.0, 15.0),
     "fib_enabled":             os.getenv("FIB_ENABLED", "true").lower() in ("1", "true", "yes"),
     "fib_weight":              _profile_cfg("FIB_WEIGHT", 10.0, 10.0),
+    # "History repeats": vote with what followed the most similar past price
+    # shapes. It only votes while its own replay over the recent bars shows a
+    # statistically clear edge; otherwise it abstains and takes no score share.
+    "analog_enabled":          os.getenv("ANALOG_ENABLED", "true").lower() in ("1", "true", "yes"),
+    "analog_weight":           float(os.getenv("ANALOG_WEIGHT", "12")),
+    "analog_window":           int(os.getenv("ANALOG_WINDOW", "24")),
+    "analog_k":                int(os.getenv("ANALOG_K", "15")),
+    "analog_horizon":          int(os.getenv("ANALOG_HORIZON", "12")),
+    "analog_vote":             float(os.getenv("ANALOG_VOTE", "0.60")),
+    "analog_min_edge":         float(os.getenv("ANALOG_MIN_EDGE", "0.10")),
+    "analog_min_z":            float(os.getenv("ANALOG_MIN_Z", "2.0")),
+    "analog_check_bars":       int(os.getenv("ANALOG_CHECK_BARS", "400")),
+    "analog_min_calls":        int(os.getenv("ANALOG_MIN_CALLS", "30")),
     "fib_zone_low":            float(os.getenv("FIB_ZONE_LOW", "0.382")),
     "fib_zone_high":           float(os.getenv("FIB_ZONE_HIGH", "0.786")),
     "fib_extension_target":    float(os.getenv("FIB_EXTENSION_TARGET", "1.618")),
@@ -2122,7 +2146,7 @@ def _fib_score(location, direction: int, cfg: dict) -> float:
 
 def _score_direction(ai_direction: int, ai_conf: float,
                      m15: pd.DataFrame, h1: pd.DataFrame, h4: pd.DataFrame,
-                     direction: int, cfg: dict, location=None) -> float:
+                     direction: int, cfg: dict, location=None, analog=None) -> float:
     """Total confluence score (0-100) for the given direction.
 
     The score is a fixed 100-point budget split between evidence sources. The
@@ -2135,6 +2159,10 @@ def _score_direction(ai_direction: int, ai_conf: float,
       Entry quality 10 pts — pullback-to-value (EMA21/50), pinbar
       Fibonacci     0 pts  — off by default in the budget; takes its share
                              from the total when ``fib_enabled``
+
+    History repeats ``analog_weight`` (12) pts — only while the engine is voting.
+                             An abstaining or disabled engine takes NO share, so
+                             the other components are scaled exactly as before.
 
     With ``fib_enabled`` true and ``fib_weight`` at 10, every component is
     scaled by 100/110 so the sum is still 100. When it is false the weights are
@@ -2153,7 +2181,11 @@ def _score_direction(ai_direction: int, ai_conf: float,
     mom_w   = max(0.0, float(cfg.get("momentum_weight", 15.0)))
     entry_w = 10.0
     fib_w   = max(0.0, float(cfg.get("fib_weight", 10.0))) if cfg.get("fib_enabled", True) else 0.0
-    nominal = ai_w + trend_w + mom_w + entry_w + fib_w
+    analog_w = 0.0
+    if (analog is not None and not getattr(analog, "abstained", True)
+            and cfg.get("analog_enabled", True)):
+        analog_w = max(0.0, float(cfg.get("analog_weight", 12.0)))
+    nominal = ai_w + trend_w + mom_w + entry_w + fib_w + analog_w
     factor  = (100.0 / nominal) if nominal > 0 else 0.0
 
     # AI component: 0..ai_w
@@ -2180,7 +2212,15 @@ def _score_direction(ai_direction: int, ai_conf: float,
     entry    = _entry_quality_score(last) * entry_w
     fib      = _fib_score(location, direction, cfg) * fib_w
 
-    return (ai_pts + trend + momentum + entry + fib) * factor
+    analog_pts = 0.0
+    if analog_w > 0:
+        if analog.direction == direction:
+            analog_pts = analog_w * float(analog.strength)
+        elif analog.direction == 0:
+            analog_pts = 0.30 * analog_w     # proven, but no call on this bar: neutral
+        # analog.direction == -direction: the analogues disagree -> 0 points
+
+    return (ai_pts + trend + momentum + entry + fib + analog_pts) * factor
 
 
 # ---------------------------------------------------------------------------
@@ -2319,6 +2359,9 @@ class StandaloneAIBot:
         self._manual_sltp_failed: dict = {} # ticket -> epoch timestamp of last failed modification
         self._dd_positions_closed = False # one-shot equity protect close
         self._loosen_logged: dict = {}    # ticket -> last time a refused loosening was logged
+        self._analog_engine = None        # "history repeats" engine, built on first use
+        self._analog_key = None
+        self._analog_failed = False
         self._daily_dd_logged = False     # log the daily-cap warning once per day, not every tick
         self._weekly_halt_done = False
         self._daily_halt_done = False
@@ -2922,6 +2965,30 @@ class StandaloneAIBot:
         return h1p
 
     # --------------------------------------------------------------
+    def _get_analog(self, m15p):
+        """The "history repeats" vote for the newest bar, or ``None`` when the
+        strategy is off or failed. It never raises into the signal path, and the
+        engine is rebuilt if any of its settings change (no restart needed)."""
+        if not self.cfg.get("analog_enabled", True) or _AnalogEngine is None:
+            return None
+        try:
+            key = tuple(self.cfg.get(k) for k in _ANALOG_KEYS)
+            if self._analog_key != key:
+                self._analog_engine = _AnalogEngine(_AnalogConfig(
+                    window=int(self.cfg["analog_window"]), k=int(self.cfg["analog_k"]),
+                    horizon=int(self.cfg["analog_horizon"]), vote=float(self.cfg["analog_vote"]),
+                    min_edge=float(self.cfg["analog_min_edge"]), min_z=float(self.cfg["analog_min_z"]),
+                    check_bars=int(self.cfg["analog_check_bars"]),
+                    min_calls=int(self.cfg["analog_min_calls"])))
+                self._analog_key = key
+            return self._analog_engine.evaluate(m15p)
+        except Exception as exc:
+            if not self._analog_failed:
+                self._analog_failed = True
+                logger.warning("[%s] History-repeats strategy failed and is skipped: %r",
+                               self.cfg.get("symbol"), exc)
+            return None
+
     def _get_signal(self, m15p, h1p, h4p) -> tuple:
         """Return (direction, score, ai_conf, reason).  direction 0 = no trade.
 
@@ -2994,11 +3061,18 @@ class StandaloneAIBot:
         if self.cfg.get("location_gate", True) or self.cfg.get("fib_enabled", True):
             location = self._location_for(m15p)
 
+        analog = self._get_analog(m15p)
+        if analog is not None and not analog.abstained and analog.direction != 0:
+            logger.info("[%s] History repeats: %s (%.0f%% of %d analogues; recent edge %+.2f "
+                        "over %d calls)", self.cfg["symbol"],
+                        "BUY" if analog.direction == 1 else "SELL", analog.strength * 100.0,
+                        analog.n_neighbours, analog.edge or 0.0, analog.calls)
+
         # Score both directions (confluence, independent of gates)
         best_dir, best_score = 0, 0.0
         for d in [1, -1]:
             score = _score_direction(ai_direction, ai_conf, m15p, h1p, h4p,
-                                     d, self.cfg, location=location)
+                                     d, self.cfg, location=location, analog=analog)
             if score > best_score:
                 best_score, best_dir = score, d
 
