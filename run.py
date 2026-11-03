@@ -187,6 +187,13 @@ _NN_KEYS = ("nn_min_confidence", "nn_min_oos_edge")
 _SCALP_KEYS = ("scalp_strategies", "scalp_horizon", "scalp_check_bars", "scalp_min_calls",
                "scalp_min_edge", "scalp_min_z", "scalp_valid_bars", "scalp_open_hour")
 
+# Pause on one direction after a losing trade. Without the import the bot trades
+# as before (no pause).
+try:
+    from core.risk.cooldown import DirectionCooldown as _DirectionCooldown
+except Exception as _cooldown_import_error:  # pragma: no cover - defensive
+    _DirectionCooldown = None
+
 # MT5 deal reasons, for the TRADE END log line.
 _DEAL_REASONS = {0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "sl", 5: "tp", 6: "stop_out"}
 
@@ -706,6 +713,9 @@ CONFIG = {
     "equity_protect_close_all": os.getenv("EQUITY_PROTECT_CLOSE_ALL", "true").lower() in ("1", "true", "yes"),
     # Loss-streak circuit breaker: N consecutive losses -> pause for M minutes.
     "max_consecutive_losses":  _profile_cfg("MAX_CONSECUTIVE_LOSSES", 4, 4, val_type=int),
+    # After a losing trade, no new entry in THAT direction for this many closed
+    # bars (the other direction is not delayed). 0 = off.
+    "reentry_cooldown_bars":   int(os.getenv("REENTRY_COOLDOWN_BARS", "0") or 0),
     "loss_streak_cooldown_minutes": int(os.getenv("LOSS_STREAK_COOLDOWN_MIN", "60")),
 
     # --- manual trade management ---
@@ -2440,6 +2450,8 @@ class StandaloneAIBot:
         self._nn_failed = False
         self._nn_note = None
         self._track: dict = {}            # ticket -> how far the trade has run (for TRADE END)
+        self._bar_counter = 0             # closed bars evaluated since start
+        self._cooldown = _DirectionCooldown() if _DirectionCooldown is not None else None
         self._daily_dd_logged = False     # log the daily-cap warning once per day, not every tick
         self._weekly_halt_done = False
         self._daily_halt_done = False
@@ -4201,6 +4213,7 @@ class StandaloneAIBot:
             self._track[pos.ticket] = t
         t["peak"] = max(t["peak"], float(profit_move))
         t["worst"] = min(t["worst"], float(profit_move))
+        t["last"] = float(profit_move)
 
     def _trade_result(self, ticket):
         """``(net, exit_reason)`` from the broker's deal history, or ``None`` when
@@ -4220,6 +4233,26 @@ class StandaloneAIBot:
         except Exception:
             return None
 
+    def _note_loss(self, tracked: dict, result) -> None:
+        """Start the same-direction pause when one of the BOT's trades ended at a loss.
+
+        The broker's net result decides when it is available; otherwise the last
+        sampled move is used. Manual trades (another magic number) never trigger it."""
+        bars = int(self.cfg.get("reentry_cooldown_bars", 0) or 0)
+        if bars <= 0 or self._cooldown is None:
+            return
+        if tracked["magic"] != self.cfg.get("magic_number", 888999):
+            return
+        lost = result[0] < 0 if result else tracked.get("last", 0.0) < 0
+        if lost:
+            self._cooldown.record_loss(tracked["direction"], self._bar_counter, bars)
+
+    def _entry_cooldown_left(self, direction: int) -> int:
+        """Closed bars this direction is still paused for (0 = free)."""
+        if self._cooldown is None or int(self.cfg.get("reentry_cooldown_bars", 0) or 0) <= 0:
+            return 0
+        return self._cooldown.remaining(direction, self._bar_counter)
+
     def _detect_trade_ends(self, positions) -> None:
         """Log one TRADE END line for every tracked trade that is no longer open.
 
@@ -4235,6 +4268,7 @@ class StandaloneAIBot:
             t = self._track.pop(ticket)
             atr = t["atr"] if t["atr"] > 0 else float("nan")
             result = self._trade_result(ticket)
+            self._note_loss(t, result)
             tail = f" pnl={result[0]:+.2f} exit={result[1]}" if result else ""
             logger.info(
                 "🏁 TRADE END ticket=%s magic=%d %s %s entry=%.5f peak=%.2f (%.2f ATR) "
@@ -4692,6 +4726,7 @@ class StandaloneAIBot:
         # Entries / reversal closes only on new closed bar
         if current_bar != self.last_bar_time:
             self.last_bar_time = current_bar
+            self._bar_counter += 1
             h4p = _prepare(h4, self.cfg) if not h4.empty else None
             direction, score, ai_conf, reason = self._get_signal(m15p, h1p, h4p)
             logger.info("[%s] Bar %s | direction=%+d score=%.1f ai_conf=%.3f (%s)",
@@ -4721,6 +4756,11 @@ class StandaloneAIBot:
                     logger.info("[%s] Entry blocked: %s", self.cfg["symbol"], gate_reason)
                 elif gate_reason:
                     logger.info("[%s] %s", self.cfg["symbol"], gate_reason)
+                wait = self._entry_cooldown_left(direction) if allowed else 0
+                if wait > 0:
+                    logger.info("[%s] Entry skipped: %d bar(s) of cooldown left after a losing %s",
+                                self.cfg["symbol"], wait, "BUY" if direction == 1 else "SELL")
+                    allowed = False
                 if allowed:
                     streak = self._streak_size_factor()
                     if streak < 1.0:

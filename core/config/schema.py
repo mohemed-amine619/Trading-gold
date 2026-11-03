@@ -301,6 +301,9 @@ _add(_p("analog_check_bars", "History repeats: bars replayed to prove itself", "
         env="ANALOG_CHECK_BARS"))
 _add(_p("analog_min_calls", "History repeats: calls needed to trust the proof", "Strategies", "int", 30, 10, 300, 5,
         env="ANALOG_MIN_CALLS"))
+_add(_p("reentry_cooldown_bars", "Pause after a loss (bars, same direction)", "Risk", "int", 0, 0, 48, 1,
+        env="REENTRY_COOLDOWN_BARS",
+        help="After a losing trade, no new entry in that direction for this many closed bars. The other direction is not delayed. 0 = off."))
 _add(_p("nn_enabled", "Neural-network vote", "Strategies", "bool", True,
         env="NN_ENABLED",
         help="Use the saved neural-network model as one more vote. It is absent from the score unless a model exists with a measured positive out-of-sample edge and is confident."))
