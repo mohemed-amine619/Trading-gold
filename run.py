@@ -187,6 +187,9 @@ _NN_KEYS = ("nn_min_confidence", "nn_min_oos_edge")
 _SCALP_KEYS = ("scalp_strategies", "scalp_horizon", "scalp_check_bars", "scalp_min_calls",
                "scalp_min_edge", "scalp_min_z", "scalp_valid_bars", "scalp_open_hour")
 
+# MT5 deal reasons, for the TRADE END log line.
+_DEAL_REASONS = {0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "sl", 5: "tp", 6: "stop_out"}
+
 _ANALOG_KEYS = ("analog_window", "analog_k", "analog_horizon", "analog_vote",
                 "analog_min_edge", "analog_min_z", "analog_check_bars", "analog_min_calls")
 
@@ -2436,6 +2439,7 @@ class StandaloneAIBot:
         self._nn_key = None
         self._nn_failed = False
         self._nn_note = None
+        self._track: dict = {}            # ticket -> how far the trade has run (for TRADE END)
         self._daily_dd_logged = False     # log the daily-cap warning once per day, not every tick
         self._weekly_halt_done = False
         self._daily_halt_done = False
@@ -3954,6 +3958,9 @@ class StandaloneAIBot:
         if result and result.retcode in (done_code, no_changes_code):
             if result.retcode == done_code:
                 logger.info("Modified SL ticket=%s → %.5f", pos.ticket, sl_val)
+                tracked = self._track.get(pos.ticket)
+                if tracked is not None:
+                    tracked["sl_mods"] += 1
             return True
         retcode_str = result.retcode if result else "None"
         last_err = mt5.last_error() if hasattr(mt5, "last_error") else "N/A"
@@ -4180,6 +4187,62 @@ class StandaloneAIBot:
             pass
 
     # --------------------------------------------------------------
+    def _track_move(self, pos, direction: int, profit_move: float, atr: float) -> None:
+        """Remember the best and worst the trade has been (price units, from the
+        entry), so the TRADE END line can say how far it ran for and against us.
+        Sampled once per management pass (about a second), so it is a floor on
+        the true excursion, not an exact figure."""
+        t = self._track.get(pos.ticket)
+        if t is None:
+            t = {"direction": direction, "entry": float(pos.price_open),
+                 "magic": int(getattr(pos, "magic", 0) or 0), "symbol": pos.symbol,
+                 "atr": float(atr), "peak": 0.0, "worst": 0.0, "sl_mods": 0,
+                 "first_seen": time.time()}
+            self._track[pos.ticket] = t
+        t["peak"] = max(t["peak"], float(profit_move))
+        t["worst"] = min(t["worst"], float(profit_move))
+
+    def _trade_result(self, ticket):
+        """``(net, exit_reason)`` from the broker's deal history, or ``None`` when
+        it is not available (yet). Never raises."""
+        try:
+            deals = mt5.history_deals_get(position=ticket)
+            if not deals:
+                return None
+            net = sum(float(getattr(d, "profit", 0.0) or 0.0) + float(getattr(d, "commission", 0.0) or 0.0)
+                      + float(getattr(d, "swap", 0.0) or 0.0) + float(getattr(d, "fee", 0.0) or 0.0)
+                      for d in deals)
+            outs = [d for d in deals if int(getattr(d, "entry", 0)) in (1, 2, 3)]
+            if not outs:
+                return None
+            last = max(outs, key=lambda d: getattr(d, "time", 0))
+            return net, _DEAL_REASONS.get(int(getattr(last, "reason", 0)), "other")
+        except Exception:
+            return None
+
+    def _detect_trade_ends(self, positions) -> None:
+        """Log one TRADE END line for every tracked trade that is no longer open.
+
+        Runs BEFORE the early return for "no positions", otherwise the last trade
+        of a run would never be reported. The line carries the ticket, so the
+        diagnostics can join it to the broker's closed trade and show how far the
+        trade ran before it ended: the evidence needed to tune break-even and
+        trailing stops."""
+        if not self._track:
+            return
+        open_tickets = {p.ticket for p in positions}
+        for ticket in [t for t in self._track if t not in open_tickets]:
+            t = self._track.pop(ticket)
+            atr = t["atr"] if t["atr"] > 0 else float("nan")
+            result = self._trade_result(ticket)
+            tail = f" pnl={result[0]:+.2f} exit={result[1]}" if result else ""
+            logger.info(
+                "🏁 TRADE END ticket=%s magic=%d %s %s entry=%.5f peak=%.2f (%.2f ATR) "
+                "worst=%.2f (%.2f ATR) atr=%.2f sl_mods=%d seen=%ds%s",
+                ticket, t["magic"], "BUY" if t["direction"] == 1 else "SELL", t["symbol"],
+                t["entry"], t["peak"], t["peak"] / atr, t["worst"], abs(t["worst"]) / atr,
+                t["atr"], t["sl_mods"], int(time.time() - t["first_seen"]), tail)
+
     def _manage_positions(self, m15p: pd.DataFrame, h1p=None,
                            tick=None, equity: float = 0.0) -> None:
         """Trailing + breakeven + partial close + flip/timeout closes, plus
@@ -4192,6 +4255,7 @@ class StandaloneAIBot:
         is correct — only the "where is price right now" part should be
         live."""
         positions = self._open_positions()
+        self._detect_trade_ends(positions)
         if not positions:
             return
         if m15p is None or m15p.empty:
@@ -4223,6 +4287,7 @@ class StandaloneAIBot:
             # Track peak profit reached for dynamic ratchets, giveback cuts and SL reasoning
             peak = max(self._peak_profit.get(pos.ticket, 0.0), profit_move)
             self._peak_profit[pos.ticket] = peak
+            self._track_move(pos, direction, profit_move, atr)
             # Structure/AI tightening waits until the trade has this much profit
             # (in ATR). 0 = tighten as soon as the trade is in profit.
             tighten_after = float(self.cfg.get("min_profit_before_tighten_atr", 0.0) or 0.0) * atr

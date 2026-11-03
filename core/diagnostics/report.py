@@ -12,13 +12,15 @@ from datetime import datetime
 from typing import List, Optional
 
 from core.diagnostics.confidence import confidence_finding
+from core.diagnostics.excursion import excursion_findings
 
 
 def _minutes(stamp: str) -> int:
     return int(datetime.strptime(stamp, "%Y-%m-%d %H:%M").timestamp() // 60)
 
 
-def findings(stats: dict, log: dict, conf: Optional[dict] = None) -> List[str]:
+def findings(stats: dict, log: dict, conf: Optional[dict] = None,
+             excursion: Optional[dict] = None) -> List[str]:
     out: List[str] = []
 
     # Whose trades are these? Money lost by hand must never read as the bot's result.
@@ -80,6 +82,7 @@ def findings(stats: dict, log: dict, conf: Optional[dict] = None) -> List[str]:
     note = confidence_finding(conf)
     if note:
         out.append(note)
+    out.extend(excursion_findings(excursion))
 
     entries = sorted(log.get("entries", []), key=lambda e: e["time"])
     clustered = sum(1 for a, b in zip(entries, entries[1:])
@@ -97,7 +100,7 @@ def _table(rows: List[tuple], header: tuple) -> str:
 
 
 def build_summary(meta: dict, stats: dict, log: dict, notes: Optional[List[str]] = None,
-                  conf: Optional[dict] = None) -> str:
+                  conf: Optional[dict] = None, excursion: Optional[dict] = None) -> str:
     md: List[str] = ["# Trading-gold diagnostics", ""]
     md += [f"- Generated: {meta.get('generated', '')}",
            f"- Period: last {meta.get('days', '?')} days",
@@ -109,7 +112,7 @@ def build_summary(meta: dict, stats: dict, log: dict, notes: Optional[List[str]]
     md.append("")
 
     md += ["## Findings", ""]
-    items = findings(stats, log, conf)
+    items = findings(stats, log, conf, excursion)
     md += [f"- {f}" for f in items] if items else ["- Nothing crossed a threshold."]
     md.append("")
 
@@ -150,6 +153,24 @@ def build_summary(meta: dict, stats: dict, log: dict, notes: Optional[List[str]]
     if log["entries_blocked"] or log["entries_skipped"]:
         md += [_table(list({**log["entries_blocked"], **log["entries_skipped"]}.items()),
                       ("blocked / skipped", "count")), ""]
+
+    md += ["## How far trades ran before they ended", ""]
+    if excursion and excursion["matched"]:
+        md += [_table([(k, v["trades"], v["win_rate"], v["net"], v["avg_net"])
+                       for k, v in excursion["peak_buckets"].items()],
+                      ("peak profit reached", "trades", "win rate", "net", "avg net")), ""]
+        once = excursion["losers_once_in_profit"]
+        md += [f"- Losing trades: {excursion['losers']}; had first reached +0.3 ATR: {once['0.3']}, "
+               f"+0.5 ATR: {once['0.5']}, +1.0 ATR: {once['1']}",
+               f"- Winning trades: {excursion['winners']}; average peak "
+               f"{excursion['winner_avg_peak_atr']} ATR; median share of the peak kept "
+               f"{excursion['winner_median_capture']}",
+               f"- {excursion['matched']} trades matched to a TRADE END line; "
+               f"{excursion['unmatched']} lines had no closed trade in the period. "
+               f"Sampled about once a second, so peaks are a floor.", ""]
+    else:
+        md += ["No TRADE END lines matched a closed trade yet. The bot now writes one when each "
+               "trade ends; results appear after trades close.", ""]
 
     md += ["## AI confidence vs results", ""]
     if conf and conf["matched"]:

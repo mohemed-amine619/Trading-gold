@@ -32,6 +32,11 @@ _PROMOTED = re.compile(
     r"promoted run #(\d+) \| train=(\d+) \| oos_acc=([\d.]+) \| auc=([\d.]+) \| base=([\d.]+) "
     r"\| lift=([+-]?[\d.]+)")
 
+_TRADE_END = re.compile(
+    r"TRADE END ticket=(\d+) magic=(\d+) (BUY|SELL) (\S+) entry=([\d.]+) peak=(-?[\d.]+) "
+    r"\(([\d.]+|nan) ATR\) worst=(-?[\d.]+) \(([\d.]+|nan) ATR\) atr=([\d.]+) sl_mods=(\d+) "
+    r"seen=(\d+)s(?: pnl=([+-]?[\d.]+) exit=(\w+))?")
+
 _DIGITS = re.compile(r"[\d.]+")
 
 
@@ -54,6 +59,7 @@ def parse_log(lines: Iterable[str]) -> dict:
     bot_closes: List[dict] = []
     challenger_acc: List[float] = []
     ai_models: List[dict] = []
+    trade_ends: List[dict] = []
     first = last = None
     n_lines = 0
 
@@ -98,6 +104,16 @@ def parse_log(lines: Iterable[str]) -> dict:
                                "reason": e.group(4).strip()})
         elif (e := _CHALLENGER.search(msg)):
             challenger_acc.append(float(e.group(1)))
+        elif (e := _TRADE_END.search(msg)):
+            (ticket, magic, side, symbol, entry_price, peak, peak_atr, worst, worst_atr, atr, mods,
+             seen, pnl, exit_reason) = e.groups()
+            if "nan" not in (peak_atr, worst_atr):          # the bot had no ATR: nothing to compare
+                trade_ends.append({
+                    "ticket": ticket, "magic": int(magic), "side": side, "symbol": symbol,
+                    "entry": float(entry_price), "peak": float(peak), "peak_atr": float(peak_atr),
+                    "worst": float(worst), "worst_atr": float(worst_atr), "atr": float(atr),
+                    "sl_mods": int(mods), "seen_s": int(seen),
+                    "pnl": float(pnl) if pnl is not None else None, "exit": exit_reason})
         elif (e := _PROMOTED.search(msg)):
             run, train, acc, auc, base, lift = e.groups()
             ai_models.append({"time": stamp, "run": int(run), "train": int(train),
@@ -131,4 +147,5 @@ def parse_log(lines: Iterable[str]) -> dict:
         "bot_closes": bot_closes,
         "ai_challenger_oos_accuracy": challenger_acc,
         "ai_models": ai_models,
+        "trade_ends": trade_ends,
     }
