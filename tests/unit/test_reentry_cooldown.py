@@ -118,7 +118,8 @@ class TestRecordedFromTradeEnds:
 class TestWiredIntoTheEntryPath:
     def bot(self, run_module, monkeypatch, **cfg):
         c = dict(run_module.CONFIG)
-        c.update(dry_run=False, symbol="XAUUSDm", magic_number=BOT_MAGIC, reentry_cooldown_bars=3)
+        c.update(dry_run=False, symbol="XAUUSDm", magic_number=BOT_MAGIC, reentry_cooldown_bars=3,
+                 skip_first_bar=False)
         c.update(cfg)
         bot = run_module.StandaloneAIBot(c)
         self.n = 0

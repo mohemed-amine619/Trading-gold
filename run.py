@@ -716,6 +716,10 @@ CONFIG = {
     # After a losing trade, no new entry in THAT direction for this many closed
     # bars (the other direction is not delayed). 0 = off.
     "reentry_cooldown_bars":   int(os.getenv("REENTRY_COOLDOWN_BARS", "0") or 0),
+    # Do not trade on the first closed bar after a (re)start: it may be hours old
+    # (a restart on a closed market acts on Friday's bar at Sunday's open). A bar
+    # that closes while the bot is running is fresh by definition.
+    "skip_first_bar":          os.getenv("SKIP_FIRST_BAR", "true").lower() in ("1", "true", "yes"),
     "loss_streak_cooldown_minutes": int(os.getenv("LOSS_STREAK_COOLDOWN_MIN", "60")),
 
     # --- manual trade management ---
@@ -746,6 +750,11 @@ CONFIG = {
     # This key was previously absent from CONFIG, so cfg.get("dry_run")
     # returned None -> falsy -> REAL ORDERS were sent by default.
     "dry_run": _TRADING_MODE != "live",
+    # Refuse to run unless the connected MT5 account is a DEMO account (checked at
+    # connect, on every reconnect and on every step, so switching the terminal to a
+    # live account while running stops the bot). Fails closed: an account whose
+    # type cannot be read is refused.
+    "require_demo_account": os.getenv("REQUIRE_DEMO_ACCOUNT", "false").lower() in ("1", "true", "yes"),
 }
 
 # ---------------------------------------------------------------------------
@@ -2451,6 +2460,7 @@ class StandaloneAIBot:
         self._nn_note = None
         self._track: dict = {}            # ticket -> how far the trade has run (for TRADE END)
         self._bar_counter = 0             # closed bars evaluated since start
+        self._demo_guard_logged = 0.0     # last time the demo-only guard logged a refusal
         self._cooldown = _DirectionCooldown() if _DirectionCooldown is not None else None
         self._daily_dd_logged = False     # log the daily-cap warning once per day, not every tick
         self._weekly_halt_done = False
@@ -2709,6 +2719,13 @@ class StandaloneAIBot:
         self._persist_risk_state()
 
     # --------------------------------------------------------------
+    def _account_allowed(self, acc) -> bool:
+        """False only when REQUIRE_DEMO_ACCOUNT is on and ``acc`` is not a demo account."""
+        if not self.cfg.get("require_demo_account", False):
+            return True
+        demo = getattr(mt5, "ACCOUNT_TRADE_MODE_DEMO", 0)
+        return acc is not None and getattr(acc, "trade_mode", None) == demo
+
     def connect(self) -> bool:
         # FORCE EMPTY kwargs to force connection to the currently running terminal
         kwargs   = {"timeout": 60_000}
@@ -2751,6 +2768,13 @@ class StandaloneAIBot:
             
         if ok:
             acc = mt5.account_info()
+            if not self._account_allowed(acc):
+                logger.error(
+                    "REQUIRE_DEMO_ACCOUNT is on but account %s is not a demo account "
+                    "(trade_mode=%s). Refusing to trade on it.",
+                    getattr(acc, "login", "?"), getattr(acc, "trade_mode", "unknown"))
+                self._update_status(connected=False)
+                return False
             self.start_balance = acc.balance if acc else 0.0
             self.daily_start   = acc.equity  if acc else 0.0
             self.daily_date    = date.today()
@@ -4699,6 +4723,13 @@ class StandaloneAIBot:
             return
 
         acc    = mt5.account_info()
+        if not self._account_allowed(acc):
+            now = time.time()
+            if now - self._demo_guard_logged >= 60.0:
+                self._demo_guard_logged = now
+                logger.error("REQUIRE_DEMO_ACCOUNT is on but the terminal is now on a non-demo "
+                             "account (%s). Not trading.", getattr(acc, "login", "?"))
+            return
         equity = acc.equity if acc else 0.0
         self._update_status(
             connected=True,
@@ -4725,6 +4756,7 @@ class StandaloneAIBot:
 
         # Entries / reversal closes only on new closed bar
         if current_bar != self.last_bar_time:
+            first_bar = self.last_bar_time is None
             self.last_bar_time = current_bar
             self._bar_counter += 1
             h4p = _prepare(h4, self.cfg) if not h4.empty else None
@@ -4735,6 +4767,12 @@ class StandaloneAIBot:
                 last_bar=str(current_bar), last_direction=direction,
                 last_score=score, last_ai_conf=ai_conf, last_signal=reason,
             )
+
+            if first_bar and self.cfg.get("skip_first_bar", True):
+                logger.info("[%s] First bar after start is not traded: it may be stale. "
+                            "Waiting for a bar that closes while the bot is running.",
+                            self.cfg["symbol"])
+                return
 
             if direction != 0:
                 self._close_opposite_positions(direction, score)

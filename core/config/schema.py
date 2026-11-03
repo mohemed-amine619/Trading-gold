@@ -301,6 +301,12 @@ _add(_p("analog_check_bars", "History repeats: bars replayed to prove itself", "
         env="ANALOG_CHECK_BARS"))
 _add(_p("analog_min_calls", "History repeats: calls needed to trust the proof", "Strategies", "int", 30, 10, 300, 5,
         env="ANALOG_MIN_CALLS"))
+_add(_p("require_demo_account", "Refuse to run on a non-demo account", "Instrument", "bool", False,
+        env="REQUIRE_DEMO_ACCOUNT", requires_restart=True, safe_live=False,
+        help="Checked at connect, on reconnect and on every step. An account whose type cannot be read is refused."))
+_add(_p("skip_first_bar", "Do not trade the first bar after start", "Risk", "bool", True,
+        env="SKIP_FIRST_BAR",
+        help="The first closed bar after a (re)start may be hours old, for example after a restart on a closed market."))
 _add(_p("reentry_cooldown_bars", "Pause after a loss (bars, same direction)", "Risk", "int", 0, 0, 48, 1,
         env="REENTRY_COOLDOWN_BARS",
         help="After a losing trade, no new entry in that direction for this many closed bars. The other direction is not delayed. 0 = off."))

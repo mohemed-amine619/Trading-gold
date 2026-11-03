@@ -549,7 +549,9 @@ class TestStepHonoursThePerSymbolCap:
     harness would have observed a send, so the refusal is not vacuous."""
 
     def _drive(self, run_module, monkeypatch, booked):
-        bot = build_bot(run_module, max_pos_per_symbol=1, max_open_pos=15)
+        # skip_first_bar off: this drives step() once on a fresh bot, and the first bar after a
+        # start is (rightly) not traded. The cap is what is under test here.
+        bot = build_bot(run_module, max_pos_per_symbol=1, max_open_pos=15, skip_first_bar=False)
         frame = run_module._prepare(uptrend_frame(), bot.cfg)
         magic = bot.cfg["magic_number"]
         positions = ([types.SimpleNamespace(ticket=1, magic=magic,
