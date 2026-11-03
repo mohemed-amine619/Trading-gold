@@ -14,6 +14,10 @@ seen. The saved file is replaced only if the challenger is measurably better
 Training more often does not make the model better by itself. If no challenger
 ever beats the floor, the file is never written and the predictor keeps saying
 "no trade". That is the safe outcome, not a fault.
+
+``run.py`` starts this script itself (see core/runtime/helpers.py), passing
+``--parent-pid`` so it stops if the bot dies. Exit code 3 means "cannot run on
+this machine" (torch missing); the supervisor does not restart it.
 """
 
 from __future__ import annotations
@@ -32,6 +36,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 TIMEFRAMES = ("M5", "M15", "H1")
+EXIT_UNAVAILABLE = 3
+PARENT_POLL_S = 5.0
 
 
 def mt5_fetcher(symbol: str, timeframe: str, bars: int) -> Callable[[], pd.DataFrame]:
@@ -74,6 +80,8 @@ def main(argv: Optional[List[str]] = None,
     parser.add_argument("--tolerance", type=float, default=0.02,
                         help="a challenger must beat the champion's edge by this much")
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
+    parser.add_argument("--parent-pid", type=int, default=0,
+                        help="stop when this process is gone (set by run.py)")
     args = parser.parse_args(argv)
 
     try:
@@ -81,7 +89,7 @@ def main(argv: Optional[List[str]] = None,
         from core.ai.nn_trainer import ContinuousTrainer
     except ImportError as exc:
         print(f"torch is required: {exc}")
-        return 1
+        return EXIT_UNAVAILABLE
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = TrainConfig(window=args.window, horizon=args.horizon,
@@ -100,6 +108,9 @@ def main(argv: Optional[List[str]] = None,
         return 0 if result["action"] != "error" else 1
 
     stop = stop or threading.Event()
+    if args.parent_pid:
+        from core.runtime.helpers import start_parent_watch
+        start_parent_watch(args.parent_pid, stop, PARENT_POLL_S)
     print(f"training {args.symbol} {args.timeframe} every {args.interval_min:g} min; "
           f"saving to {args.out}. Ctrl+C to stop.")
     try:

@@ -80,3 +80,30 @@ def test_a_failing_fetch_does_not_end_the_loop(loop, tmp_path, bars):
 
     code = loop.main(["--out", str(tmp_path / "nn.pt")] + ARGS, fetch_bars=flaky, stop=stop)
     assert code == 0 and len(calls) == 2
+
+
+def test_the_loop_stops_by_itself_when_its_parent_process_is_gone(loop, tmp_path, bars, monkeypatch):
+    import subprocess
+    monkeypatch.setattr(loop, "PARENT_POLL_S", 0.05)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()                                    # a real, finished process id
+    stop = threading.Event()
+    args = ["--out", str(tmp_path / "nn.pt"), "--parent-pid", str(dead.pid)] + ARGS
+    args[args.index("--interval-min") + 1] = "60"  # would sleep an hour if nothing stopped it
+    code = loop.main(args, fetch_bars=lambda: bars, stop=stop)
+    assert code == 0 and stop.is_set()
+
+
+def test_a_live_parent_does_not_stop_the_loop(loop, tmp_path, bars, monkeypatch):
+    import os
+    monkeypatch.setattr(loop, "PARENT_POLL_S", 0.05)
+    stop = threading.Event()
+    calls = []
+
+    def fetch():
+        calls.append(1)
+        stop.set()                                 # the test's own way to end the loop
+        return bars
+
+    args = ["--out", str(tmp_path / "nn.pt"), "--parent-pid", str(os.getpid())] + ARGS
+    assert loop.main(args, fetch_bars=fetch, stop=stop) == 0 and len(calls) == 1

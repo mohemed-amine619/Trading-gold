@@ -154,6 +154,17 @@ except Exception as _phase1_import_error:  # pragma: no cover - defensive
         f"using legacy label, split and sizing."
     )
 
+# "History repeats" strategy. If the import fails the bot scores exactly as it
+# did before: an absent strategy takes no share of the score budget.
+try:
+    from core.strategy.analog import AnalogConfig as _AnalogConfig, AnalogEngine as _AnalogEngine
+except Exception as _analog_import_error:  # pragma: no cover - defensive
+    _AnalogConfig = None
+    _AnalogEngine = None
+
+_ANALOG_KEYS = ("analog_window", "analog_k", "analog_horizon", "analog_vote",
+                "analog_min_edge", "analog_min_z", "analog_check_bars", "analog_min_calls")
+
 try:
     from core.ai.dynamic_sltp import DynamicSLTPReasoner as _DynamicSLTPReasoner
     from core.ai.provider import get_llm_provider as _get_llm_provider
@@ -200,6 +211,29 @@ except Exception as _cfg_import_error:  # pragma: no cover - defensive
         f"WARNING: config plane unavailable ({_cfg_import_error!r}); "
         f"the dashboard schema editor will be disabled."
     )
+
+# Stop-change rules. If this import fails the inline fallbacks below keep the
+# one rule that must never be lost: a stop may only move toward price.
+try:
+    from core.position.sl_guard import is_tighter as _is_tighter, step_ok as _step_ok
+except Exception as _sl_guard_import_error:  # pragma: no cover - defensive
+    def _is_tighter(is_buy, current_sl, new_sl):
+        if new_sl is None or new_sl <= 0:
+            return False
+        current = float(current_sl or 0.0)
+        if current <= 0:
+            return True
+        return new_sl > current + 1e-9 if is_buy else new_sl < current - 1e-9
+
+    def _step_ok(is_buy, current_sl, new_sl, min_step, breakeven_sl=None):
+        return _is_tighter(is_buy, current_sl, new_sl)
+
+# Helper processes (NN trainer, diagnostics) started from the manager below.
+# If this import fails the bot runs exactly as before, without them.
+try:
+    from core.runtime.helpers import build_supervisor as _build_helpers
+except Exception as _helpers_import_error:  # pragma: no cover - defensive
+    _build_helpers = None
 
 try:
     from core.risk.state import (
@@ -561,6 +595,19 @@ CONFIG = {
     "momentum_weight":         _profile_cfg("MOMENTUM_WEIGHT", 15.0, 15.0),
     "fib_enabled":             os.getenv("FIB_ENABLED", "true").lower() in ("1", "true", "yes"),
     "fib_weight":              _profile_cfg("FIB_WEIGHT", 10.0, 10.0),
+    # "History repeats": vote with what followed the most similar past price
+    # shapes. It only votes while its own replay over the recent bars shows a
+    # statistically clear edge; otherwise it abstains and takes no score share.
+    "analog_enabled":          os.getenv("ANALOG_ENABLED", "true").lower() in ("1", "true", "yes"),
+    "analog_weight":           float(os.getenv("ANALOG_WEIGHT", "12")),
+    "analog_window":           int(os.getenv("ANALOG_WINDOW", "24")),
+    "analog_k":                int(os.getenv("ANALOG_K", "15")),
+    "analog_horizon":          int(os.getenv("ANALOG_HORIZON", "12")),
+    "analog_vote":             float(os.getenv("ANALOG_VOTE", "0.60")),
+    "analog_min_edge":         float(os.getenv("ANALOG_MIN_EDGE", "0.10")),
+    "analog_min_z":            float(os.getenv("ANALOG_MIN_Z", "2.0")),
+    "analog_check_bars":       int(os.getenv("ANALOG_CHECK_BARS", "400")),
+    "analog_min_calls":        int(os.getenv("ANALOG_MIN_CALLS", "30")),
     "fib_zone_low":            float(os.getenv("FIB_ZONE_LOW", "0.382")),
     "fib_zone_high":           float(os.getenv("FIB_ZONE_HIGH", "0.786")),
     "fib_extension_target":    float(os.getenv("FIB_EXTENSION_TARGET", "1.618")),
@@ -580,6 +627,12 @@ CONFIG = {
     # ratchet from spending a broker call on a one-tick drift of the rolling
     # swing anchor. 0 disables the threshold (old behaviour).
     "min_sl_step_atr":         float(os.getenv("MIN_SL_STEP_ATR", "0.05")),
+    # The structure and AI-ratchet stops used to clamp the stop to ~0.55 ATR from
+    # price the moment a trade showed any profit, cutting a 1.8 ATR stop to
+    # ~0.55 ATR within seconds. They now wait until the trade has this much
+    # profit (ATR multiple). 0 = old behaviour. Break-even and the trailing stop
+    # keep their own thresholds.
+    "min_profit_before_tighten_atr": float(os.getenv("MIN_PROFIT_BEFORE_TIGHTEN_ATR", "0") or 0.0),
     "max_spread_points":       float(os.getenv("MAX_SPREAD_POINTS", "0") or 0.0),
 
     # --- capital preservation ladder -----------------------------------
@@ -2093,7 +2146,7 @@ def _fib_score(location, direction: int, cfg: dict) -> float:
 
 def _score_direction(ai_direction: int, ai_conf: float,
                      m15: pd.DataFrame, h1: pd.DataFrame, h4: pd.DataFrame,
-                     direction: int, cfg: dict, location=None) -> float:
+                     direction: int, cfg: dict, location=None, analog=None) -> float:
     """Total confluence score (0-100) for the given direction.
 
     The score is a fixed 100-point budget split between evidence sources. The
@@ -2106,6 +2159,10 @@ def _score_direction(ai_direction: int, ai_conf: float,
       Entry quality 10 pts — pullback-to-value (EMA21/50), pinbar
       Fibonacci     0 pts  — off by default in the budget; takes its share
                              from the total when ``fib_enabled``
+
+    History repeats ``analog_weight`` (12) pts — only while the engine is voting.
+                             An abstaining or disabled engine takes NO share, so
+                             the other components are scaled exactly as before.
 
     With ``fib_enabled`` true and ``fib_weight`` at 10, every component is
     scaled by 100/110 so the sum is still 100. When it is false the weights are
@@ -2124,7 +2181,11 @@ def _score_direction(ai_direction: int, ai_conf: float,
     mom_w   = max(0.0, float(cfg.get("momentum_weight", 15.0)))
     entry_w = 10.0
     fib_w   = max(0.0, float(cfg.get("fib_weight", 10.0))) if cfg.get("fib_enabled", True) else 0.0
-    nominal = ai_w + trend_w + mom_w + entry_w + fib_w
+    analog_w = 0.0
+    if (analog is not None and not getattr(analog, "abstained", True)
+            and cfg.get("analog_enabled", True)):
+        analog_w = max(0.0, float(cfg.get("analog_weight", 12.0)))
+    nominal = ai_w + trend_w + mom_w + entry_w + fib_w + analog_w
     factor  = (100.0 / nominal) if nominal > 0 else 0.0
 
     # AI component: 0..ai_w
@@ -2151,7 +2212,15 @@ def _score_direction(ai_direction: int, ai_conf: float,
     entry    = _entry_quality_score(last) * entry_w
     fib      = _fib_score(location, direction, cfg) * fib_w
 
-    return (ai_pts + trend + momentum + entry + fib) * factor
+    analog_pts = 0.0
+    if analog_w > 0:
+        if analog.direction == direction:
+            analog_pts = analog_w * float(analog.strength)
+        elif analog.direction == 0:
+            analog_pts = 0.30 * analog_w     # proven, but no call on this bar: neutral
+        # analog.direction == -direction: the analogues disagree -> 0 points
+
+    return (ai_pts + trend + momentum + entry + fib + analog_pts) * factor
 
 
 # ---------------------------------------------------------------------------
@@ -2289,6 +2358,10 @@ class StandaloneAIBot:
         self._peak_profit: dict = {}      # ticket -> peak favourable move (price units), POWER-UP (B)
         self._manual_sltp_failed: dict = {} # ticket -> epoch timestamp of last failed modification
         self._dd_positions_closed = False # one-shot equity protect close
+        self._loosen_logged: dict = {}    # ticket -> last time a refused loosening was logged
+        self._analog_engine = None        # "history repeats" engine, built on first use
+        self._analog_key = None
+        self._analog_failed = False
         self._daily_dd_logged = False     # log the daily-cap warning once per day, not every tick
         self._weekly_halt_done = False
         self._daily_halt_done = False
@@ -2892,6 +2965,30 @@ class StandaloneAIBot:
         return h1p
 
     # --------------------------------------------------------------
+    def _get_analog(self, m15p):
+        """The "history repeats" vote for the newest bar, or ``None`` when the
+        strategy is off or failed. It never raises into the signal path, and the
+        engine is rebuilt if any of its settings change (no restart needed)."""
+        if not self.cfg.get("analog_enabled", True) or _AnalogEngine is None:
+            return None
+        try:
+            key = tuple(self.cfg.get(k) for k in _ANALOG_KEYS)
+            if self._analog_key != key:
+                self._analog_engine = _AnalogEngine(_AnalogConfig(
+                    window=int(self.cfg["analog_window"]), k=int(self.cfg["analog_k"]),
+                    horizon=int(self.cfg["analog_horizon"]), vote=float(self.cfg["analog_vote"]),
+                    min_edge=float(self.cfg["analog_min_edge"]), min_z=float(self.cfg["analog_min_z"]),
+                    check_bars=int(self.cfg["analog_check_bars"]),
+                    min_calls=int(self.cfg["analog_min_calls"])))
+                self._analog_key = key
+            return self._analog_engine.evaluate(m15p)
+        except Exception as exc:
+            if not self._analog_failed:
+                self._analog_failed = True
+                logger.warning("[%s] History-repeats strategy failed and is skipped: %r",
+                               self.cfg.get("symbol"), exc)
+            return None
+
     def _get_signal(self, m15p, h1p, h4p) -> tuple:
         """Return (direction, score, ai_conf, reason).  direction 0 = no trade.
 
@@ -2964,11 +3061,18 @@ class StandaloneAIBot:
         if self.cfg.get("location_gate", True) or self.cfg.get("fib_enabled", True):
             location = self._location_for(m15p)
 
+        analog = self._get_analog(m15p)
+        if analog is not None and not analog.abstained and analog.direction != 0:
+            logger.info("[%s] History repeats: %s (%.0f%% of %d analogues; recent edge %+.2f "
+                        "over %d calls)", self.cfg["symbol"],
+                        "BUY" if analog.direction == 1 else "SELL", analog.strength * 100.0,
+                        analog.n_neighbours, analog.edge or 0.0, analog.calls)
+
         # Score both directions (confluence, independent of gates)
         best_dir, best_score = 0, 0.0
         for d in [1, -1]:
             score = _score_direction(ai_direction, ai_conf, m15p, h1p, h4p,
-                                     d, self.cfg, location=location)
+                                     d, self.cfg, location=location, analog=analog)
             if score > best_score:
                 best_score, best_dir = score, d
 
@@ -3005,7 +3109,7 @@ class StandaloneAIBot:
             # 3. Gold AI Confidence Gate: 0.50 is pure noise; Gold requires >= 0.55
             gold_min_conf = float(self.cfg.get("gold_min_ai_conf", 0.55))
             if ai_on and ai_conf < gold_min_conf:
-                return 0, best_score, ai_conf, f"gold AI conf {ai_conf:.2f} < threshold ({gold_min_conf:.2f})"
+                return 0, best_score, ai_conf, f"gold AI conf {ai_conf:.3f} < threshold ({gold_min_conf:.3f})"
 
             # 4. Gold Spread Gate: Prevent entries during wide spread / roll-over
             atr_val = float(m15p.iloc[-1].get("atr", 0.0))
@@ -3424,8 +3528,7 @@ class StandaloneAIBot:
             result = mt5.order_send(req)
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 self.trades_today += 1
-                msg = (f"✅ {'BUY' if direction==1 else 'SELL'} {sym} "
-                       f"vol={volume:.2f} @ {price:.5f}  SL={sl:.5f}  TP={tp:.5f}")
+                msg = self._entry_message(direction, sym, volume, price, sl, tp, result, ai_conf)
                 logger.info(msg)
                 self.notifier.send(msg)
                 return True
@@ -3451,8 +3554,8 @@ class StandaloneAIBot:
                         alt_res = mt5.order_send(req)
                         if alt_res and alt_res.retcode == mt5.TRADE_RETCODE_DONE:
                             self.trades_today += 1
-                            msg = (f"✅ {'BUY' if direction==1 else 'SELL'} {sym} "
-                                   f"vol={volume:.2f} @ {price:.5f}  SL={sl:.5f}  TP={tp:.5f}")
+                            msg = self._entry_message(direction, sym, volume, price, sl, tp,
+                                                      alt_res, ai_conf)
                             logger.info(msg)
                             self.notifier.send(msg)
                             return True
@@ -3474,6 +3577,18 @@ class StandaloneAIBot:
                              retcode_str, last_err)
             break
         return False
+
+    # --------------------------------------------------------------
+    def _entry_message(self, direction, sym, volume, price, sl, tp, result, ai_conf) -> str:
+        """The entry log line. The fields after TP (ticket, AI confidence, score)
+        let the diagnostics tie each trade's result back to the confidence the
+        bot had when it opened it. A position's ticket is the order's ticket on
+        a hedging account, which is what the broker's deal history reports."""
+        ticket = getattr(result, "order", 0) or 0
+        score = float(self.status.get("last_score", 0.0) or 0.0)
+        return (f"✅ {'BUY' if direction == 1 else 'SELL'} {sym} "
+                f"vol={volume:.2f} @ {price:.5f}  SL={sl:.5f}  TP={tp:.5f}  "
+                f"ticket={ticket} conf={float(ai_conf or 0.0):.3f} score={score:.1f}")
 
     # --------------------------------------------------------------
     def _close_position(self, pos, reason: str, pnl: Optional[float] = None) -> bool:
@@ -3631,6 +3746,22 @@ class StandaloneAIBot:
                      pos.ticket, retcode_str, last_err, sl_val, tp_val)
         return False
 
+    def _live_sl(self, pos, digits: int) -> float:
+        """The stop the broker holds RIGHT NOW (0 = none).
+
+        ``pos`` is a snapshot taken at the start of the management pass. Several
+        stop paths run in sequence on it, and each compares against that
+        snapshot, so a later path could "improve" on the old stop while actually
+        loosening the one an earlier path had just set. The broker is the truth.
+        """
+        try:
+            got = mt5.positions_get(ticket=pos.ticket)
+            if got:
+                return round(float(got[0].sl or 0.0), digits)
+        except Exception:
+            pass
+        return round(float(pos.sl), digits) if getattr(pos, "sl", 0.0) else 0.0
+
     def _modify_sl(self, pos, new_sl: float) -> bool:
         if self.cfg.get("dry_run"):
             logger.info("[DRY-RUN] Modify SL ticket=%s → %.5f", pos.ticket, new_sl)
@@ -3638,11 +3769,21 @@ class StandaloneAIBot:
         info = mt5.symbol_info(pos.symbol)
         digits = getattr(info, "digits", 2) or 2
         sl_val = round(float(new_sl), digits)
-        current_sl = round(float(pos.sl), digits) if getattr(pos, "sl", 0.0) else 0.0
+        current_sl = self._live_sl(pos, digits)
 
         # Avoid redundant order sends if SL is identical to current broker SL
         if abs(current_sl - sl_val) <= 1e-6:
             return True
+
+        # Never widen a stop, whatever path asked for it.
+        is_buy = pos.type == mt5.ORDER_TYPE_BUY
+        if current_sl > 0 and not _is_tighter(is_buy, current_sl, sl_val):
+            now = time.time()
+            if now - self._loosen_logged.get(pos.ticket, 0.0) >= 60.0:
+                self._loosen_logged[pos.ticket] = now
+                logger.info("Stop change refused (would loosen) ticket=%s live=%.5f proposed=%.5f",
+                            pos.ticket, current_sl, sl_val)
+            return False
 
         req = {
             "action":   mt5.TRADE_ACTION_SLTP,
@@ -3927,6 +4068,9 @@ class StandaloneAIBot:
             # Track peak profit reached for dynamic ratchets, giveback cuts and SL reasoning
             peak = max(self._peak_profit.get(pos.ticket, 0.0), profit_move)
             self._peak_profit[pos.ticket] = peak
+            # Structure/AI tightening waits until the trade has this much profit
+            # (in ATR). 0 = tighten as soon as the trade is in profit.
+            tighten_after = float(self.cfg.get("min_profit_before_tighten_atr", 0.0) or 0.0) * atr
 
             # --- MANUAL TRADE HANDLING ---
             bot_magic = self.cfg.get("magic_number", 888999)
@@ -4067,7 +4211,8 @@ class StandaloneAIBot:
                     continue
 
             # --- DYNAMIC AI SL/TP RATCHET (One-Way Market Reasoner) ---
-            if self.cfg.get("dynamic_sltp_enabled", True) and _DYNAMIC_SLTP_AVAILABLE and floating_pnl > 0:
+            if (self.cfg.get("dynamic_sltp_enabled", True) and _DYNAMIC_SLTP_AVAILABLE
+                    and floating_pnl > 0 and profit_move >= tighten_after):
                 reasoner = self._get_sltp_reasoner()
                 if reasoner is not None:
                     loc = self._location_for(m15p) if _LOCATION_AVAILABLE else None
@@ -4092,7 +4237,8 @@ class StandaloneAIBot:
                             self._modify_sl(pos, adj.new_sl)
 
             # --- MARKET STRUCTURE TRAILING STOP ---
-            if floating_pnl > 0 and self.cfg.get("structure_trailing", True):
+            if (floating_pnl > 0 and profit_move >= tighten_after
+                    and self.cfg.get("structure_trailing", True)):
                 info = mt5.symbol_info(pos.symbol)
                 min_step = max((getattr(info, "point", 0.01) or 0.01) * 1.5,
                                float(self.cfg.get("min_sl_step_atr", 0.05) or 0.0) * atr)
@@ -4169,15 +4315,19 @@ class StandaloneAIBot:
                     min_dist = (info.trade_stops_level * info.point) if info and info.trade_stops_level else (atr * 0.1)
                     is_gold = "XAU" in pos.symbol.upper() or "GOLD" in pos.symbol.upper()
                     min_dist = max(min_dist, atr * 0.55 if is_gold else atr * 0.40)
-                    min_step = (getattr(info, "point", 0.01) or 0.01) * 1.5
+                    # min_sl_step_atr applies here too: this path used a 1.5-point
+                    # step, which sent dozens of ~0.05-price-unit modifications a
+                    # minute. Reaching break-even is exempt (see _step_ok).
+                    min_step = max((getattr(info, "point", 0.01) or 0.01) * 1.5,
+                                   float(self.cfg.get("min_sl_step_atr", 0.05) or 0.0) * atr)
 
                     if direction == 1:
                         target_sl = min(target_sl, close_price - min_dist)
-                        if target_sl > pos.sl + min_step and target_sl >= be_sl:
+                        if target_sl >= be_sl and _step_ok(True, pos.sl, target_sl, min_step, be_sl):
                             self._modify_sl(pos, target_sl)
                     else:
                         target_sl = max(target_sl, close_price + min_dist)
-                        if (pos.sl == 0 or target_sl < pos.sl - min_step) and target_sl <= be_sl:
+                        if target_sl <= be_sl and _step_ok(False, pos.sl, target_sl, min_step, be_sl):
                             self._modify_sl(pos, target_sl)
 
             # ---- EARLY PROTECTION: move SL closer at small profit to survive corrections ----
@@ -4216,8 +4366,12 @@ class StandaloneAIBot:
                 else:
                     new_sl = min(new_sl, be_sl)
 
-                if ((direction == 1  and new_sl > pos.sl + 1e-9) or
-                        (direction == -1 and (pos.sl == 0 or new_sl < pos.sl - 1e-9))):
+                # Same floor as the other paths: the trailing stop used to send
+                # every tick that improved the stop by any amount at all.
+                trail_info = mt5.symbol_info(pos.symbol)
+                trail_step = max((getattr(trail_info, "point", 0.01) or 0.01) * 1.5,
+                                 float(self.cfg.get("min_sl_step_atr", 0.05) or 0.0) * atr)
+                if _step_ok(direction == 1, pos.sl, new_sl, trail_step, be_sl):
                     self._modify_sl(pos, new_sl)
 
             # ---- multi-stage partial close ---------------------------
@@ -5299,7 +5453,23 @@ if __name__ == "__main__":
             b.running = True
             if hasattr(b, 'notifier') and hasattr(b.notifier, 'send'):
                 b.notifier.send(f"🤖 AI Bot started | {b.cfg['symbol']}")
-    
+
+    # Helper processes: the NN trainer and the diagnostics collector run as
+    # separate processes, so heavy training cannot slow this loop. They never
+    # send orders, and a failure in them never stops the bot.
+    helpers = None
+    if _build_helpers is not None:
+        try:
+            helpers = _build_helpers(
+                os.path.dirname(os.path.abspath(__file__)),
+                [b.cfg["symbol"] for b in bots if getattr(b, "running", False)], os.environ)
+            helpers.start()
+            for line in helpers.describe():
+                logger.info(line)
+        except Exception as exc:
+            logger.warning("helper processes unavailable: %r", exc)
+            helpers = None
+
     try:
         while True:
             for b in bots:
@@ -5308,8 +5478,12 @@ if __name__ == "__main__":
                         b.step()
                     except Exception as exc:
                         logger.exception("Error in bot step (%s): %s", b.cfg["symbol"], exc)
+            if helpers is not None:
+                helpers.tick()
             time.sleep(CONFIG.get("sleep_interval", 1.0))
     except KeyboardInterrupt:
         logger.info("Manager stopping…")
     finally:
+        if helpers is not None:
+            helpers.stop()
         mt5.shutdown()
