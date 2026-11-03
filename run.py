@@ -684,6 +684,13 @@ CONFIG = {
     # ratchet from spending a broker call on a one-tick drift of the rolling
     # swing anchor. 0 disables the threshold (old behaviour).
     "min_sl_step_atr":         float(os.getenv("MIN_SL_STEP_ATR", "0.05")),
+    # How far behind price the progressive break-even / profit-lock block keeps the
+    # stop (ATR multiple). 0 = the legacy constants: 0.55 for gold, 0.40 otherwise.
+    # This block used to hard-code that distance, so it ignored MIN_SL_SEPARATION_ATR
+    # (which the structure stop and the AI reasoner use) and the effective break-even
+    # trigger was this distance plus the buffer (~0.75 ATR) whatever
+    # BREAKEVEN_TRIGGER_ATR said. Set it together with MIN_SL_SEPARATION_ATR.
+    "lock_min_distance_atr":   float(os.getenv("LOCK_MIN_DISTANCE_ATR", "0") or 0.0),
     # The structure and AI-ratchet stops used to clamp the stop to ~0.55 ATR from
     # price the moment a trade showed any profit, cutting a 1.8 ATR stop to
     # ~0.55 ATR within seconds. They now wait until the trade has this much
@@ -4592,7 +4599,9 @@ class StandaloneAIBot:
                     info = mt5.symbol_info(pos.symbol)
                     min_dist = (info.trade_stops_level * info.point) if info and info.trade_stops_level else (atr * 0.1)
                     is_gold = "XAU" in pos.symbol.upper() or "GOLD" in pos.symbol.upper()
-                    min_dist = max(min_dist, atr * 0.55 if is_gold else atr * 0.40)
+                    lock_floor = float(self.cfg.get("lock_min_distance_atr", 0.0) or 0.0) * atr
+                    min_dist = max(min_dist, lock_floor if lock_floor > 0
+                                   else (atr * 0.55 if is_gold else atr * 0.40))
                     # min_sl_step_atr applies here too: this path used a 1.5-point
                     # step, which sent dozens of ~0.05-price-unit modifications a
                     # minute. Reaching break-even is exempt (see _step_ok).

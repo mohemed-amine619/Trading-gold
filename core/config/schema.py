@@ -301,6 +301,9 @@ _add(_p("analog_check_bars", "History repeats: bars replayed to prove itself", "
         env="ANALOG_CHECK_BARS"))
 _add(_p("analog_min_calls", "History repeats: calls needed to trust the proof", "Strategies", "int", 30, 10, 300, 5,
         env="ANALOG_MIN_CALLS"))
+_add(_p("lock_min_distance_atr", "Break-even / profit-lock stop distance (ATR)", "Stops & Targets", "float", 0.0, 0.0, 3.0, 0.05,
+        env="LOCK_MIN_DISTANCE_ATR",
+        help="How far behind price the progressive break-even and profit-lock stop is kept. 0 = legacy (0.55 for gold, 0.40 otherwise). The effective break-even trigger is this distance plus the break-even buffer, whatever BREAKEVEN_TRIGGER_ATR says. Set it together with MIN_SL_SEPARATION_ATR."))
 _add(_p("require_demo_account", "Refuse to run on a non-demo account", "Instrument", "bool", False,
         env="REQUIRE_DEMO_ACCOUNT", requires_restart=True, safe_live=False,
         help="Checked at connect, on reconnect and on every step. An account whose type cannot be read is refused."))

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-TIMEFRAMES = ("M5", "M15", "H1")
+TIMEFRAMES = ("M1", "M5", "M15", "H1")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -33,7 +33,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     import MetaTrader5 as mt5
     import pandas as pd
 
-    tf = {"M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15, "H1": mt5.TIMEFRAME_H1}[args.timeframe]
+    tf = {"M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15, "H1": mt5.TIMEFRAME_H1}[args.timeframe]
 
     if not mt5.initialize():
         print(f"MT5 initialize failed: {mt5.last_error()}")
