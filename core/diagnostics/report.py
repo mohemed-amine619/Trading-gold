@@ -21,6 +21,19 @@ def _minutes(stamp: str) -> int:
 def findings(stats: dict, log: dict, conf: Optional[dict] = None) -> List[str]:
     out: List[str] = []
 
+    # Whose trades are these? Money lost by hand must never read as the bot's result.
+    origin = stats.get("by_origin") or {}
+    other = origin.get("other")
+    if other and other["trades"]:
+        bot = origin.get("bot", {"trades": 0, "net": 0.0, "win_rate": None})
+        hand = stats.get("hand_closed", {"trades": 0, "net": 0.0})
+        out.append(
+            f"{other['trades']} of {stats['trades']} trades (net {other['net']}) were NOT opened by "
+            f"the bot: a different magic number, so manual trades or another program. "
+            f"{hand['trades']} trades (net {hand['net']}) were closed by hand from the MT5 app or "
+            f"terminal. The bot's own {bot['trades']} trades: net {bot['net']}, win rate "
+            f"{bot['win_rate']}.")
+
     sl = log.get("sl_modifications", {})
     per_ticket = sl.get("per_ticket", {})
     if per_ticket:
@@ -107,6 +120,11 @@ def build_summary(meta: dict, stats: dict, log: dict, notes: Optional[List[str]]
                         stats["max_consecutive_losses"], stats["median_duration_s"])],
                       ("trades", "net", "win rate", "avg win", "avg loss", "profit factor",
                        "expectancy", "max loss streak", "median hold (s)")), ""]
+        if stats.get("by_origin"):
+            md += ["By origin (who opened the trade):", "",
+                   _table([(k, v["trades"], v["net"], v["win_rate"])
+                           for k, v in stats["by_origin"].items()],
+                          ("origin", "trades", "net", "win rate")), ""]
         md += ["By exit reason:", "",
                _table([(k, v["trades"], v["net"], v["win_rate"]) for k, v in stats["by_exit_reason"].items()],
                       ("exit", "trades", "net", "win rate")), ""]

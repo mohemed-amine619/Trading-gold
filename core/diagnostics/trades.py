@@ -117,15 +117,24 @@ def _bucket(trades: List[Trade], key) -> dict:
             for k, v in sorted(groups.items(), key=lambda kv: str(kv[0]))}
 
 
-def trade_stats(trades: List[Trade]) -> dict:
-    """Summary of closed trades. Ratios are ``None`` when undefined, never 0."""
+HAND_CLOSED = ("client", "mobile", "web")      # closed by a person, not by a stop or the bot
+
+
+def trade_stats(trades: List[Trade], bot_magic: Optional[int] = None) -> dict:
+    """Summary of closed trades. Ratios are ``None`` when undefined, never 0.
+
+    With ``bot_magic`` the trades are also split by ORIGIN: opened by the bot, or
+    "other" (a different magic number: manual trades or another program). Money
+    lost by hand is easy to mistake for the bot's own result, so the split is
+    reported whenever the bot's magic number is known.
+    """
     n = len(trades)
     if n == 0:
         return {"trades": 0, "net": 0.0, "wins": 0, "losses": 0, "win_rate": None,
                 "avg_win": None, "avg_loss": None, "profit_factor": None,
                 "expectancy": None, "max_consecutive_losses": 0, "quick_losses": 0,
                 "median_duration_s": None, "by_exit_reason": {}, "by_hour": {},
-                "by_direction": {}}
+                "by_direction": {}, "by_origin": {}, "hand_closed": {"trades": 0, "net": 0.0}}
     pnls = [t.net_pnl for t in trades]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
@@ -152,4 +161,8 @@ def trade_stats(trades: List[Trade]) -> dict:
         "by_exit_reason": _bucket(trades, lambda t: t.exit_reason),
         "by_hour": _bucket(trades, lambda t: int(t.open_time[11:13])),
         "by_direction": _bucket(trades, lambda t: "long" if t.direction == 1 else "short"),
+        "by_origin": (_bucket(trades, lambda t: "bot" if t.magic == bot_magic else "other")
+                      if bot_magic is not None else {}),
+        "hand_closed": {"trades": sum(1 for t in trades if t.exit_reason in HAND_CLOSED),
+                        "net": round(sum(t.net_pnl for t in trades if t.exit_reason in HAND_CLOSED), 2)},
     }

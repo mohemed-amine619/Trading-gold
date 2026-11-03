@@ -159,12 +159,17 @@ def collect(root: Path, out_dir: Path, days: int = 7, tail: int = 20000,
     trades: List[Trade] = pair_deals(history["deals"], magic=magic)
     if magic is not None:
         notes.append(f"Only trades with magic number {magic} are included.")
+    else:
+        notes.append("All magic numbers are included: the bot's trades AND any manual trades or "
+                     "other programs on this account.")
 
     log_lines = [clean(line) for line in read_tail(root / log_name, tail)]
     if not log_lines:
         notes.append(f"No {log_name} found or it is empty.")
     log = parse_log(log_lines)
-    stats = trade_stats(trades)
+    env_magic = _env_value(env_text, "MAGIC_NUMBER")
+    bot_magic = int(env_magic) if env_magic and env_magic.isdigit() else None
+    stats = trade_stats(trades, bot_magic=bot_magic)
     conf = confidence_buckets(log["entries"], trades)
 
     account = history["account"]
