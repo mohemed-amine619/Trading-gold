@@ -16,7 +16,8 @@ from collections import Counter, defaultdict
 from typing import Dict, Iterable, List
 
 _LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):\d{2},\d+ \[(\w+)\] (.*)$")
-_ENTRY = re.compile(r"✅ (BUY|SELL) (\S+) vol=([\d.]+) @ ([\d.]+)\s+SL=([\d.]+)\s+TP=([\d.]+)")
+_ENTRY = re.compile(r"✅ (BUY|SELL) (\S+) vol=([\d.]+) @ ([\d.]+)\s+SL=([\d.]+)\s+TP=([\d.]+)"
+                    r"(?:\s+ticket=(\d+)\s+conf=([\d.]+)\s+score=([\d.]+))?")
 _SL_MOD = re.compile(r"Modified SL ticket=(\d+)")
 _MIN_LOT = re.compile(
     r"Minimum lot ([\d.]+) risks ([\d.]+) \(([\d.]+)% of equity\) against a ([\d.]+) budget "
@@ -27,6 +28,9 @@ _SKIPPED = re.compile(r"Entry skipped: (.*)")
 _BAR = re.compile(r"Bar \S+ \S+ \| direction=([+-]?\d) score=([\d.]+) ai_conf=([\d.]+) \((.*)\)$")
 _CLOSE = re.compile(r"CLOSE (\S+) ticket=(\d+) pnl=([+-]?[\d.]+) reason=(.*)$")
 _CHALLENGER = re.compile(r"challenger rejected \(oos accuracy ([\d.]+)")
+_PROMOTED = re.compile(
+    r"promoted run #(\d+) \| train=(\d+) \| oos_acc=([\d.]+) \| auc=([\d.]+) \| base=([\d.]+) "
+    r"\| lift=([+-]?[\d.]+)")
 
 _DIGITS = re.compile(r"[\d.]+")
 
@@ -49,6 +53,7 @@ def parse_log(lines: Iterable[str]) -> dict:
     signals: Counter = Counter()
     bot_closes: List[dict] = []
     challenger_acc: List[float] = []
+    ai_models: List[dict] = []
     first = last = None
     n_lines = 0
 
@@ -63,10 +68,13 @@ def parse_log(lines: Iterable[str]) -> dict:
         levels[level] += 1
 
         if (e := _ENTRY.search(msg)):
-            side, symbol, vol, price, sl, tp = e.groups()
+            side, symbol, vol, price, sl, tp, ticket, conf, score = e.groups()
             entries.append({"time": stamp, "side": side, "symbol": symbol, "volume": float(vol),
                             "price": float(price), "sl": float(sl), "tp": float(tp),
-                            "sl_distance": round(abs(float(price) - float(sl)), 5)})
+                            "sl_distance": round(abs(float(price) - float(sl)), 5),
+                            # present on lines written since the entry log carried them
+                            "ticket": ticket, "conf": float(conf) if conf else None,
+                            "score": float(score) if score else None})
             entries_by_hour[int(hour)] += 1
         elif (e := _SL_MOD.search(msg)):
             sl_mods[e.group(1)] += 1
@@ -90,6 +98,11 @@ def parse_log(lines: Iterable[str]) -> dict:
                                "reason": e.group(4).strip()})
         elif (e := _CHALLENGER.search(msg)):
             challenger_acc.append(float(e.group(1)))
+        elif (e := _PROMOTED.search(msg)):
+            run, train, acc, auc, base, lift = e.groups()
+            ai_models.append({"time": stamp, "run": int(run), "train": int(train),
+                              "oos_acc": float(acc), "auc": float(auc), "base": float(base),
+                              "lift": float(lift)})
 
     overshoots = [x["overshoot"] for x in min_lots if x["overshoot"] is not None]
     return {
@@ -117,4 +130,5 @@ def parse_log(lines: Iterable[str]) -> dict:
         "signals": dict(signals.most_common(15)),
         "bot_closes": bot_closes,
         "ai_challenger_oos_accuracy": challenger_acc,
+        "ai_models": ai_models,
     }

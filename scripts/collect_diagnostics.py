@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from core.diagnostics.confidence import confidence_buckets           # noqa: E402
 from core.diagnostics.logstats import parse_log                      # noqa: E402
 from core.diagnostics.redact import (                                 # noqa: E402
     login_from_env, mask_account, redact_env_text, scrub_text, secret_values_from_env,
@@ -164,6 +165,7 @@ def collect(root: Path, out_dir: Path, days: int = 7, tail: int = 20000,
         notes.append(f"No {log_name} found or it is empty.")
     log = parse_log(log_lines)
     stats = trade_stats(trades)
+    conf = confidence_buckets(log["entries"], trades)
 
     account = history["account"]
     meta = {"generated": now.strftime("%Y-%m-%d %H:%M UTC"), "days": days,
@@ -171,8 +173,9 @@ def collect(root: Path, out_dir: Path, days: int = 7, tail: int = 20000,
             "balance": account.get("balance", "?"), "equity": account.get("equity", "?")}
 
     members: Dict[str, str] = {
-        "summary.md": build_summary(meta, stats, log, notes),
-        "stats.json": json.dumps({"meta": meta, "trades": stats, "log": log}, indent=2, default=str),
+        "summary.md": build_summary(meta, stats, log, notes, conf),
+        "stats.json": json.dumps({"meta": meta, "trades": stats, "log": log, "confidence": conf},
+                                 indent=2, default=str),
         "closed_trades.csv": _csv_text([t.to_row() for t in trades],
                                        list(Trade.__dataclass_fields__)),
         "log_tail.txt": "".join(log_lines),

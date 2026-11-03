@@ -11,12 +11,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
+from core.diagnostics.confidence import confidence_finding
+
 
 def _minutes(stamp: str) -> int:
     return int(datetime.strptime(stamp, "%Y-%m-%d %H:%M").timestamp() // 60)
 
 
-def findings(stats: dict, log: dict) -> List[str]:
+def findings(stats: dict, log: dict, conf: Optional[dict] = None) -> List[str]:
     out: List[str] = []
 
     sl = log.get("sl_modifications", {})
@@ -62,6 +64,10 @@ def findings(stats: dict, log: dict) -> List[str]:
         out.append(f"AI retraining scores below a coin flip: mean out-of-sample accuracy "
                    f"{round(sum(acc) / len(acc), 3)} over {len(acc)} attempts.")
 
+    note = confidence_finding(conf)
+    if note:
+        out.append(note)
+
     entries = sorted(log.get("entries", []), key=lambda e: e["time"])
     clustered = sum(1 for a, b in zip(entries, entries[1:])
                     if a["side"] == b["side"] and 0 <= _minutes(b["time"]) - _minutes(a["time"]) <= 15)
@@ -77,7 +83,8 @@ def _table(rows: List[tuple], header: tuple) -> str:
     return "\n".join(lines)
 
 
-def build_summary(meta: dict, stats: dict, log: dict, notes: Optional[List[str]] = None) -> str:
+def build_summary(meta: dict, stats: dict, log: dict, notes: Optional[List[str]] = None,
+                  conf: Optional[dict] = None) -> str:
     md: List[str] = ["# Trading-gold diagnostics", ""]
     md += [f"- Generated: {meta.get('generated', '')}",
            f"- Period: last {meta.get('days', '?')} days",
@@ -89,7 +96,7 @@ def build_summary(meta: dict, stats: dict, log: dict, notes: Optional[List[str]]
     md.append("")
 
     md += ["## Findings", ""]
-    items = findings(stats, log)
+    items = findings(stats, log, conf)
     md += [f"- {f}" for f in items] if items else ["- Nothing crossed a threshold."]
     md.append("")
 
@@ -126,8 +133,25 @@ def build_summary(meta: dict, stats: dict, log: dict, notes: Optional[List[str]]
         md += [_table(list({**log["entries_blocked"], **log["entries_skipped"]}.items()),
                       ("blocked / skipped", "count")), ""]
 
+    md += ["## AI confidence vs results", ""]
+    if conf and conf["matched"]:
+        md += [_table([(k, v["trades"], v["win_rate"], v["net"], v["avg_net"])
+                       for k, v in conf["buckets"].items()],
+                      ("confidence at entry", "trades", "win rate", "net", "avg net")),
+               "",
+               f"{conf['matched']} trades matched to their entry confidence; "
+               f"{conf['unmatched']} entries had no closed trade yet; {conf['untagged']} entries "
+               f"were logged before the confidence was recorded.", ""]
+    else:
+        md += ["No trades could be matched to an entry confidence yet. Entries now log their "
+               "ticket and confidence; results appear after those trades close.", ""]
+
     acc = log["ai_challenger_oos_accuracy"]
-    md += ["## AI retraining", "",
-           f"- Challenger attempts rejected: {len(acc)}"
+    md += ["## AI model quality (from the bot's own retraining)", ""]
+    if log.get("ai_models"):
+        md += [_table([(m["time"], f"#{m['run']}", m["train"], m["oos_acc"], m["auc"], m["base"],
+                        m["lift"]) for m in log["ai_models"][-5:]],
+                      ("time", "model", "train rows", "oos acc", "auc", "baseline", "lift")), ""]
+    md += [f"- Challenger attempts rejected: {len(acc)}"
            + (f" (accuracy min {min(acc)}, max {max(acc)})" if acc else ""), ""]
     return "\n".join(md)

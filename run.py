@@ -3035,7 +3035,7 @@ class StandaloneAIBot:
             # 3. Gold AI Confidence Gate: 0.50 is pure noise; Gold requires >= 0.55
             gold_min_conf = float(self.cfg.get("gold_min_ai_conf", 0.55))
             if ai_on and ai_conf < gold_min_conf:
-                return 0, best_score, ai_conf, f"gold AI conf {ai_conf:.2f} < threshold ({gold_min_conf:.2f})"
+                return 0, best_score, ai_conf, f"gold AI conf {ai_conf:.3f} < threshold ({gold_min_conf:.3f})"
 
             # 4. Gold Spread Gate: Prevent entries during wide spread / roll-over
             atr_val = float(m15p.iloc[-1].get("atr", 0.0))
@@ -3454,8 +3454,7 @@ class StandaloneAIBot:
             result = mt5.order_send(req)
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 self.trades_today += 1
-                msg = (f"✅ {'BUY' if direction==1 else 'SELL'} {sym} "
-                       f"vol={volume:.2f} @ {price:.5f}  SL={sl:.5f}  TP={tp:.5f}")
+                msg = self._entry_message(direction, sym, volume, price, sl, tp, result, ai_conf)
                 logger.info(msg)
                 self.notifier.send(msg)
                 return True
@@ -3481,8 +3480,8 @@ class StandaloneAIBot:
                         alt_res = mt5.order_send(req)
                         if alt_res and alt_res.retcode == mt5.TRADE_RETCODE_DONE:
                             self.trades_today += 1
-                            msg = (f"✅ {'BUY' if direction==1 else 'SELL'} {sym} "
-                                   f"vol={volume:.2f} @ {price:.5f}  SL={sl:.5f}  TP={tp:.5f}")
+                            msg = self._entry_message(direction, sym, volume, price, sl, tp,
+                                                      alt_res, ai_conf)
                             logger.info(msg)
                             self.notifier.send(msg)
                             return True
@@ -3504,6 +3503,18 @@ class StandaloneAIBot:
                              retcode_str, last_err)
             break
         return False
+
+    # --------------------------------------------------------------
+    def _entry_message(self, direction, sym, volume, price, sl, tp, result, ai_conf) -> str:
+        """The entry log line. The fields after TP (ticket, AI confidence, score)
+        let the diagnostics tie each trade's result back to the confidence the
+        bot had when it opened it. A position's ticket is the order's ticket on
+        a hedging account, which is what the broker's deal history reports."""
+        ticket = getattr(result, "order", 0) or 0
+        score = float(self.status.get("last_score", 0.0) or 0.0)
+        return (f"✅ {'BUY' if direction == 1 else 'SELL'} {sym} "
+                f"vol={volume:.2f} @ {price:.5f}  SL={sl:.5f}  TP={tp:.5f}  "
+                f"ticket={ticket} conf={float(ai_conf or 0.0):.3f} score={score:.1f}")
 
     # --------------------------------------------------------------
     def _close_position(self, pos, reason: str, pnl: Optional[float] = None) -> bool:
