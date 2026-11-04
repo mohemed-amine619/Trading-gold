@@ -26,9 +26,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from core.ai.nn_features import (
-    LONG, NOISE, SHORT, FeatureScaler, build_features, latest_window,
-)
+from core.ai.deep_features import ARCH_GRU, latest_model_window
+from core.ai.nn_features import LONG, NOISE, SHORT, FeatureScaler
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +64,7 @@ class ModelPredictor:
         self._ensemble_proba = None
         self._scaler: Optional[FeatureScaler] = None
         self._window = 0
+        self._arch = ARCH_GRU
         self._oos_edge: Optional[float] = None
         self._mtime = _UNSET
 
@@ -98,6 +98,7 @@ class ModelPredictor:
             self._ensemble_proba = ensemble_proba
             self._scaler = FeatureScaler.from_dict(art["scaler"])
             self._window = int(art["config"]["window"])
+            self._arch = art["config"].get("arch", ARCH_GRU)
             self._oos_edge = (art.get("oos") or {}).get("edge")
             self._loaded = True
         except Exception as exc:
@@ -133,8 +134,8 @@ class ModelPredictor:
                 f"model out-of-sample edge {self._oos_edge:.3f} below floor "
                 f"{self.min_oos_edge:.3f}")
 
-        feats = build_features(df.tail(self._window + _WARMUP_ROWS)).to_numpy()
-        window = latest_window(feats, self._window)
+        window = latest_model_window(df.tail(self._window + _WARMUP_ROWS), self._window,
+                                     self._arch)
         if window is None:
             return _neutral("not enough finite history for the model window")
 

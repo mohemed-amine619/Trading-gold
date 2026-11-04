@@ -113,6 +113,8 @@ class HelperSettings:
     diag_enabled: bool
     diag_interval_min: float
     diag_days: int
+    nn_arch: str = "gru"            # "gru" (default) | "dual" (core/ai/deep_nn.py)
+    nn_preset: str = "small"        # dual only: small | medium | large
 
     @classmethod
     def from_env(cls, env: Mapping[str, str], torch_available: bool) -> "HelperSettings":
@@ -136,6 +138,8 @@ class HelperSettings:
             nn_models=int(_number(env.get("NN_TRAINER_MODELS"), 3, 1)),
             nn_bars=int(_number(env.get("NN_TRAINER_BARS"), 30000, 3000)),
             nn_epochs=int(_number(env.get("NN_TRAINER_EPOCHS"), 50, 5)),
+            nn_arch=(env.get("NN_ARCH") or "gru").strip().lower(),
+            nn_preset=(env.get("NN_PRESET") or "small").strip().lower(),
             timeframe=timeframe,
             diag_enabled=diag_on,
             diag_interval_min=_number(env.get("DIAGNOSTICS_INTERVAL_MIN"), 360.0, 1.0),
@@ -144,12 +148,15 @@ class HelperSettings:
 
 
 def nn_command(python: str, root: Path, symbol: str, s: HelperSettings, parent_pid: int) -> List[str]:
-    return [python, str(root / "scripts" / "train_nn_loop.py"),
-            "--symbol", symbol, "--timeframe", s.timeframe,
-            "--out", str(root / "data" / "models" / f"nn_{symbol}_{s.timeframe}.pt"),
-            "--interval-min", f"{s.nn_interval_min:g}", "--models", str(s.nn_models),
-            "--bars", str(s.nn_bars), "--epochs", str(s.nn_epochs),
-            "--parent-pid", str(parent_pid)]
+    cmd = [python, str(root / "scripts" / "train_nn_loop.py"),
+           "--symbol", symbol, "--timeframe", s.timeframe,
+           "--out", str(root / "data" / "models" / f"nn_{symbol}_{s.timeframe}.pt"),
+           "--interval-min", f"{s.nn_interval_min:g}", "--models", str(s.nn_models),
+           "--bars", str(s.nn_bars), "--epochs", str(s.nn_epochs),
+           "--parent-pid", str(parent_pid)]
+    if s.nn_arch == "dual":                    # default (gru) keeps the command unchanged
+        cmd += ["--arch", "dual", "--preset", s.nn_preset]
+    return cmd
 
 
 def diagnostics_command(python: str, root: Path, s: HelperSettings) -> List[str]:
