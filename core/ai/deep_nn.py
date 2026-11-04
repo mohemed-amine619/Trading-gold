@@ -39,7 +39,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from core.ai.deep_features import N_SEQ
+from core.ai.deep_layout import N_SEQ
 from core.ai.nn_features import N_CLASSES
 
 

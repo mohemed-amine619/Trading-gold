@@ -6,7 +6,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from core.ai.deep_features import (  # noqa: E402
+from core.ai.deep_layout import (  # noqa: E402
     ARCH_DUAL, N_SEQ, build_model_features, feature_names, latest_model_window, make_excursion,
 )
 from core.ai.deep_nn import PRESETS, DualStreamNet, build_dual, n_parameters  # noqa: E402

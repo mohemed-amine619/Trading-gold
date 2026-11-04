@@ -26,7 +26,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from core.ai.deep_features import ARCH_GRU, latest_model_window
+from core.ai.deep_layout import ARCH_GRU, latest_model_window
 from core.ai.nn_features import LONG, NOISE, SHORT, FeatureScaler
 
 logger = logging.getLogger(__name__)

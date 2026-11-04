@@ -35,7 +35,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from core.ai.deep_features import (
+from core.ai.deep_layout import (
     ARCH_DUAL, ARCH_GRU, build_model_features, feature_names, make_excursion,
 )
 from core.ai.nn_features import (

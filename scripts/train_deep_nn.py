@@ -60,7 +60,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         from core.ai.deep_nn import build_dual
-        from core.ai.deep_features import N_SEQ
+        from core.ai.deep_layout import N_SEQ
         from core.ai.location_features import N_STRUCT
         from core.ai.nn_model import TrainConfig, save_artifact, train_final
     except ImportError as exc:
