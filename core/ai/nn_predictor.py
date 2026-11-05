@@ -18,6 +18,7 @@ Direction follows the bot's convention: +1 long, -1 short, 0 no trade.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -46,6 +47,29 @@ class NNSignal:
     def as_tuple(self) -> tuple:
         """``(direction, confidence)``, the shape ``AIEnsemble.predict`` returns."""
         return self.direction, self.confidence
+
+
+def _last_training_note(model_path: str) -> str:
+    """Why the trainer has not saved a model yet, from its history file.
+
+    The trainer writes a model only when one passes its out-of-sample gate; a
+    rejected challenger leaves no file. Without this the bot can only say
+    "no model file", which hides whether the trainer is failing, skipping, or
+    simply finding no edge.
+    """
+    try:
+        with open(model_path + ".history.jsonl", encoding="utf-8") as fh:
+            lines = [ln for ln in fh if ln.strip()]
+    except OSError:
+        return " (the trainer has not finished a cycle yet)"
+    if not lines:
+        return " (the trainer has not finished a cycle yet)"
+    try:
+        last = json.loads(lines[-1])
+    except ValueError:
+        return ""
+    return (f" (trainer after {len(lines)} cycle(s): {last.get('action', '?')} - "
+            f"{last.get('reason', '?')})")
 
 
 def _neutral(reason: str) -> NNSignal:
@@ -85,7 +109,7 @@ class ModelPredictor:
         if self._loaded or self._load_error:
             return
         if current is None:
-            self._load_error = f"no model file at {self.path}"
+            self._load_error = f"no model file at {self.path}" + _last_training_note(self.path)
             return
         try:
             from core.ai.nn_model import ensemble_proba, load_artifact, members_from_artifact

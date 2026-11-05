@@ -3209,7 +3209,9 @@ class StandaloneAIBot:
 
     def _nn_model_path(self) -> str:
         """Where scripts/train_nn_loop.py (started by this process) saves its model."""
-        tf = os.getenv("TIMEFRAME", "M5").strip().upper() or "M5"
+        # The bot's own resolved timeframe (profile default when TIMEFRAME is
+        # unset), the same one passed to the trainer, so both use one file.
+        tf = str(_primary_tf_str).strip().upper() or "M15"
         root = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(root, "data", "models", f"nn_{self.cfg['symbol']}_{tf}.pt")
 
@@ -5967,7 +5969,10 @@ if __name__ == "__main__":
         try:
             helpers = _build_helpers(
                 os.path.dirname(os.path.abspath(__file__)),
-                [b.cfg["symbol"] for b in bots if getattr(b, "running", False)], os.environ)
+                [b.cfg["symbol"] for b in bots if getattr(b, "running", False)],
+                # Train on the bars the bot trades: the profile's timeframe when
+                # TIMEFRAME is unset (the trainer alone would default to M5).
+                {**os.environ, "TIMEFRAME": str(_primary_tf_str).strip().upper()})
             helpers.start()
             for line in helpers.describe():
                 logger.info(line)

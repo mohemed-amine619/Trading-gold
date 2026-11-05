@@ -113,6 +113,8 @@ class HelperSettings:
     diag_enabled: bool
     diag_interval_min: float
     diag_days: int
+    nn_threshold: float = 0.0       # NN_MIN_CONFIDENCE; 0 = the trainer's own default
+    nn_holdout_bars: int = 0        # NN_TRAINER_HOLDOUT_BARS; 0 = the trainer's default
     nn_arch: str = "gru"            # "gru" (default) | "dual" (core/ai/deep_nn.py)
     nn_preset: str = "small"        # dual only: small | medium | large
 
@@ -138,6 +140,8 @@ class HelperSettings:
             nn_models=int(_number(env.get("NN_TRAINER_MODELS"), 3, 1)),
             nn_bars=int(_number(env.get("NN_TRAINER_BARS"), 30000, 3000)),
             nn_epochs=int(_number(env.get("NN_TRAINER_EPOCHS"), 50, 5)),
+            nn_threshold=_number(env.get("NN_MIN_CONFIDENCE"), 0.0, 0.0),
+            nn_holdout_bars=int(_number(env.get("NN_TRAINER_HOLDOUT_BARS"), 0, 0)),
             nn_arch=(env.get("NN_ARCH") or "gru").strip().lower(),
             nn_preset=(env.get("NN_PRESET") or "small").strip().lower(),
             timeframe=timeframe,
@@ -154,6 +158,11 @@ def nn_command(python: str, root: Path, symbol: str, s: HelperSettings, parent_p
            "--interval-min", f"{s.nn_interval_min:g}", "--models", str(s.nn_models),
            "--bars", str(s.nn_bars), "--epochs", str(s.nn_epochs),
            "--parent-pid", str(parent_pid)]
+    # The trainer must judge a model at the confidence the bot will use it at.
+    if 0.0 < s.nn_threshold < 1.0:
+        cmd += ["--threshold", f"{s.nn_threshold:g}"]
+    if s.nn_holdout_bars > 0:
+        cmd += ["--holdout-bars", str(s.nn_holdout_bars)]
     if s.nn_arch == "dual":                    # default (gru) keeps the command unchanged
         cmd += ["--arch", "dual", "--preset", s.nn_preset]
     return cmd
