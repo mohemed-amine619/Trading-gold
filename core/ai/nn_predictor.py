@@ -106,10 +106,10 @@ class ModelPredictor:
             self._loaded = False
             self._load_error = None
             self._members = None
-        if self._loaded or self._load_error:
-            return
-        if current is None:
+        if current is None:                 # re-read each time: the trainer's verdict changes
             self._load_error = f"no model file at {self.path}" + _last_training_note(self.path)
+            return
+        if self._loaded or self._load_error:
             return
         try:
             from core.ai.nn_model import ensemble_proba, load_artifact, members_from_artifact

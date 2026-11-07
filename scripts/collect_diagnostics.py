@@ -135,7 +135,7 @@ def _env_value(env_text: str, key: str) -> Optional[str]:
 def collect(root: Path, out_dir: Path, days: int = 7, tail: int = 20000,
             magic: Optional[int] = None, use_env_magic: bool = True, mt5=None,
             now: Optional[datetime] = None, log_name: str = "trading_bot.log",
-            compare: Optional[List[int]] = None) -> Path:
+            compare: Optional[List[int]] = None, keep: int = 10) -> Path:
     now = now or datetime.now(timezone.utc)
     env_text = read_env(root)
     secrets = secret_values_from_env(env_text)
@@ -219,7 +219,24 @@ def collect(root: Path, out_dir: Path, days: int = 7, tail: int = 20000,
         for name, text in members.items():
             zf.writestr(name, text)
     (out_dir / "latest_summary.md").write_text(members["summary.md"], encoding="utf-8")
+    prune_bundles(out_dir, keep)
     return path
+
+
+def prune_bundles(out_dir: Path, keep: int) -> List[Path]:
+    """Delete all but the newest ``keep`` diagnostics zips. A bundle every few
+    hours, never removed, was one of the things filling the disk."""
+    if keep <= 0:
+        return []
+    bundles = sorted(out_dir.glob("diagnostics_*.zip"), key=lambda p: p.name, reverse=True)
+    removed = []
+    for old in bundles[keep:]:
+        try:
+            old.unlink()
+            removed.append(old)
+        except OSError:
+            pass
+    return removed
 
 
 def main(argv: Optional[List[str]] = None, mt5=None) -> int:
@@ -228,6 +245,8 @@ def main(argv: Optional[List[str]] = None, mt5=None) -> int:
     parser.add_argument("--out", type=Path, default=None, help="default: <root>/diagnostics")
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--tail", type=int, default=20000, help="log lines to keep")
+    parser.add_argument("--keep", type=int, default=10,
+                        help="diagnostics zips to keep; older ones are deleted (0 = keep all)")
     parser.add_argument("--magic", type=int, default=None)
     parser.add_argument("--all-magics", action="store_true",
                         help="include manual trades and other bots, not just the bot's magic number")
@@ -250,7 +269,8 @@ def main(argv: Optional[List[str]] = None, mt5=None) -> int:
     root = args.root.resolve()
     try:
         path = collect(root, args.out or root / "diagnostics", args.days, args.tail,
-                       args.magic, use_env_magic=not args.all_magics, mt5=mt5, compare=compare)
+                       args.magic, use_env_magic=not args.all_magics, mt5=mt5, compare=compare,
+                       keep=args.keep)
     except RuntimeError as exc:
         print(f"error: {exc}")
         return 1

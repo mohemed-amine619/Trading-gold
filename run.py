@@ -802,12 +802,33 @@ CONFIG = {
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+# The file log rotates: an unbounded trading_bot.log was one of the things
+# filling the disk. LOG_MAX_MB per file, LOG_BACKUPS old files kept.
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+
+
+def _log_size_mb() -> float:
+    try:
+        return max(1.0, float(os.getenv("LOG_MAX_MB", "20") or 20))
+    except ValueError:
+        return 20.0
+
+
+def _log_backups() -> int:
+    try:
+        return max(1, int(os.getenv("LOG_BACKUPS", "5") or 5))
+    except ValueError:
+        return 5
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("trading_bot.log", encoding="utf-8")
+        _RotatingFileHandler("trading_bot.log", encoding="utf-8",
+                             maxBytes=int(_log_size_mb() * 1024 * 1024),
+                             backupCount=_log_backups(), delay=True),
     ]
 )
 logger = logging.getLogger(__name__)

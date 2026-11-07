@@ -176,10 +176,26 @@ def diagnostics_command(python: str, root: Path, s: HelperSettings) -> List[str]
 Spawn = Callable[..., "subprocess.Popen"]
 
 
+HELPER_LOG_MAX_BYTES = 20 * 1024 * 1024
+
+
+def rotate_if_large(log_path: Path, max_bytes: int = HELPER_LOG_MAX_BYTES) -> bool:
+    """Move ``log_path`` to ``<name>.1`` (replacing an older one) once it is over
+    ``max_bytes``. Helper logs are append-only and were never trimmed."""
+    try:
+        if log_path.exists() and log_path.stat().st_size > max_bytes:
+            os.replace(log_path, log_path.with_name(log_path.name + ".1"))
+            return True
+    except OSError as exc:                     # a busy file must not stop the helper
+        logger.warning("could not rotate %s: %r", log_path, exc)
+    return False
+
+
 def _default_spawn(command: Sequence[str], cwd: str, log_path: Optional[Path]) -> "subprocess.Popen":
     out = subprocess.DEVNULL
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        rotate_if_large(log_path)
         out = open(log_path, "ab")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     return subprocess.Popen(list(command), cwd=cwd, stdout=out, stderr=subprocess.STDOUT,
@@ -327,6 +343,9 @@ class PeriodicJob:
         except subprocess.TimeoutExpired:
             _stop_process(proc, 2.0)
             logger.warning("final %s timed out", self.name)
+        except KeyboardInterrupt:              # second Ctrl+C: skip it, exit cleanly
+            _stop_process(proc, 2.0)
+            logger.warning("final %s skipped (interrupted)", self.name)
         except Exception as exc:
             logger.warning("final %s failed: %r", self.name, exc)
         return None
