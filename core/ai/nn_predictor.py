@@ -56,20 +56,33 @@ def _last_training_note(model_path: str) -> str:
     rejected challenger leaves no file. Without this the bot can only say
     "no model file", which hides whether the trainer is failing, skipping, or
     simply finding no edge.
+
+    The note is the trainer's last REAL verdict (promoted / kept / error), not
+    the latest "skipped": a skip only means "waiting for new bars", and its bar
+    count changes every cycle, which made the bot log the line every hour while
+    hiding why the model was actually rejected. The note is stable until the
+    trainer decides something new.
     """
     try:
         with open(model_path + ".history.jsonl", encoding="utf-8") as fh:
             lines = [ln for ln in fh if ln.strip()]
     except OSError:
         return " (the trainer has not finished a cycle yet)"
-    if not lines:
+    entries = []
+    for ln in lines:
+        try:
+            entries.append(json.loads(ln))
+        except ValueError:
+            continue
+    if not entries:
         return " (the trainer has not finished a cycle yet)"
-    try:
-        last = json.loads(lines[-1])
-    except ValueError:
-        return ""
-    return (f" (trainer after {len(lines)} cycle(s): {last.get('action', '?')} - "
-            f"{last.get('reason', '?')})")
+    verdicts = [e for e in entries if e.get("action") in ("promoted", "kept", "error")]
+    waiting = entries[-1].get("action") == "skipped"
+    if not verdicts:
+        return " (the trainer has not trained yet: waiting for enough bars)"
+    v = verdicts[-1]
+    return (f" (trainer's last verdict: {v.get('action', '?')} - {v.get('reason', '?')}"
+            + ("; now waiting for new bars to retrain" if waiting else "") + ")")
 
 
 def _neutral(reason: str) -> NNSignal:

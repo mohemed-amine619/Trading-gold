@@ -55,7 +55,42 @@ def test_no_model_reason_includes_the_trainers_last_verdict(tmp_path):
     sig = ModelPredictor(str(model)).predict_signal(_bars())
     assert sig.direction == 0
     assert "no model file" in sig.reason
-    assert "2 cycle(s)" in sig.reason and "too few holdout trades" in sig.reason
+    assert "last verdict: kept" in sig.reason and "too few holdout trades" in sig.reason
+
+
+def test_a_later_skip_does_not_hide_the_real_verdict_and_the_note_is_stable(tmp_path):
+    model = tmp_path / "nn.pt"
+    hist = Path(str(model) + ".history.jsonl")
+    kept = json.dumps({"action": "kept", "reason": "challenger edge -0.020 is not above the floor"})
+    hist.write_text(kept + "\n" + json.dumps(
+        {"action": "skipped", "reason": "only 87 new bars since the last training cycle"}) + "\n",
+        encoding="utf-8")
+    p = ModelPredictor(str(model))
+    first = p.predict_signal(_bars()).reason
+    assert "not above the floor" in first and "waiting for new bars" in first
+    assert "87" not in first
+    with hist.open("a", encoding="utf-8") as fh:             # another hourly skip
+        fh.write(json.dumps({"action": "skipped",
+                             "reason": "only 91 new bars since the last training cycle"}) + "\n")
+    assert p.predict_signal(_bars()).reason == first        # unchanged -> logged once
+
+
+def test_only_skips_so_far(tmp_path):
+    model = tmp_path / "nn.pt"
+    Path(str(model) + ".history.jsonl").write_text(
+        json.dumps({"action": "skipped", "reason": "not enough bars to train"}) + "\n",
+        encoding="utf-8")
+    assert "has not trained yet" in ModelPredictor(str(model)).predict_signal(_bars()).reason
+
+
+def test_retrain_spacing_is_about_a_trading_day_per_timeframe():
+    def gap(env):
+        cmd = _cmd(env)
+        return cmd[cmd.index("--min-new-bars") + 1] if "--min-new-bars" in cmd else None
+    assert gap({"TIMEFRAME": "M15"}) == "96"
+    assert gap({"TIMEFRAME": "H1"}) == "24"
+    assert gap({"TIMEFRAME": "M5"}) is None                 # trainer default 300 fits M5
+    assert gap({"TIMEFRAME": "M15", "NN_TRAINER_MIN_NEW_BARS": "50"}) == "50"
 
 
 def test_no_model_and_no_history_says_the_trainer_has_not_finished(tmp_path):

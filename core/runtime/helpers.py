@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 EXIT_UNAVAILABLE = 3            # the helper cannot run here (e.g. torch missing): do not restart
 SUPPORTED_TIMEFRAMES = ("M5", "M15", "H1")
+# About one trading day of bars: how many new bars justify another training
+# cycle. M5 is absent: the trainer's own default (300) already fits it.
+MIN_NEW_BARS_PER_DAY = {"M15": 96, "H1": 24}
 _FAST_FAILURE_S = 60.0          # a run shorter than this counts as a failure to start
 _MAX_FAST_FAILURES = 5
 _BACKOFF_BASE_S = 30.0
@@ -115,6 +118,7 @@ class HelperSettings:
     diag_days: int
     nn_threshold: float = 0.0       # NN_MIN_CONFIDENCE; 0 = the trainer's own default
     nn_holdout_bars: int = 0        # NN_TRAINER_HOLDOUT_BARS; 0 = the trainer's default
+    nn_min_new_bars: int = 0        # NN_TRAINER_MIN_NEW_BARS; 0 = about one trading day
     nn_arch: str = "gru"            # "gru" (default) | "dual" (core/ai/deep_nn.py)
     nn_preset: str = "small"        # dual only: small | medium | large
 
@@ -142,6 +146,7 @@ class HelperSettings:
             nn_epochs=int(_number(env.get("NN_TRAINER_EPOCHS"), 50, 5)),
             nn_threshold=_number(env.get("NN_MIN_CONFIDENCE"), 0.0, 0.0),
             nn_holdout_bars=int(_number(env.get("NN_TRAINER_HOLDOUT_BARS"), 0, 0)),
+            nn_min_new_bars=int(_number(env.get("NN_TRAINER_MIN_NEW_BARS"), 0, 0)),
             nn_arch=(env.get("NN_ARCH") or "gru").strip().lower(),
             nn_preset=(env.get("NN_PRESET") or "small").strip().lower(),
             timeframe=timeframe,
@@ -163,6 +168,11 @@ def nn_command(python: str, root: Path, symbol: str, s: HelperSettings, parent_p
         cmd += ["--threshold", f"{s.nn_threshold:g}"]
     if s.nn_holdout_bars > 0:
         cmd += ["--holdout-bars", str(s.nn_holdout_bars)]
+    # New bars needed before retraining. The trainer's own default (300) suits
+    # M5 (~1 day); on M15 it meant ~3 trading days between attempts.
+    min_new = s.nn_min_new_bars or MIN_NEW_BARS_PER_DAY.get(s.timeframe, 0)
+    if min_new > 0:
+        cmd += ["--min-new-bars", str(min_new)]
     if s.nn_arch == "dual":                    # default (gru) keeps the command unchanged
         cmd += ["--arch", "dual", "--preset", s.nn_preset]
     return cmd

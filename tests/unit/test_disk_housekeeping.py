@@ -89,7 +89,7 @@ def test_missing_model_reason_follows_the_trainer(tmp_path):
         json.dumps({"action": "kept", "reason": "challenger edge -0.020 is not above the floor"})
         + "\n", encoding="utf-8")
     reason = p.predict_signal(df).reason                  # same predictor, later call
-    assert "1 cycle(s)" in reason and "not above the floor" in reason
+    assert "last verdict: kept" in reason and "not above the floor" in reason
 
 
 from tests.unit.test_dashboard_settings_api import run_and_stub  # noqa: E402,F401
