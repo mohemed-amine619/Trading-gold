@@ -214,6 +214,12 @@ try:
 except Exception as _news_import_error:  # pragma: no cover - defensive
     _news_active_event = _news_parse = None
 
+# No new entries while the data disk is nearly full (risk state could not be saved).
+try:
+    from core.risk.disk_guard import low_disk_reason as _low_disk_reason
+except Exception as _disk_import_error:  # pragma: no cover - defensive
+    _low_disk_reason = None
+
 # MT5 deal reasons, for the TRADE END log line.
 _DEAL_REASONS = {0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "sl", 5: "tp", 6: "stop_out"}
 
@@ -762,6 +768,9 @@ CONFIG = {
     "news_blackout":           os.getenv("NEWS_BLACKOUT", ""),
     "news_blackout_before_min": float(os.getenv("NEWS_BLACKOUT_BEFORE_MIN", "15") or 15),
     "news_blackout_after_min": float(os.getenv("NEWS_BLACKOUT_AFTER_MIN", "15") or 15),
+    # Below this much free space (MB) on the data disk no new entry opens:
+    # risk state, trade history and models could no longer be saved. 0 = off.
+    "min_free_disk_mb":        float(os.getenv("MIN_FREE_DISK_MB", "500") or 0.0),
     "loss_streak_cooldown_minutes": int(os.getenv("LOSS_STREAK_COOLDOWN_MIN", "60")),
 
     # --- manual trade management ---
@@ -3055,6 +3064,28 @@ class StandaloneAIBot:
                                 float(self.cfg.get("news_blackout_after_min", 15) or 0))
         return f"news blackout around {ev:%Y-%m-%d %H:%M} UTC" if ev else ""
 
+    def _low_disk_reason(self) -> str:
+        """Non-empty while the data disk is below ``min_free_disk_mb``; "" otherwise.
+
+        Logged at ERROR once when the guard trips and at INFO once when it clears,
+        so a full disk is loud without repeating every bar.
+        """
+        if _low_disk_reason is None:
+            return ""
+        data_dir = os.path.dirname(os.path.abspath(_get_sqlite_db_path()))
+        if not os.path.isdir(data_dir):
+            data_dir = os.getcwd()
+        reason, _free = _low_disk_reason(data_dir,
+                                         float(self.cfg.get("min_free_disk_mb", 0) or 0))
+        was_low = getattr(self, "_disk_low", False)
+        if reason and not was_low:
+            logger.error("[%s] %s - no new entries until space is freed in %s",
+                         self.cfg.get("symbol", ""), reason, data_dir)
+        elif not reason and was_low:
+            logger.info("[%s] disk space recovered - entries allowed again", self.cfg.get("symbol", ""))
+        self._disk_low = bool(reason)
+        return reason
+
     def _entry_gate(self, equity: float) -> tuple:
         """Return ``(allowed, size_multiplier, reason)`` for a NEW entry.
 
@@ -3068,6 +3099,10 @@ class StandaloneAIBot:
         news = self._news_blackout_reason()
         if news:
             return False, 0.0, news
+
+        disk = self._low_disk_reason()
+        if disk:
+            return False, 0.0, disk
 
         if self._cooldown_until is not None:
             now = datetime.utcnow()
