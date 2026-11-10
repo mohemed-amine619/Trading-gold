@@ -3454,8 +3454,14 @@ class StandaloneAIBot:
             if self.cfg.get("gold_macro_veto_enabled", True):
                 if h4p is not None and not h4p.empty and len(h4p) >= 20:
                     h4_opp = _trend_score(h4p, -best_dir)
-                    if h4_opp >= 0.65:
-                        logger.info("[%s] Gold macro trend VETO: H4 opposes %s (score %.2f >= 0.65)",
+                    # Strictly above 0.65: _trend_score is 0.65*EMA + 0.35*RSI, so
+                    # exactly 0.65 is the EMA50/200 cross alone with H4 RSI already
+                    # agreeing with *our* direction. With ">=" a stale EMA cross
+                    # vetoed every counter-cross entry for weeks (live: every SELL
+                    # blocked at 0.65 while H4 RSI <= 45). The veto now needs H4
+                    # momentum (or the fast ribbon) to confirm the opposing trend.
+                    if h4_opp > 0.65:
+                        logger.info("[%s] Gold macro trend VETO: H4 opposes %s (score %.2f > 0.65)",
                                     self.cfg["symbol"], "BUY" if best_dir == 1 else "SELL", h4_opp)
                         return 0, best_score, ai_conf, f"gold macro veto: H4 opposes {'BUY' if best_dir == 1 else 'SELL'}"
 
