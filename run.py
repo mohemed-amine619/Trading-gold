@@ -139,6 +139,14 @@ try:
     from core.risk.daily_target import profit_lock_reached as _profit_lock_reached
     from core.risk.daily_target import money_target_reached as _money_target_reached
     from core.risk.sizing import size_within_budget as _size_within_budget
+    from core.risk.nn_sizing import (
+        apply_nn_boost as _apply_nn_boost, nn_entry_ok as _nn_entry_ok,
+        nn_size_factor as _nn_size_factor,
+    )
+    from core.risk.daily_state import (
+        DailyTargetTracker as _DailyTargetTracker, DayState as _DayState,
+        LockAction as _LockAction,
+    )
     _PHASE1_AVAILABLE = True
 except Exception as _phase1_import_error:  # pragma: no cover - defensive
     _PHASE1_AVAILABLE = False
@@ -147,6 +155,12 @@ except Exception as _phase1_import_error:  # pragma: no cover - defensive
     _profit_lock_reached = None
     _money_target_reached = None
     _size_within_budget = None
+    _apply_nn_boost = None
+    _nn_entry_ok = None
+    _nn_size_factor = None
+    _DailyTargetTracker = None
+    _DayState = None
+    _LockAction = None
     # Legacy split: no gap, validation is the tail of the window.
     _purged_split = lambda n, n_val, gap: (slice(0, n - n_val), slice(n - n_val, n))
     print(
@@ -660,6 +674,12 @@ CONFIG = {
     "nn_weight":               float(os.getenv("NN_WEIGHT", "15")),
     "nn_min_confidence":       float(os.getenv("NN_MIN_CONFIDENCE", "0.72")),
     "nn_min_oos_edge":         float(os.getenv("NN_MIN_OOS_EDGE", "0.05")),
+    # Require the network to agree (same direction, >= nn_min_confidence) before
+    # ANY entry. Off by default: with no validated model the network is neutral,
+    # and requiring it would then block every trade.
+    "nn_entry_required":       os.getenv("NN_ENTRY_REQUIRED", "false").lower() in ("1", "true", "yes"),
+    # Largest extra size (0.5 = up to 1.5x) earned by confidence above the threshold.
+    "nn_size_boost_max":       float(os.getenv("NN_SIZE_BOOST_MAX", "0.5")),
     "scalp_enabled":           os.getenv("SCALP_ENABLED", "true").lower() in ("1", "true", "yes"),
     "scalp_weight":            float(os.getenv("SCALP_WEIGHT", "15")),
     "scalp_strategies":        os.getenv("SCALP_STRATEGIES",
@@ -716,7 +736,11 @@ CONFIG = {
     "daily_profit_target":     float(os.getenv("DAILY_PROFIT_TARGET", "0") or 0.0),
     # Same lock expressed in account currency (e.g. 70 = stop at +$70). 0 = off.
     # Either target trips the lock; whichever is reached first wins.
-    "daily_profit_target_money": float(os.getenv("DAILY_PROFIT_TARGET_MONEY", "0") or 0.0),
+    "daily_profit_target_money": float(os.getenv("DAILY_PROFIT_TARGET_MONEY", "70") or 0.0),
+    # Ratchet-mode giveback allowed below the target before the rest is closed,
+    # and what the lock does once the target is reached ("close" | "ratchet").
+    "profit_lock_buffer_usd":  float(os.getenv("PROFIT_LOCK_BUFFER_USD", "5") or 0.0),
+    "daily_lock_action":       os.getenv("DAILY_LOCK_ACTION", "close").strip().lower(),
     # Refuse an entry when the broker's minimum lot would risk more than this
     # multiple of the per-trade budget. 0 = off (legacy: always allow min lot).
     "max_risk_overshoot":      float(os.getenv("MAX_RISK_OVERSHOOT", "0") or 0.0),
@@ -778,12 +802,33 @@ CONFIG = {
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+# The file log rotates: an unbounded trading_bot.log was one of the things
+# filling the disk. LOG_MAX_MB per file, LOG_BACKUPS old files kept.
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+
+
+def _log_size_mb() -> float:
+    try:
+        return max(1.0, float(os.getenv("LOG_MAX_MB", "20") or 20))
+    except ValueError:
+        return 20.0
+
+
+def _log_backups() -> int:
+    try:
+        return max(1, int(os.getenv("LOG_BACKUPS", "5") or 5))
+    except ValueError:
+        return 5
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("trading_bot.log", encoding="utf-8")
+        _RotatingFileHandler("trading_bot.log", encoding="utf-8",
+                             maxBytes=int(_log_size_mb() * 1024 * 1024),
+                             backupCount=_log_backups(), delay=True),
     ]
 )
 logger = logging.getLogger(__name__)
@@ -2475,6 +2520,13 @@ class StandaloneAIBot:
     def __init__(self, cfg: dict):
         self.cfg            = cfg
         self.notifier       = Notifier(cfg)
+        # Daily profit-target state machine (core/risk/daily_state.py). None when
+        # the module could not be imported: then only the legacy money lock runs.
+        self._day_tracker   = (_DailyTargetTracker(
+            cfg.get("daily_profit_target_money", 0.0),
+            cfg.get("profit_lock_buffer_usd", 0.0),
+            cfg.get("daily_lock_action", "close"),
+        ) if _DailyTargetTracker is not None else None)
         self.ai: Optional[AIEnsemble] = None
         self.running        = False
         self.last_bar_time  = None
@@ -2496,6 +2548,7 @@ class StandaloneAIBot:
         self._scalp_failed = False
         self._scalp_proven: tuple = ()
         self._nn_predictor = None         # neural-network predictor, built on first use
+        self._last_nn = None              # newest NN signal (direction, confidence)
         self._nn_key = None
         self._nn_failed = False
         self._nn_note = None
@@ -3024,6 +3077,13 @@ class StandaloneAIBot:
             self._cooldown_until = None
             self._persist_risk_state()
 
+        # Daily target state machine: once LOCKING / DAILY_TARGET_REACHED no new
+        # entry opens until the next trading day.
+        tracker = self._day_tracker
+        if tracker is not None and _DayState is not None and tracker.state is not _DayState.ACTIVE:
+            return False, 0.0, (f"{tracker.state.value}: daily profit target "
+                                f"{tracker.target:.2f} banked – no new entries today")
+
         # Profit lock: a good day is banked by not opening more risk. Only
         # new entries stop here; _manage_positions still runs every tick.
         target = float(self.cfg.get("daily_profit_target", 0.0) or 0.0)
@@ -3170,7 +3230,9 @@ class StandaloneAIBot:
 
     def _nn_model_path(self) -> str:
         """Where scripts/train_nn_loop.py (started by this process) saves its model."""
-        tf = os.getenv("TIMEFRAME", "M5").strip().upper() or "M5"
+        # The bot's own resolved timeframe (profile default when TIMEFRAME is
+        # unset), the same one passed to the trainer, so both use one file.
+        tf = str(_primary_tf_str).strip().upper() or "M15"
         root = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(root, "data", "models", f"nn_{self.cfg['symbol']}_{tf}.pt")
 
@@ -3190,6 +3252,7 @@ class StandaloneAIBot:
                     min_oos_edge=float(self.cfg["nn_min_oos_edge"]))
                 self._nn_key = key
             sig = self._nn_predictor.predict_signal(m15p)
+            self._last_nn = sig
             note = None if sig.direction != 0 and sig.reason == "signal" else sig.reason
             if sig.direction == 0 and note != self._nn_note:      # say why, once per change
                 self._nn_note = note
@@ -3952,6 +4015,82 @@ class StandaloneAIBot:
                          pos.ticket, retcode_str, last_err, reason)
             break
         return False
+
+    # --------------------------------------------------------------
+    # Daily profit target (core/risk/daily_state.py)
+    # --------------------------------------------------------------
+    def _bot_positions_all(self) -> list:
+        """The bot's own positions across every symbol (magic-number filtered)."""
+        bot_magic = self.cfg.get("magic_number", 888999)
+        try:
+            return [p for p in (mt5.positions_get() or [])
+                    if getattr(p, "magic", 0) == bot_magic]
+        except Exception:
+            return []
+
+    def _floating_bot_pnl(self) -> float:
+        return float(sum(float(getattr(p, "profit", 0.0) or 0.0)
+                         + float(getattr(p, "swap", 0.0) or 0.0)
+                         for p in self._bot_positions_all()))
+
+    def _realized_today(self) -> float:
+        """Today's closed-trade P&L from the trades table (account-wide, local day)."""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(_get_sqlite_db_path(), timeout=10.0)
+            try:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE date(timestamp) = ?",
+                    (date.today().isoformat(),)).fetchone()
+            finally:
+                conn.close()
+            return float(row[0] or 0.0)
+        except Exception:
+            return 0.0          # table not created yet = no closed trade today
+
+    def _ratchet_for_lock(self, positions: list) -> None:
+        """Tighten stops on winners to bank most of the open gain. _modify_sl
+        refuses any change that would loosen a stop, so this can only tighten."""
+        for pos in positions:
+            tick = mt5.symbol_info_tick(pos.symbol)
+            if tick is None or float(getattr(pos, "profit", 0.0) or 0.0) <= 0:
+                continue
+            is_buy = pos.type == mt5.ORDER_TYPE_BUY
+            price = tick.bid if is_buy else tick.ask
+            keep = 0.8                      # keep 80% of the open price gain
+            new_sl = pos.price_open + (price - pos.price_open) * keep
+            self._modify_sl(pos, new_sl)
+
+    def _apply_daily_target(self) -> None:
+        tracker = self._day_tracker
+        if tracker is None:
+            return
+        # Dashboard edits change self.cfg live; keep the machine in step with it.
+        tracker.configure(self.cfg.get("daily_profit_target_money", 0.0),
+                          self.cfg.get("profit_lock_buffer_usd", 0.0),
+                          self.cfg.get("daily_lock_action", "close"))
+        if tracker.target <= 0:
+            return
+        positions = self._bot_positions_all()
+        realized = self._realized_today()
+        floating = float(sum(float(getattr(p, "profit", 0.0) or 0.0)
+                             + float(getattr(p, "swap", 0.0) or 0.0) for p in positions))
+        d = tracker.update(date.today().isoformat(), realized, floating, len(positions))
+        self._update_status(day_state=d.state.value, day_net=round(d.net, 2),
+                            day_target=d.target)
+        if d.transitioned:
+            logger.warning("[%s] DAILY TARGET: %s -> %s", self.cfg["symbol"], d.state.value, d.reason)
+            try:
+                self.notifier.send(f"🎯 {d.state.value} | net {d.net:+.2f} / target "
+                                   f"{d.target:.2f} | {d.reason}")
+            except Exception:
+                pass
+        if d.action is _LockAction.CLOSE_ALL:
+            mine = [p for p in positions if p.symbol == self.cfg["symbol"]]
+            for pos in mine:
+                self._close_position(pos, "daily target")
+        elif d.action is _LockAction.RATCHET:
+            self._ratchet_for_lock([p for p in positions if p.symbol == self.cfg["symbol"]])
 
     def _close_all(self, reason: str) -> None:
         for pos in self._open_positions():
@@ -4809,6 +4948,9 @@ class StandaloneAIBot:
         if not self._daily_dd_ok(equity):
             return
 
+        # Bank the day when the target is reached (never widens a stop).
+        self._apply_daily_target()
+
         current_bar = m15.index[-1] if not m15.empty else None
 
         # Indicators only recomputed when a new bar actually closed
@@ -4857,6 +4999,13 @@ class StandaloneAIBot:
                     self._entry_slots_ok() and
                     self._trades_today_ok()):
                 allowed, size_mult, gate_reason = self._entry_gate(equity)
+                if allowed and self.cfg.get("nn_entry_required") and _nn_entry_ok is not None:
+                    nn = self._last_nn
+                    if nn is None or not _nn_entry_ok(
+                            getattr(nn, "direction", 0), direction,
+                            getattr(nn, "confidence", 0.0),
+                            float(self.cfg.get("nn_min_confidence", 0.72))):
+                        allowed, gate_reason = False, "neural network does not confirm this entry"
                 if not allowed:
                     logger.info("[%s] Entry blocked: %s", self.cfg["symbol"], gate_reason)
                 elif gate_reason:
@@ -4872,6 +5021,17 @@ class StandaloneAIBot:
                         size_mult *= streak
                         logger.info("[%s] Losing streak: size x%.2f",
                                     self.cfg["symbol"], size_mult)
+                    if _nn_size_factor is not None and self._last_nn is not None:
+                        f = _nn_size_factor(
+                            getattr(self._last_nn, "direction", 0), direction,
+                            getattr(self._last_nn, "confidence", 0.0),
+                            float(self.cfg.get("nn_min_confidence", 0.72)),
+                            float(self.cfg.get("nn_size_boost_max", 0.0) or 0.0))
+                        boosted = _apply_nn_boost(size_mult, f)
+                        if boosted != size_mult:
+                            logger.info("[%s] NN confidence %.2f: size x%.2f",
+                                        self.cfg["symbol"], self._last_nn.confidence, f)
+                        size_mult = boosted
                     self._send_order(direction, equity, m15p, ai_conf,
                                      size_multiplier=size_mult)
 
@@ -5016,6 +5176,9 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
                 "pnl": 0,
                 "unc": 0.1,
                 "state": "PAUSED" if getattr(b, "paused", False) else "ACTIVE",
+                "dayState": st.get("day_state"),
+                "dayNet": st.get("day_net"),
+                "dayTarget": st.get("day_target"),
                 "locBias": st.get("loc_bias"),
                 "locPosition": st.get("loc_position"),
                 "locRangeLow": st.get("loc_range_low"),
@@ -5827,7 +5990,10 @@ if __name__ == "__main__":
         try:
             helpers = _build_helpers(
                 os.path.dirname(os.path.abspath(__file__)),
-                [b.cfg["symbol"] for b in bots if getattr(b, "running", False)], os.environ)
+                [b.cfg["symbol"] for b in bots if getattr(b, "running", False)],
+                # Train on the bars the bot trades: the profile's timeframe when
+                # TIMEFRAME is unset (the trainer alone would default to M5).
+                {**os.environ, "TIMEFRAME": str(_primary_tf_str).strip().upper()})
             helpers.start()
             for line in helpers.describe():
                 logger.info(line)

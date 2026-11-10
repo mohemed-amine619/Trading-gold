@@ -30,7 +30,7 @@ customer runs the bot on their own machine with their own MT5 login.
 
 ## 0. TEST BASELINE
 
-**1413 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**1472 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
 
 | Area | Tests | Status |
 |---|---|---|
@@ -62,6 +62,7 @@ customer runs the bot on their own machine with their own MT5 login.
 | **Live-log hardening (AI edge gate, entry cap, stop-step)** | **25** | **Implemented and tested** |
 | Manual trades isolation & order execution | 7 | Implemented and tested |
 | **Phase-1 intelligence: purged split, barrier labels, streak brake** | **45** | **Implemented and tested. Barrier labels and streak brake are opt-in** |
+| **Dual-stream NN, location features, daily-target state machine, NN sizing, config sync** | **44** | **Implemented and tested** |
 | Other unit tests | 56 | Implemented and tested |
 
 **Phase 1 changes (behavior):**
@@ -75,6 +76,69 @@ customer runs the bot on their own machine with their own MT5 login.
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter` or an in-memory scripted fake.
+
+---
+
+## 0.00001 NEW — DUAL-STREAM DEEP NETWORK & DAILY PROFIT-TARGET STATE MACHINE
+
+**Deep network (opt-in, default unchanged).** `core/ai/deep_nn.py` adds
+`DualStreamNet`: a temporal branch (channel dropout, two stacked bidirectional
+LSTMs, LayerNorm, multi-head self-attention with a residual) and a structural
+branch (residual MLP over the market-location state), fused into a dense head
+that emits the three first-barrier class logits `[NOISE, LONG, SHORT]` plus an
+expected-excursion multiplier (ATR, `softplus`, trained as an auxiliary loss).
+Presets: `small` (default, ~tens of thousands of parameters), `medium`, and
+`large` (BiLSTM 256→512, 8 heads, head 512→256→128, millions of parameters).
+Select with `NN_ARCH=dual` and `NN_PRESET`; the default is still the GRU.
+
+- `core/ai/location_features.py` turns `analyse_location` into an 18-value
+  vector: trend state, BOS/CHoCH recency, range position, nearest support and
+  resistance (distance in ATR, strength), liquidity-pool proximity and sweeps.
+  Every distance is an ATR multiple. A missing zone is a `has_*` flag plus a
+  neutral fill, never 0. It is causal (row *i* uses bars ≤ *i*; the location read
+  is refreshed every 8 bars and carried forward) and tested for scale invariance
+  and for no lookahead.
+- `core/ai/deep_features.py` keeps one tensor layout so the existing windows,
+  scaler, temperature calibration, walk-forward and champion/challenger code
+  work unchanged. It never imports MetaTrader5.
+- `scripts/train_deep_nn.py` (and `scripts/train_nn_loop.py --arch dual`):
+  walk-forward folds with a purge gap of one horizon, AdamW weight decay,
+  reduce-on-plateau LR schedule and early stopping.
+- **Capacity is not edge.** The `large` preset has millions of parameters and a
+  few hundred training windows will overfit it. The predictor still refuses any
+  model with no measured out-of-sample edge or one below `NN_MIN_OOS_EDGE`.
+  No edge from this network on real data is established. Torch here is
+  CPU-only, so the `large` preset trains slowly.
+
+**Daily profit target** (`core/risk/daily_state.py`, wired in `run.py`).
+`ACTIVE → LOCKING → DAILY_TARGET_REACHED`, latched for the day, reset on a new
+day. Net = today's realized P&L (`trades` table) + floating P&L of positions
+with the bot's magic number (account-wide). At `net >= target`:
+`DAILY_LOCK_ACTION=close` (default) closes this symbol's bot positions;
+`ratchet` only tightens stops (`_modify_sl` still refuses any loosening) and
+closes if the net falls more than `PROFIT_LOCK_BUFFER_USD` below the target.
+Entries are vetoed while locking and once reached; a Telegram alert fires once
+per transition and the dashboard `markets` entries carry `dayState`, `dayNet`,
+`dayTarget`.
+
+- **Config:** `DAILY_PROFIT_TARGET_MONEY` is the one target key (default now
+  **70**, was 0 = off; set 0 to disable), plus `PROFIT_LOCK_BUFFER_USD` (5) and
+  `DAILY_LOCK_ACTION`. `nn_min_confidence` (0.72) is now also in
+  `core/settings.py`. Defaults match across `schema.py`, `run.py CONFIG` and
+  `Settings`, and a test enforces it.
+- **Sizing does NOT chase the target.** There is no input that raises size
+  because profit is still remaining: that would be martingale-style loss
+  chasing. `NN_SIZE_BOOST_MAX` (0.5) lets confidence *above the NN's own
+  threshold* lift size up to 1.5×, only at full size (never while the drawdown
+  ladder or a losing streak has reduced it) and only when the NN agrees with the
+  entry. `NN_ENTRY_REQUIRED` (off) additionally requires NN agreement for every
+  entry; with no validated model the NN is neutral, so enabling it then blocks
+  all trades.
+- **Known limits.** A restart recomputes the state from the `trades` table; a
+  day that banked slightly *under* the target after closing slippage can reopen
+  after a restart. `MAX_RISK_OVERSHOOT` (the minimum-lot risk cap) is still off
+  by default (0).
+- **$70/day is a ceiling, not a plan.** On a ~393 balance it is ~18% a day.
 
 ---
 

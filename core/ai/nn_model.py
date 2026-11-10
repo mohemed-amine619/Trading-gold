@@ -35,6 +35,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from core.ai.deep_layout import (
+    ARCH_DUAL, ARCH_GRU, build_model_features, feature_names, make_excursion,
+)
 from core.ai.nn_features import (
     FEATURE_NAMES, LONG, N_CLASSES, NOISE, SHORT, FeatureScaler, build_features,
     make_labels, make_windows, walk_forward_splits,
@@ -59,6 +62,12 @@ class TrainConfig:
     seed: int = 7
     threshold: float = 0.72
     n_models: int = 1                 # seeds averaged; more = lower variance
+    # Architecture. "gru" is the original model and the default. "dual" is the
+    # dual-stream net in core/ai/deep_nn.py (temporal + market-location).
+    arch: str = "gru"
+    preset: str = "small"             # dual only: small | medium | large
+    struct_stride: int = 8            # dual only: location read every N bars
+    aux_weight: float = 0.2           # dual only: weight of the excursion head loss
 
 
 class SeqClassifier(nn.Module):
@@ -102,9 +111,18 @@ def _batches(n: int, batch: int, rng: np.random.Generator):
 
 
 def fit_sequence_model(x_train: np.ndarray, y_train: np.ndarray,
-                       x_val: np.ndarray, y_val: np.ndarray, cfg: TrainConfig
-                       ) -> tuple[SeqClassifier, dict]:
-    """Train with early stopping on validation loss; returns the best weights."""
+                       x_val: np.ndarray, y_val: np.ndarray, cfg: TrainConfig,
+                       aux_train: Optional[np.ndarray] = None,
+                       aux_val: Optional[np.ndarray] = None,
+                       ) -> tuple[nn.Module, dict]:
+    """Train with early stopping on validation loss; returns the best weights.
+
+    ``arch="dual"`` hands over to ``core.ai.deep_nn.fit_dual`` (the optional
+    ``aux_*`` arrays are its excursion targets); the GRU path ignores them.
+    """
+    if cfg.arch == "dual":
+        from core.ai.deep_nn import fit_dual
+        return fit_dual(x_train, y_train, x_val, y_val, cfg, aux_train, aux_val)
     torch.manual_seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
     model = SeqClassifier(x_train.shape[2], cfg.hidden, cfg.layers, cfg.dropout)
@@ -181,14 +199,17 @@ def softmax_np(logits: np.ndarray, temperature: float = 1.0) -> np.ndarray:
 
 
 def fit_ensemble(x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray,
-                 y_val: np.ndarray, cfg: TrainConfig) -> list:
+                 y_val: np.ndarray, cfg: TrainConfig,
+                 aux_train: Optional[np.ndarray] = None,
+                 aux_val: Optional[np.ndarray] = None) -> list:
     """Train ``cfg.n_models`` models that differ only by seed, each calibrated
     on the validation rows. Averaging them lowers the variance of one unlucky
     initialisation; it does not create information the data does not hold."""
     members = []
     for i in range(max(1, cfg.n_models)):
         model, info = fit_sequence_model(x_train, y_train, x_val, y_val,
-                                         replace(cfg, seed=cfg.seed + 101 * i))
+                                         replace(cfg, seed=cfg.seed + 101 * i),
+                                         aux_train, aux_val)
         temp = fit_temperature(logits_for(model, x_val), y_val)
         members.append({"model": model, "temperature": temp, "info": info})
     return members
@@ -240,8 +261,9 @@ def walk_forward_evaluate(df: pd.DataFrame, cfg: TrainConfig, train_bars: int,
     on the test rows, which start ``horizon`` bars after training ends. Results
     from every fold are pooled before the metrics are computed.
     """
-    feats = build_features(df).to_numpy()
+    feats = build_model_features(df, cfg.arch, cfg.struct_stride)
     labels = make_labels(df, cfg.barrier_mult, cfg.horizon)
+    exc = make_excursion(df, cfg.horizon) if cfg.arch == ARCH_DUAL else None
     folds, pooled_p, pooled_y = [], [], []
 
     for tr, te in walk_forward_splits(len(df), train_bars, test_bars, cfg.horizon, step):
@@ -255,7 +277,10 @@ def walk_forward_evaluate(df: pd.DataFrame, cfg: TrainConfig, train_bars: int,
         # Validation = the newest windows, separated from training by the horizon.
         cut = int(len(x_tr) * (1.0 - cfg.val_fraction))
         keep = e_tr < e_tr[cut] - cfg.horizon
-        members = fit_ensemble(x_tr[keep], y_tr[keep], x_tr[cut:], y_tr[cut:], cfg)
+        a_tr = exc[e_tr] if exc is not None else None
+        members = fit_ensemble(x_tr[keep], y_tr[keep], x_tr[cut:], y_tr[cut:], cfg,
+                               a_tr[keep] if a_tr is not None else None,
+                               a_tr[cut:] if a_tr is not None else None)
         proba = ensemble_proba(members, x[te_mask])
         pooled_p.append(proba)
         pooled_y.append(y[te_mask])
@@ -277,7 +302,7 @@ def fit_artifact(df: pd.DataFrame, cfg: TrainConfig) -> dict:
     model never saw (``evaluate_artifact``). ``trained_through`` records the
     last bar used, so later evaluation can start strictly after it.
     """
-    feats = build_features(df).to_numpy()
+    feats = build_model_features(df, cfg.arch, cfg.struct_stride)
     labels = make_labels(df, cfg.barrier_mult, cfg.horizon)
     finite = np.isfinite(feats).all(axis=1) & (labels >= 0)
     rows = np.flatnonzero(finite)
@@ -289,13 +314,16 @@ def fit_artifact(df: pd.DataFrame, cfg: TrainConfig) -> dict:
         raise ValueError(f"not enough training windows ({len(x)})")
     cut = int(len(x) * (1.0 - cfg.val_fraction))
     keep = ends < ends[cut] - cfg.horizon
-    members = fit_ensemble(x[keep], y[keep], x[cut:], y[cut:], cfg)
+    a = make_excursion(df, cfg.horizon)[ends] if cfg.arch == ARCH_DUAL else None
+    members = fit_ensemble(x[keep], y[keep], x[cut:], y[cut:], cfg,
+                           a[keep] if a is not None else None,
+                           a[cut:] if a is not None else None)
     return {
         "members": [{"state_dict": m["model"].state_dict(), "temperature": m["temperature"]}
                     for m in members],
         "scaler": scaler.to_dict(),
         "config": asdict(cfg),
-        "feature_names": list(FEATURE_NAMES),
+        "feature_names": feature_names(cfg.arch),
         "oos": {},
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "trained_through": str(df.index[-1]),
@@ -325,8 +353,13 @@ def members_from_artifact(art: dict) -> list:
                                   "temperature": art["temperature"]}]
     members = []
     for m in raw:
-        model = SeqClassifier(len(art["feature_names"]), cfg["hidden"], cfg["layers"],
-                              cfg["dropout"])
+        if cfg.get("arch", ARCH_GRU) == ARCH_DUAL:
+            from core.ai.deep_nn import build_dual
+            model = build_dual(len(art["feature_names"]), cfg.get("preset", "small"),
+                               cfg["dropout"])
+        else:
+            model = SeqClassifier(len(art["feature_names"]), cfg["hidden"], cfg["layers"],
+                                  cfg["dropout"])
         model.load_state_dict(m["state_dict"])
         model.eval()
         members.append({"model": model, "temperature": float(m["temperature"])})
@@ -343,7 +376,7 @@ def evaluate_artifact(art: dict, df: pd.DataFrame, start_row: int,
     function, the same bars, bars that neither model was trained on.
     """
     cfg = art["config"]
-    feats = build_features(df).to_numpy()
+    feats = build_model_features(df, cfg.get("arch", ARCH_GRU), cfg.get("struct_stride", 8))
     labels = make_labels(df, cfg["barrier_mult"], cfg["horizon"])
     scaler = FeatureScaler.from_dict(art["scaler"])
     x, y, ends = make_windows(scaler.transform(feats), labels, cfg["window"])

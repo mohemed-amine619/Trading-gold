@@ -100,13 +100,16 @@ class TestBot:
 
     def test_the_model_path_matches_where_the_trainer_saves(self, run_and_stub, monkeypatch):
         run_module, _ = run_and_stub
-        monkeypatch.setenv("TIMEFRAME", "m15")
+        # The path follows the bot's RESOLVED timeframe (profile default when
+        # TIMEFRAME is unset), which run.py also hands to the trainer.
+        tf = str(run_module._primary_tf_str).strip().upper()
+        monkeypatch.setenv("TIMEFRAME", "M5")            # a later env change must not split them
         path = self.bot(run_module)._nn_model_path()
-        assert path.endswith(os.path.join("data", "models", "nn_XAUUSDm_M15.pt"))
+        assert path.endswith(os.path.join("data", "models", f"nn_XAUUSDm_{tf}.pt"))
         from core.runtime.helpers import HelperSettings, nn_command
         from pathlib import Path
         cmd = nn_command("py", Path(path).parents[2], "XAUUSDm", HelperSettings.from_env(
-            {"NN_TRAINER_ENABLED": "true", "TIMEFRAME": "M15"}, True), 1)
+            {"NN_TRAINER_ENABLED": "true", "TIMEFRAME": tf}, True), 1)
         assert cmd[cmd.index("--out") + 1] == path
 
     def test_disabled_returns_none(self, run_and_stub):

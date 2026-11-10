@@ -269,6 +269,13 @@ class Settings(BaseSettings):
     # Strategy scoring
     # ──────────────────────────────────────────────────────────
     min_signal_score: float = Field(default=55.0, ge=0.0, le=100.0)
+    # Neural network vote: same defaults as run.py CONFIG / core/config/schema.py.
+    nn_min_confidence: float = Field(default=0.72, ge=0.5, le=0.99)
+    # Daily profit target (account currency; 0 disables). A ceiling, never a
+    # reason to size up. Defaults mirror run.py CONFIG.
+    daily_profit_target_money: float = Field(default=70.0, ge=0.0)
+    profit_lock_buffer_usd: float = Field(default=5.0, ge=0.0)
+    daily_lock_action: str = Field(default="close", pattern="^(close|ratchet)$")
     ai_confidence_threshold: float = Field(default=0.58, ge=0.50, le=1.0)
     ai_train_bars: int = Field(default=500, ge=100)
     ai_retrain_bars: int = Field(default=50, ge=10)
@@ -447,6 +454,10 @@ class Settings(BaseSettings):
             "ai_size_high_conf": self.ai_size_high_conf,
             "ai_size_low_conf": self.ai_size_low_conf,
             "min_signal_score": self.min_signal_score,
+            "nn_min_confidence": self.nn_min_confidence,
+            "daily_profit_target_money": self.daily_profit_target_money,
+            "profit_lock_buffer_usd": self.profit_lock_buffer_usd,
+            "daily_lock_action": self.daily_lock_action,
             "adx_min": self.adx_trending_min,
             "adx_strong": self.adx_strong_trend,
             "use_session_filter": self.use_session_filter,

@@ -18,6 +18,7 @@ Direction follows the bot's convention: +1 long, -1 short, 0 no trade.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -26,9 +27,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from core.ai.nn_features import (
-    LONG, NOISE, SHORT, FeatureScaler, build_features, latest_window,
-)
+from core.ai.deep_layout import ARCH_GRU, latest_model_window
+from core.ai.nn_features import LONG, NOISE, SHORT, FeatureScaler
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,42 @@ class NNSignal:
         return self.direction, self.confidence
 
 
+def _last_training_note(model_path: str) -> str:
+    """Why the trainer has not saved a model yet, from its history file.
+
+    The trainer writes a model only when one passes its out-of-sample gate; a
+    rejected challenger leaves no file. Without this the bot can only say
+    "no model file", which hides whether the trainer is failing, skipping, or
+    simply finding no edge.
+
+    The note is the trainer's last REAL verdict (promoted / kept / error), not
+    the latest "skipped": a skip only means "waiting for new bars", and its bar
+    count changes every cycle, which made the bot log the line every hour while
+    hiding why the model was actually rejected. The note is stable until the
+    trainer decides something new.
+    """
+    try:
+        with open(model_path + ".history.jsonl", encoding="utf-8") as fh:
+            lines = [ln for ln in fh if ln.strip()]
+    except OSError:
+        return " (the trainer has not finished a cycle yet)"
+    entries = []
+    for ln in lines:
+        try:
+            entries.append(json.loads(ln))
+        except ValueError:
+            continue
+    if not entries:
+        return " (the trainer has not finished a cycle yet)"
+    verdicts = [e for e in entries if e.get("action") in ("promoted", "kept", "error")]
+    waiting = entries[-1].get("action") == "skipped"
+    if not verdicts:
+        return " (the trainer has not trained yet: waiting for enough bars)"
+    v = verdicts[-1]
+    return (f" (trainer's last verdict: {v.get('action', '?')} - {v.get('reason', '?')}"
+            + ("; now waiting for new bars to retrain" if waiting else "") + ")")
+
+
 def _neutral(reason: str) -> NNSignal:
     return NNSignal(0, 0.5, (1.0, 0.0, 0.0), reason)
 
@@ -65,6 +101,7 @@ class ModelPredictor:
         self._ensemble_proba = None
         self._scaler: Optional[FeatureScaler] = None
         self._window = 0
+        self._arch = ARCH_GRU
         self._oos_edge: Optional[float] = None
         self._mtime = _UNSET
 
@@ -82,10 +119,10 @@ class ModelPredictor:
             self._loaded = False
             self._load_error = None
             self._members = None
-        if self._loaded or self._load_error:
+        if current is None:                 # re-read each time: the trainer's verdict changes
+            self._load_error = f"no model file at {self.path}" + _last_training_note(self.path)
             return
-        if current is None:
-            self._load_error = f"no model file at {self.path}"
+        if self._loaded or self._load_error:
             return
         try:
             from core.ai.nn_model import ensemble_proba, load_artifact, members_from_artifact
@@ -98,6 +135,7 @@ class ModelPredictor:
             self._ensemble_proba = ensemble_proba
             self._scaler = FeatureScaler.from_dict(art["scaler"])
             self._window = int(art["config"]["window"])
+            self._arch = art["config"].get("arch", ARCH_GRU)
             self._oos_edge = (art.get("oos") or {}).get("edge")
             self._loaded = True
         except Exception as exc:
@@ -133,8 +171,8 @@ class ModelPredictor:
                 f"model out-of-sample edge {self._oos_edge:.3f} below floor "
                 f"{self.min_oos_edge:.3f}")
 
-        feats = build_features(df.tail(self._window + _WARMUP_ROWS)).to_numpy()
-        window = latest_window(feats, self._window)
+        window = latest_model_window(df.tail(self._window + _WARMUP_ROWS), self._window,
+                                     self._arch)
         if window is None:
             return _neutral("not enough finite history for the model window")
 

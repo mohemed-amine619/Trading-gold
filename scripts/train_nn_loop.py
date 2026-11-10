@@ -77,6 +77,10 @@ def main(argv: Optional[List[str]] = None,
     parser.add_argument("--threshold", type=float, default=0.72)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--models", type=int, default=3, help="seeds averaged per model")
+    parser.add_argument("--arch", choices=("gru", "dual"), default="gru",
+                        help="network: the original GRU, or the dual-stream deep net")
+    parser.add_argument("--preset", choices=("small", "medium", "large"), default="small",
+                        help="dual only: capacity preset")
     parser.add_argument("--tolerance", type=float, default=0.02,
                         help="a challenger must beat the champion's edge by this much")
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
@@ -94,7 +98,8 @@ def main(argv: Optional[List[str]] = None,
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = TrainConfig(window=args.window, horizon=args.horizon,
                       barrier_mult=args.barrier_mult, threshold=args.threshold,
-                      epochs=args.epochs, n_models=args.models)
+                      epochs=args.epochs, n_models=args.models,
+                      arch=args.arch, preset=args.preset)
     fetch = fetch_bars or mt5_fetcher(args.symbol, args.timeframe, args.bars)
 
     trainer = ContinuousTrainer(

@@ -177,9 +177,15 @@ _add(_p("halt_at_dd", "Stop new trades at this share of daily cap", "Risk", "flo
 _add(_p("daily_profit_target", "Daily profit target (lock gains)", "Risk", "float", 0.0, 0.0, 0.50, 0.005,
         env="DAILY_PROFIT_TARGET", percent=True,
         help="Once the day's equity is this far above its start, no new trades are opened for the rest of the day. Open positions are still managed. 0 disables."))
-_add(_p("daily_profit_target_money", "Daily profit target (account currency)", "Risk", "float", 0.0, 0.0, 100000.0, 1.0,
+_add(_p("daily_profit_target_money", "Daily profit target (account currency)", "Risk", "float", 70.0, 0.0, 100000.0, 1.0,
         env="DAILY_PROFIT_TARGET_MONEY",
-        help="Same lock in money, e.g. 70 stops new trades once the day is up 70. Open positions are still managed. 0 disables."))
+        help="Daily net profit goal in account currency (realized + floating, bot positions only). When reached, the profit lock banks it (see 'Profit lock action') and no new entries open until the next day. 0 disables. It is a ceiling, never a reason to risk more: size does not grow when the target is far away."))
+_add(_p("profit_lock_buffer_usd", "Profit lock buffer (account currency)", "Risk", "float", 5.0, 0.0, 100000.0, 1.0,
+        env="PROFIT_LOCK_BUFFER_USD",
+        help="Only used when the lock action is 'ratchet': if the day's net gives back more than this below the target, the remaining positions are closed. Clamped to the target."))
+_add(_p("daily_lock_action", "Profit lock action", "Risk", "enum", "close",
+        choices=("close", "ratchet"), env="DAILY_LOCK_ACTION",
+        help="'close' banks the day by closing the bot's positions the moment the target is reached. 'ratchet' only tightens stops (never loosens) and lets the trades run, closing them if the net falls more than the buffer below the target."))
 _add(_p("min_profit_before_tighten_atr", "Profit before structure/AI tightening (ATR)", "Stops & Targets", "float", 0.0, 0.0, 3.0, 0.05,
         env="MIN_PROFIT_BEFORE_TIGHTEN_ATR",
         help="The structure and AI-ratchet stops wait until the trade is this many ATR in profit before tightening. 0 tightens as soon as the trade is in profit (old behaviour)."))
@@ -327,6 +333,12 @@ _add(_p("nn_weight", "Neural-network weight (pts)", "Strategies", "float", 15.0,
         env="NN_WEIGHT"))
 _add(_p("nn_min_confidence", "Neural network: confidence needed", "Strategies", "float", 0.72, 0.5, 0.99, 0.01,
         env="NN_MIN_CONFIDENCE", percent=True))
+_add(_p("nn_entry_required", "Neural network must confirm every entry", "Strategies", "bool", False,
+        env="NN_ENTRY_REQUIRED",
+        help="Off: the network is a score vote. On: an entry also needs the network to call the same direction at or above its confidence threshold. With no validated model the network is neutral, so turning this on then blocks every trade."))
+_add(_p("nn_size_boost_max", "Neural network: max size boost", "Strategies", "float", 0.5, 0.0, 1.0, 0.05,
+        env="NN_SIZE_BOOST_MAX",
+        help="Extra size earned by confidence above the threshold (0.5 = up to 1.5x). Only applied at full size, never while the drawdown ladder or a losing streak has reduced it, and never because a profit target is still far away. 0 disables."))
 _add(_p("nn_min_oos_edge", "Neural network: minimum measured edge", "Strategies", "float", 0.05, 0.0, 1.0, 0.01,
         env="NN_MIN_OOS_EDGE",
         help="Mean R-multiple of the model's trades on bars it never saw (at least 30 trades). A model below this, or with no measurement, does not vote."))

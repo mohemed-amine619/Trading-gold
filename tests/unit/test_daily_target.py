@@ -93,9 +93,9 @@ class TestMoneyTarget:
     def test_unknown_baseline_never_trips_it(self, start):
         assert money_target_reached(start, 5000.0, 70.0) is False
 
-    def test_declared_in_the_schema_and_off_by_default(self):
+    def test_declared_in_the_schema_with_the_70_default(self):
         spec = PARAMS["daily_profit_target_money"]
-        assert spec.default == 0.0 and spec.min == 0.0
+        assert spec.default == 70.0 and spec.min == 0.0
         assert spec.env == "DAILY_PROFIT_TARGET_MONEY"
 
 
@@ -135,12 +135,18 @@ class TestEntryGateWiring:
                         daily_profit_target_money=70.0)
         assert bot._entry_gate(459.0)[0] is False        # money first, 18% < 50%
 
-    def test_default_config_never_locks(self, run_and_stub, tmp_path):
+    def test_default_config_locks_at_the_70_default(self, run_and_stub, tmp_path):
         run_module, _ = run_and_stub
         assert run_module.CONFIG["daily_profit_target"] == 0.0
-        assert run_module.CONFIG["daily_profit_target_money"] == 0.0
+        assert run_module.CONFIG["daily_profit_target_money"] == 70.0
         bot = self._bot(run_module, tmp_path)
-        assert bot._entry_gate(1000.0)[0] is True        # +157%, still allowed
+        assert bot._entry_gate(1000.0)[0] is False       # +157%: locked
+        assert bot._entry_gate(400.0)[0] is True         # +11: still trading
+
+    def test_zero_disables_the_money_lock(self, run_and_stub, tmp_path):
+        run_module, _ = run_and_stub
+        bot = self._bot(run_module, tmp_path, daily_profit_target_money=0.0)
+        assert bot._entry_gate(1000.0)[0] is True
 
     def test_a_loss_is_never_a_profit_lock(self, run_and_stub, tmp_path):
         run_module, _ = run_and_stub
