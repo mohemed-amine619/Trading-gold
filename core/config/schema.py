@@ -326,7 +326,23 @@ _add(_p("news_blackout_before_min", "News blackout: minutes before", "Risk", "fl
         env="NEWS_BLACKOUT_BEFORE_MIN"))
 _add(_p("news_blackout_after_min", "News blackout: minutes after", "Risk", "float", 15.0, 0.0, 240.0, 5.0,
         env="NEWS_BLACKOUT_AFTER_MIN"))
-_add(_p("min_free_disk_mb", "Min free disk space (MB)", "Risk", "float", 500.0, 0.0, 100000.0, 100.0,
+_add(_p("news_builtin", "News: built-in calendar", "Risk", "bool", True,
+        env="NEWS_BUILTIN",
+        help="Block new entries around the bot's built-in list of confirmed high-impact US releases (NFP, CPI, FOMC, PPI, retail sales, PCE). Only stops entries; open trades are still managed."))
+_add(_p("news_auto_fetch", "News: auto-download weekly calendar", "Risk", "bool", False,
+        env="NEWS_AUTO_FETCH",
+        help="Download the week's high-impact events from a public economic calendar every 6 hours (cached in data/cache). Off by default because it is an outbound request. A failed download is logged and the built-in list still applies."))
+_add(_p("news_feed_url", "News: calendar feed URL", "Risk", "str",
+        "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+        env="NEWS_FEED_URL", requires_restart=True))
+_add(_p("news_currencies", "News: currencies to watch", "Risk", "str", "USD",
+        env="NEWS_CURRENCIES", requires_restart=True,
+        help="Comma-separated currency codes from the downloaded calendar, e.g. USD or USD,EUR."))
+_add(_p("news_major_before_min", "News: minutes before NFP/CPI/FOMC", "Risk", "float", 30.0, 0.0, 240.0, 5.0,
+        env="NEWS_MAJOR_BEFORE_MIN"))
+_add(_p("news_major_after_min", "News: minutes after NFP/CPI/FOMC", "Risk", "float", 60.0, 0.0, 240.0, 5.0,
+        env="NEWS_MAJOR_AFTER_MIN"))
+_add(_p("min_free_disk_mb","Min free disk space (MB)", "Risk", "float", 500.0, 0.0, 100000.0, 100.0,
         env="MIN_FREE_DISK_MB",
         help="No new entries while the data disk has less free space than this: the risk state, trade history and models could not be saved. Open trades are still managed. 0 = off."))
 _add(_p("nn_enabled", "Neural-network vote", "Strategies", "bool", True,

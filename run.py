@@ -214,6 +214,13 @@ try:
 except Exception as _news_import_error:  # pragma: no cover - defensive
     _news_active_event = _news_parse = None
 
+# The bot's own news calendar: built-in confirmed releases + optional weekly
+# auto-fetch. Without the import only the user's NEWS_BLACKOUT list applies.
+try:
+    from core.risk.news_calendar import shared_calendar as _news_shared_calendar
+except Exception as _news_cal_import_error:  # pragma: no cover - defensive
+    _news_shared_calendar = None
+
 # No new entries while the data disk is nearly full (risk state could not be saved).
 try:
     from core.risk.disk_guard import low_disk_reason as _low_disk_reason
@@ -771,6 +778,17 @@ CONFIG = {
     "news_blackout":           os.getenv("NEWS_BLACKOUT", ""),
     "news_blackout_before_min": float(os.getenv("NEWS_BLACKOUT_BEFORE_MIN", "15") or 15),
     "news_blackout_after_min": float(os.getenv("NEWS_BLACKOUT_AFTER_MIN", "15") or 15),
+    # Built-in calendar of confirmed high-impact US releases (NFP, CPI, FOMC, PPI,
+    # retail sales, PCE...). On by default: it only ever blocks new entries.
+    "news_builtin":            os.getenv("NEWS_BUILTIN", "true").lower() in ("1", "true", "yes"),
+    # Weekly auto-download of high-impact events (public JSON calendar). Off by
+    # default: it is an outbound request; turn it on with NEWS_AUTO_FETCH=true.
+    "news_auto_fetch":         os.getenv("NEWS_AUTO_FETCH", "false").lower() in ("1", "true", "yes"),
+    "news_feed_url":           os.getenv("NEWS_FEED_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json"),
+    "news_currencies":         os.getenv("NEWS_CURRENCIES", "USD"),
+    # NFP / CPI / FOMC keep gold spreads wide for longer: their own window.
+    "news_major_before_min":   float(os.getenv("NEWS_MAJOR_BEFORE_MIN", "30") or 30),
+    "news_major_after_min":    float(os.getenv("NEWS_MAJOR_AFTER_MIN", "60") or 60),
     # Below this much free space (MB) on the data disk no new entry opens:
     # risk state, trade history and models could no longer be saved. 0 = off.
     "min_free_disk_mb":        float(os.getenv("MIN_FREE_DISK_MB", "500") or 0.0),
@@ -3075,7 +3093,34 @@ class StandaloneAIBot:
         return None
 
     def _news_blackout_reason(self, now: Optional[datetime] = None) -> str:
-        """Non-empty while inside a scheduled-news window; "" otherwise."""
+        """Non-empty while inside a scheduled-news window; "" otherwise.
+
+        Checks the bot's own calendar (built-in releases, plus the auto-fetched
+        weekly feed when enabled) and then the user's NEWS_BLACKOUT list.
+        """
+        now = now or datetime.now(timezone.utc)
+        cal = None
+        try:
+            cal = self._news_calendar()
+        except Exception as exc:                          # never block trading on a bug here
+            logger.warning("news calendar unavailable: %r", exc)
+        if cal is not None:
+            try:
+                cal.maybe_refresh(now)
+                ev = cal.active(now, (),
+                                float(self.cfg.get("news_blackout_before_min", 15) or 0),
+                                float(self.cfg.get("news_blackout_after_min", 15) or 0),
+                                float(self.cfg.get("news_major_before_min", 30) or 0),
+                                float(self.cfg.get("news_major_after_min", 60) or 0))
+                if ev is not None:
+                    return (f"news blackout around {ev.when:%Y-%m-%d %H:%M} UTC "
+                            f"({ev.title}, {ev.tier})")
+            except Exception as exc:
+                logger.warning("news calendar check failed: %r", exc)
+        return self._user_news_reason(now)
+
+    def _user_news_reason(self, now: datetime) -> str:
+        """The user's NEWS_BLACKOUT list (unchanged behaviour)."""
         text = str(self.cfg.get("news_blackout", "") or "").strip()
         if not text or _news_parse is None:
             return ""
@@ -3090,6 +3135,23 @@ class StandaloneAIBot:
                                 float(self.cfg.get("news_blackout_before_min", 15) or 0),
                                 float(self.cfg.get("news_blackout_after_min", 15) or 0))
         return f"news blackout around {ev:%Y-%m-%d %H:%M} UTC" if ev else ""
+
+    def _news_calendar(self):
+        """The shared built-in + auto-fetched calendar, or None when both are off."""
+        if _news_shared_calendar is None:
+            return None
+        builtin = bool(self.cfg.get("news_builtin", True))
+        auto = bool(self.cfg.get("news_auto_fetch", False))
+        if not builtin and not auto:
+            return None
+        root = os.path.dirname(os.path.abspath(__file__))
+        ccy = tuple(c.strip().upper() for c in str(self.cfg.get("news_currencies", "USD")).split(",")
+                    if c.strip()) or ("USD",)
+        return _news_shared_calendar(
+            cache_path=os.path.join(root, "data", "cache", "news_calendar.json"),
+            feed_url=str(self.cfg.get("news_feed_url") or
+                         "https://nfs.faireconomy.media/ff_calendar_thisweek.json"),
+            currencies=ccy, auto_fetch=auto, use_builtin=builtin)
 
     def _low_disk_reason(self) -> str:
         """Non-empty while the data disk is below ``min_free_disk_mb``; "" otherwise.
