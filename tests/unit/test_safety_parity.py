@@ -71,33 +71,73 @@ def test_the_dashboard_strategy_form_still_saves(run_and_stub, monkeypatch):
 
 # ── Gap 2: _modify_sltp could loosen an existing stop ─────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="GAP 2, open: _modify_sltp loosens a stop inside the "
-                   "broker stops level (BUY 1999.80 -> 1999.50). Live order flow: fix awaits "
-                   "approval. strict=True makes the suite fail once it is fixed, so the "
-                   "marker gets removed.")
+def _sltp_harness(run_module, broker_sl=None, stops_level=50):
+    mt5 = run_module.mt5
+    sent = []
+    mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL = 0, 1
+    mt5.symbol_info = lambda s: types.SimpleNamespace(digits=2, trade_stops_level=stops_level,
+                                                      point=0.01)
+    mt5.symbol_info_tick = lambda s: types.SimpleNamespace(bid=2000.00, ask=2000.10)
+    mt5.positions_get = (lambda *a, **k: [types.SimpleNamespace(sl=broker_sl)]
+                         if broker_sl is not None else [])
+    mt5.order_send = lambda req: sent.append(req) or types.SimpleNamespace(retcode=10009)
+    bot = run_module.StandaloneAIBot(dict(run_module.CONFIG, dry_run=False))
+    return bot, sent
+
+
+def _pos(is_buy, sl):
+    return types.SimpleNamespace(ticket=7, symbol="XAUUSDm", type=0 if is_buy else 1,
+                                 sl=sl, tp=0.0, price_open=2000.0, magic=0)
+
+
 @pytest.mark.parametrize("is_buy,existing_sl", [(True, 1999.80), (False, 2000.30)])
 def test_modify_sltp_never_loosens_an_existing_stop(run_and_stub, is_buy, existing_sl):
     """bid 2000.00 / ask 2000.10, broker stops level 50 points (0.50). The stop is
     0.20 from price, inside the stops level; the clamp used to move it to
-    price -/+ 0.50, i.e. further from price."""
-    run_module, stub = run_and_stub
-    mt5 = run_module.mt5
-    sent = []
-    mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL = 0, 1
-    mt5.symbol_info = lambda s: types.SimpleNamespace(digits=2, trade_stops_level=50, point=0.01)
-    mt5.symbol_info_tick = lambda s: types.SimpleNamespace(bid=2000.00, ask=2000.10)
-    mt5.positions_get = lambda *a, **k: []
-    mt5.order_send = lambda req: sent.append(req) or types.SimpleNamespace(retcode=10009)
-    cfg = dict(run_module.CONFIG, dry_run=False)
-    bot = run_module.StandaloneAIBot(cfg)
-    pos = types.SimpleNamespace(ticket=7, symbol="XAUUSDm", type=0 if is_buy else 1,
-                                sl=existing_sl, tp=0.0, price_open=2000.0, magic=0)
-    bot._modify_sltp(pos, existing_sl, 2010.0 if is_buy else 1990.0)
+    price -/+ 0.50, i.e. further from price (BUY 1999.80 -> 1999.50)."""
+    run_module, _ = run_and_stub
+    bot, sent = _sltp_harness(run_module)
+    bot._modify_sltp(_pos(is_buy, existing_sl), existing_sl, 2010.0 if is_buy else 1990.0)
+    assert sent, "the target still has to be set"
     for req in sent:
         if is_buy:
             assert req["sl"] >= existing_sl - 1e-9, req
         else:
             assert req["sl"] <= existing_sl + 1e-9, req
+
+
+@pytest.mark.parametrize("is_buy", [True, False])
+def test_modify_sltp_keeps_the_stop_and_still_sets_the_target(run_and_stub, is_buy):
+    run_module, _ = run_and_stub
+    bot, sent = _sltp_harness(run_module)
+    sl = 1999.80 if is_buy else 2000.30
+    tp = 2010.0 if is_buy else 1990.0
+    bot._modify_sltp(_pos(is_buy, sl), sl, tp)
+    assert sent[-1]["sl"] == pytest.approx(sl) and sent[-1]["tp"] == pytest.approx(tp)
+
+
+def test_modify_sltp_never_overwrites_a_tighter_broker_stop_from_a_stale_snapshot(run_and_stub):
+    """The snapshot says 1990.00; the broker already holds 1995.00 (tightened by
+    another path). Re-sending the snapshot value would loosen it."""
+    run_module, _ = run_and_stub
+    bot, sent = _sltp_harness(run_module, broker_sl=1995.00, stops_level=0)
+    bot._modify_sltp(_pos(True, 1990.00), 1990.00, 2010.0)
+    assert all(req["sl"] >= 1995.00 - 1e-9 for req in sent)
+
+
+def test_modify_sltp_never_removes_a_stop(run_and_stub):
+    run_module, _ = run_and_stub
+    bot, sent = _sltp_harness(run_module, broker_sl=1995.00, stops_level=0)
+    bot._modify_sltp(_pos(True, 1995.00), 0.0, 2010.0)
+    assert all(req["sl"] == pytest.approx(1995.00) for req in sent)
+
+
+def test_modify_sltp_still_sets_a_first_stop(run_and_stub):
+    """No stop yet: setting one (even after the stops-level clamp) is not loosening."""
+    run_module, _ = run_and_stub
+    bot, sent = _sltp_harness(run_module)
+    bot._modify_sltp(_pos(True, 0.0), 1999.80, 2010.0)
+    assert sent and sent[-1]["sl"] == pytest.approx(1999.50)
 
 
 # ── Gap 3: an unreadable risk-state file cleared a halt ───────────────────────

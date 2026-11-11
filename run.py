@@ -4367,6 +4367,23 @@ class StandaloneAIBot:
             if tp_val > 0 and abs(cur_price - tp_val) < min_distance:
                 tp_val = round(cur_price + min_distance if is_buy else cur_price - min_distance, digits)
 
+        # Never loosen, never remove: compare with the stop the broker holds NOW
+        # (pos is a snapshot), exactly like _modify_sl. The stops-level clamp
+        # above can push an existing stop AWAY from price; in that case, or when
+        # the caller passes no stop, the live stop is kept and only the target
+        # changes.
+        live_sl = self._live_sl(pos, digits)
+        if live_sl > 0:
+            is_buy_pos = pos.type == mt5.ORDER_TYPE_BUY
+            if sl_val <= 0 or (abs(sl_val - live_sl) > 1e-6
+                               and not _is_tighter(is_buy_pos, live_sl, sl_val)):
+                if sl_val > 0:
+                    logger.info("SLTP stop change refused (would loosen) ticket=%s live=%.5f "
+                                "proposed=%.5f; keeping the live stop", pos.ticket, live_sl, sl_val)
+                sl_val = live_sl
+            if abs(sl_val - live_sl) <= 1e-6 and abs(current_tp - tp_val) <= 1e-6:
+                return True
+
         req = {
             "action":   mt5.TRADE_ACTION_SLTP,
             "symbol":   pos.symbol,
