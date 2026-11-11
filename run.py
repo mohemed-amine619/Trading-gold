@@ -2841,6 +2841,21 @@ class StandaloneAIBot:
             conn.close()
         except Exception as e:
             logger.error("Failed to save trade to DB: %s", e)
+
+        # Trade journal CSV (offline review)
+        try:
+            import csv
+            journal_path = os.path.join(os.path.dirname(_get_sqlite_db_path()), "journal.csv")
+            write_header = not os.path.exists(journal_path)
+            with open(journal_path, "a", newline="", encoding="utf-8") as jf:
+                w = csv.writer(jf)
+                if write_header:
+                    w.writerow(["timestamp", "symbol", "pnl", "balance", "exit_reason", "location_bias"])
+                w.writerow([datetime.now().isoformat(), self.cfg.get("symbol"), pnl,
+                            self.status.get("balance", 0.0), str(reason or ""),
+                            self.status.get("locBias", "")])
+        except Exception as e:
+            logger.debug("journal csv write failed: %s", e)
             
         with self._status_lock:
             decided = self.status["wins"] + self.status["losses"]
@@ -3410,6 +3425,15 @@ class StandaloneAIBot:
                     open_hour=int(self.cfg["scalp_open_hour"])))
                 self._scalp_key = key
             result = self._scalp_engine.evaluate(m15p)
+            # Persist the proof report for offline review
+            try:
+                import json as _json
+                _rp = os.path.join(os.path.dirname(_get_sqlite_db_path()),
+                                   f"scalp_report_{self.cfg.get('symbol','')}.json")
+                with open(_rp, "w", encoding="utf-8") as _f:
+                    _json.dump(result.report, _f, indent=2, default=str)
+            except Exception:
+                pass
             proven = tuple(sorted(n for n, r in result.report.items() if r.get("proven")))
             if proven != self._scalp_proven:                  # say so when the set changes
                 self._scalp_proven = proven
@@ -3801,8 +3825,14 @@ class StandaloneAIBot:
                             spread_points, max_spread)
                 return False
 
-        # Relative spread-to-ATR guard for scalping (prevents trading when friction is too high)
-        max_spread_atr_ratio = self.cfg.get("max_spread_atr_ratio", 0.25 if _IS_AGGRESSIVE else 0.40)
+        # Relative spread-to-ATR guard for scalping (prevents trading when friction is too high).
+        # Timeframe-aware: M1 needs more room than M5+; per-symbol overrides win.
+        tf = str(self.cfg.get("timeframe", "M5")).upper()
+        base_ratio = 0.40 if tf in ("M1", "M2", "M3") else (0.25 if _IS_AGGRESSIVE else 0.20)
+        symbol = str(self.cfg.get("symbol", "")).upper()
+        override_key = "max_spread_atr_ratio_" + symbol
+        max_spread_atr_ratio = float(self.cfg.get(override_key,
+                                                  self.cfg.get("max_spread_atr_ratio", base_ratio)))
         if atr > 0 and (spread_price / atr) > max_spread_atr_ratio:
             logger.info("Scalp Spread guard: spread (%.5f) is %.1f%% of ATR (%.5f) > max %.1f%% – skipping entry",
                         spread_price, (spread_price / atr) * 100.0, atr, max_spread_atr_ratio * 100.0)
