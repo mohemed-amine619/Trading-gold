@@ -49,7 +49,8 @@ import pandas as pd
 from core.ai.labels import first_barrier_labels
 from core.strategy.analog import _atr
 
-ALL_STRATEGIES = ("orb", "vwap_fade", "squeeze", "rsi2", "burst", "ema_pullback", "sweep")
+ALL_STRATEGIES = ("orb", "vwap_fade", "squeeze", "rsi2", "burst", "ema_pullback", "sweep",
+                  "breakout", "pinbar", "macd_cross", "stoch_cross", "inside_break")
 _EPS = 1e-12
 
 
@@ -204,9 +205,63 @@ def sig_sweep(df: pd.DataFrame, atr: np.ndarray, cfg: ScalpConfig, lookback: int
     return _to_signal(long_, short)
 
 
+
+
+def sig_breakout(df: pd.DataFrame, atr: np.ndarray, cfg: ScalpConfig, lookback: int = 20) -> np.ndarray:
+    high = df["high"]; low = df["low"]; close = df["close"]
+    prior_high = high.shift(1).rolling(lookback).max()
+    prior_low = low.shift(1).rolling(lookback).min()
+    long_ = close > prior_high
+    short = close < prior_low
+    return _to_signal(long_, short)
+
+
+def sig_pinbar(df: pd.DataFrame, atr: np.ndarray, cfg: ScalpConfig, wick_ratio: float = 2.0) -> np.ndarray:
+    o = df["open"]; h = df["high"]; l = df["low"]; c = df["close"]
+    body = (c - o).abs()
+    upper_wick = h - pd.concat([o, c], axis=1).max(axis=1)
+    lower_wick = pd.concat([o, c], axis=1).min(axis=1) - l
+    bull = (lower_wick >= wick_ratio * (body + 1e-12)) & (c > o)
+    bear = (upper_wick >= wick_ratio * (body + 1e-12)) & (c < o)
+    return _to_signal(bull, bear)
+
+
+def sig_macd_cross(df: pd.DataFrame, atr: np.ndarray, cfg: ScalpConfig) -> np.ndarray:
+    close = df["close"]
+    ema12 = close.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema26 = close.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False, min_periods=9).mean()
+    long_ = (macd > signal) & (macd.shift(1) <= signal.shift(1))
+    short = (macd < signal) & (macd.shift(1) >= signal.shift(1))
+    return _to_signal(long_, short)
+
+
+def sig_stoch_cross(df: pd.DataFrame, atr: np.ndarray, cfg: ScalpConfig) -> np.ndarray:
+    hi = df["high"]; lo = df["low"]; cl = df["close"]
+    lowest = lo.rolling(14).min()
+    highest = hi.rolling(14).max()
+    k = 100.0 * (cl - lowest) / (highest - lowest + 1e-12)
+    d = k.rolling(3).mean()
+    long_ = (k > d) & (k.shift(1) <= d.shift(1)) & (k < 25)
+    short = (k < d) & (k.shift(1) >= d.shift(1)) & (k > 75)
+    return _to_signal(long_, short)
+
+
+def sig_inside_break(df: pd.DataFrame, atr: np.ndarray, cfg: ScalpConfig) -> np.ndarray:
+    hi = df["high"]; lo = df["low"]; cl = df["close"]
+    prev_hi = hi.shift(1); prev_lo = lo.shift(1)
+    inside = (hi <= prev_hi) & (lo >= prev_lo)
+    # breakout bar after an inside bar
+    long_ = inside.shift(1).fillna(False) & (cl > hi.shift(1))
+    short = inside.shift(1).fillna(False) & (cl < lo.shift(1))
+    return _to_signal(long_, short)
+
 GENERATORS: Dict[str, Callable] = {
     "orb": sig_orb, "vwap_fade": sig_vwap_fade, "squeeze": sig_squeeze, "rsi2": sig_rsi2,
     "burst": sig_burst, "ema_pullback": sig_ema_pullback, "sweep": sig_sweep,
+    "breakout": sig_breakout, "pinbar": sig_pinbar, "macd_cross": sig_macd_cross,
+    "stoch_cross": sig_stoch_cross, "inside_break": sig_inside_break,
 }
 
 

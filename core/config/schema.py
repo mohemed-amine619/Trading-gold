@@ -367,8 +367,8 @@ _add(_p("scalp_enabled", "Scalping strategies", "Strategies", "bool", True,
 _add(_p("scalp_weight", "Scalping weight (pts)", "Strategies", "float", 15.0, 0.0, 40.0, 1.0,
         env="SCALP_WEIGHT"))
 _add(_p("scalp_strategies", "Scalping strategies in use", "Strategies", "str",
-        "orb,vwap_fade,squeeze,rsi2,burst,ema_pullback,sweep", env="SCALP_STRATEGIES",
-        help="Comma-separated. Names: orb, vwap_fade, squeeze, rsi2, burst, ema_pullback, sweep."))
+        "orb,vwap_fade,squeeze,rsi2,burst,ema_pullback,sweep,breakout,pinbar,macd_cross,stoch_cross,inside_break", env="SCALP_STRATEGIES",
+        help="Comma-separated. Names: orb, vwap_fade, squeeze, rsi2, burst, ema_pullback, sweep, breakout, pinbar, macd_cross, stoch_cross, inside_break."))
 _add(_p("scalp_horizon", "Scalping: outcome horizon (bars)", "Strategies", "int", 12, 3, 48, 1,
         env="SCALP_HORIZON"))
 _add(_p("scalp_check_bars", "Scalping: bars replayed to prove a strategy", "Strategies", "int", 900, 200, 4000, 50,

@@ -699,7 +699,7 @@ CONFIG = {
     "scalp_enabled":           os.getenv("SCALP_ENABLED", "true").lower() in ("1", "true", "yes"),
     "scalp_weight":            float(os.getenv("SCALP_WEIGHT", "15")),
     "scalp_strategies":        os.getenv("SCALP_STRATEGIES",
-                                         "orb,vwap_fade,squeeze,rsi2,burst,ema_pullback,sweep"),
+                                         "orb,vwap_fade,squeeze,rsi2,burst,ema_pullback,sweep,breakout,pinbar,macd_cross,stoch_cross,inside_break"),
     "scalp_horizon":           int(os.getenv("SCALP_HORIZON", "12")),
     "scalp_check_bars":        int(os.getenv("SCALP_CHECK_BARS", "900")),
     "scalp_min_calls":         int(os.getenv("SCALP_MIN_CALLS", "15")),
