@@ -66,6 +66,7 @@ class ScalpConfig:
     valid_bars: int = 2           # a signal stays live this many bars
     open_hour: int = 7            # opening-range hour, in the data's own clock
     range_bars: int = 6           # bars that make the opening range
+    walkforward_folds: int = 1    # 1 = single window (default); >1 = require edge in every fold
 
 
 @dataclass(frozen=True)
@@ -297,28 +298,75 @@ def score_signals(sig: np.ndarray, outcomes: np.ndarray, lo: int, hi: int) -> Tu
     return wins, losses, calls
 
 
-def prove(sig: np.ndarray, outcomes: np.ndarray, cfg: ScalpConfig) -> dict:
-    """Replay one strategy over the recent bars and decide if it has proven itself."""
-    n = len(sig)
-    hi = n - 1 - cfg.horizon                       # newest bar whose outcome is known
-    lo = max(0, hi - cfg.check_bars + 1)
-    calls_at = [t for t in range(lo, hi + 1) if sig[t] != 0]
+def _prove_window(sig: np.ndarray, outcomes: np.ndarray, cfg: ScalpConfig,
+                  lo: int, hi: int) -> dict:
+    """Core proof logic on an explicit replay window ``[lo, hi]``."""
+    calls_at = [t for t in range(max(lo, 0), min(hi, len(sig) - 1) + 1) if sig[t] != 0]
     independent = thin(calls_at, cfg.horizon)
     n_eff = len(independent)
     if n_eff < cfg.min_calls:
         return {"proven": False, "edge": None, "calls": len(calls_at), "n_independent": n_eff,
                 "required": None, "reason": f"unproven: {n_eff} independent calls "
-                                            f"(need {cfg.min_calls})"}
+                                            f"(need {cfg.min_calls})",
+                "lo": lo, "hi": hi}
     wins, losses, calls = score_signals(sig, outcomes, lo, hi)
+    if calls <= 0:
+        return {"proven": False, "edge": None, "calls": 0, "n_independent": n_eff,
+                "required": None, "reason": "no scored calls in window",
+                "lo": lo, "hi": hi}
     edge = (wins - losses) / calls
     required = max(cfg.min_edge, cfg.min_z / float(np.sqrt(n_eff)))
     if edge < required:
         return {"proven": False, "edge": edge, "calls": calls, "n_independent": n_eff,
                 "required": required, "reason": f"no proven edge ({edge:+.2f} over {n_eff} "
-                                                f"independent calls, needs {required:+.2f})"}
+                                                f"independent calls, needs {required:+.2f})",
+                "lo": lo, "hi": hi}
     return {"proven": True, "edge": edge, "calls": calls, "n_independent": n_eff,
-            "required": required, "reason": "proven"}
+            "required": required, "reason": "proven", "lo": lo, "hi": hi}
 
+
+def prove(sig: np.ndarray, outcomes: np.ndarray, cfg: ScalpConfig) -> dict:
+    """Replay one strategy over the recent bars and decide if it has proven itself."""
+    n = len(sig)
+    hi = n - 1 - cfg.horizon                       # newest bar whose outcome is known
+    lo = max(0, hi - cfg.check_bars + 1)
+    if getattr(cfg, "walkforward_folds", 1) and cfg.walkforward_folds > 1:
+        return prove_walkforward(sig, outcomes, cfg)
+    return _prove_window(sig, outcomes, cfg, lo, hi)
+
+
+def prove_walkforward(sig: np.ndarray, outcomes: np.ndarray, cfg: ScalpConfig) -> dict:
+    """Require the edge to hold in every contiguous fold of the replay window."""
+    n = len(sig)
+    hi = n - 1 - cfg.horizon
+    lo = max(0, hi - cfg.check_bars + 1)
+    folds = max(2, int(cfg.walkforward_folds))
+    window = hi - lo + 1
+    fold_size = window // folds
+    if fold_size < cfg.horizon + cfg.min_calls:
+        return {"proven": False, "edge": None, "calls": 0, "n_independent": 0,
+                "required": None, "reason": "not enough history for walk-forward",
+                "lo": lo, "hi": hi}
+    fold_results = []
+    for f in range(folds):
+        f_lo = lo + f * fold_size
+        f_hi = (lo + (f + 1) * fold_size - 1) if f < folds - 1 else hi
+        fold_results.append(_prove_window(sig, outcomes, cfg, f_lo, f_hi))
+    if not all(fr.get("proven") for fr in fold_results):
+        failed = [fr for fr in fold_results if not fr.get("proven")]
+        return {"proven": False, "edge": float(np.mean([fr.get("edge") or 0.0
+                                                         for fr in fold_results])),
+                "calls": sum(fr.get("calls", 0) for fr in fold_results),
+                "n_independent": sum(fr.get("n_independent", 0) for fr in fold_results),
+                "required": fold_results[0].get("required"),
+                "reason": "walk-forward: " + (failed[0].get("reason") if failed else "failed"),
+                "lo": lo, "hi": hi, "folds": fold_results}
+    edges = [fr.get("edge") for fr in fold_results if fr.get("edge") is not None]
+    return {"proven": True, "edge": float(np.mean(edges)) if edges else None,
+            "calls": sum(fr.get("calls", 0) for fr in fold_results),
+            "n_independent": sum(fr.get("n_independent", 0) for fr in fold_results),
+            "required": fold_results[0].get("required"),
+            "reason": "proven (walk-forward)", "lo": lo, "hi": hi, "folds": fold_results}
 
 class ScalpEngine:
     def __init__(self, cfg: Optional[ScalpConfig] = None):

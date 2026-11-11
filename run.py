@@ -712,6 +712,7 @@ CONFIG = {
     "scalp_min_edge":          float(os.getenv("SCALP_MIN_EDGE", "0.10")),
     "scalp_min_z":             float(os.getenv("SCALP_MIN_Z", "2.7")),
     "scalp_valid_bars":        int(os.getenv("SCALP_VALID_BARS", "2")),
+    "scalp_walkforward_folds":  int(os.getenv("SCALP_WALKFORWARD_FOLDS", "1")),
     "scalp_open_hour":         int(os.getenv("SCALP_OPEN_HOUR", "7")),
     "fib_zone_low":            float(os.getenv("FIB_ZONE_LOW", "0.382")),
     "fib_zone_high":           float(os.getenv("FIB_ZONE_HIGH", "0.786")),
@@ -3441,7 +3442,8 @@ class StandaloneAIBot:
                     min_calls=int(self.cfg["scalp_min_calls"]),
                     min_edge=float(self.cfg["scalp_min_edge"]), min_z=float(self.cfg["scalp_min_z"]),
                     valid_bars=int(self.cfg["scalp_valid_bars"]),
-                    open_hour=int(self.cfg["scalp_open_hour"])))
+                    open_hour=int(self.cfg["scalp_open_hour"]),
+                    walkforward_folds=int(self.cfg.get("scalp_walkforward_folds", 1))))
                 self._scalp_key = key
             result = self._scalp_engine.evaluate(m15p)
             # Persist the proof report for offline review
