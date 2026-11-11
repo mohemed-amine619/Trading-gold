@@ -14,8 +14,12 @@ Design notes
 ------------
 * Writes are atomic (temp file + ``os.replace``) so a crash mid-write cannot
   leave a truncated file that fails to parse.
-* A corrupt or missing file is treated as "no history", never as a reason to
-  refuse to start. A bot that will not boot is riskier than one that forgot.
+* A MISSING file is a first start: "no history". An UNREADABLE file is not:
+  it may have held a drawdown halt, so ``inspect_state`` reports it and the
+  caller blocks NEW entries (the bot still boots and manages open positions)
+  until an operator resets it. The bad file is kept as ``*.corrupt-<time>`` and
+  a ``*.unreadable`` marker makes the block survive further restarts.
+  ``load_state`` keeps its old forgiving contract for other callers.
 * Dates are ISO strings so the file stays readable and diff-friendly.
 """
 
@@ -102,6 +106,63 @@ def load_state(path: str) -> RiskState:
     except Exception as exc:
         logger.warning("could not read risk state %s (%s); starting fresh", path, exc)
         return RiskState()
+
+
+def inspect_state(path: str) -> "tuple[RiskState, Optional[str]]":
+    """Like ``load_state``, but tells a first start apart from a damaged file.
+
+    Returns ``(state, problem)``: ``problem`` is None for a readable file or a
+    missing one, and a short description when the file exists but cannot be
+    used. Never raises.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        if not isinstance(raw, dict):
+            raise ValueError("state file is not a JSON object")
+        return RiskState.from_dict(raw), None
+    except FileNotFoundError:
+        return RiskState(), None
+    except Exception as exc:
+        return RiskState(), f"{type(exc).__name__}: {exc}"
+
+
+def _marker(path: str) -> str:
+    return path + ".unreadable"
+
+
+def quarantine(path: str, problem: str) -> None:
+    """Keep the unreadable file as evidence and leave a marker so the entry
+    block survives restarts (the bot will soon overwrite ``path``). Never raises."""
+    try:
+        if os.path.exists(path):
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            os.replace(path, f"{path}.corrupt-{stamp}")
+        with open(_marker(path), "w", encoding="utf-8") as fh:
+            fh.write(problem)
+    except OSError as exc:
+        logger.error("could not quarantine unreadable risk state %s: %r", path, exc)
+
+
+def unreadable_reason(path: str) -> Optional[str]:
+    """The recorded problem while the entry block is in force, else None."""
+    try:
+        with open(_marker(path), "r", encoding="utf-8") as fh:
+            return fh.read().strip() or "unreadable risk state"
+    except FileNotFoundError:
+        return None
+    except OSError as exc:                        # cannot even read the marker: stay blocked
+        return f"risk state marker unreadable: {exc!r}"
+
+
+def clear_unreadable(path: str) -> None:
+    """Operator reset: remove the marker. Never raises."""
+    try:
+        os.remove(_marker(path))
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.error("could not clear risk state marker %s: %r", path, exc)
 
 
 def save_state(path: str, state: RiskState) -> bool:

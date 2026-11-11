@@ -198,6 +198,11 @@ except Exception as _nn_import_error:  # pragma: no cover - defensive
 
 _NN_KEYS = ("nn_min_confidence", "nn_min_oos_edge")
 
+# The only keys POST /api/config/strategy may write: exactly what the dashboard's
+# Strategy form sends (dashboard.html saveConfig('strategy')).
+_STRATEGY_FORM_KEYS = frozenset({"trend_enabled", "trend_fast_ma", "trend_slow_ma", "trend_atr",
+                                 "trend_min_score", "mr_enabled", "mr_rsi"})
+
 _SCALP_KEYS = ("scalp_strategies", "scalp_horizon", "scalp_check_bars", "scalp_min_calls",
                "scalp_min_edge", "scalp_min_z", "scalp_valid_bars", "scalp_open_hour")
 
@@ -321,6 +326,19 @@ except Exception as _state_import_error:  # pragma: no cover - defensive
         f"WARNING: persisted risk state unavailable ({_state_import_error!r}); "
         f"the daily guard will reset on restart."
     )
+
+# Tell a first start apart from an unreadable state file (which may have held a
+# drawdown halt). Without the import the old forgiving restore is used.
+try:
+    from core.risk.state import (
+        clear_unreadable as _clear_unreadable_state,
+        inspect_state as _inspect_risk_state,
+        quarantine as _quarantine_risk_state,
+        unreadable_reason as _unreadable_state_reason,
+    )
+except Exception as _state_check_import_error:  # pragma: no cover - defensive
+    _inspect_risk_state = _quarantine_risk_state = None
+    _unreadable_state_reason = _clear_unreadable_state = None
 
 from sklearn.ensemble import (
     ExtraTreesClassifier,
@@ -3020,11 +3038,25 @@ class StandaloneAIBot:
         """
         if not _RISK_STATE_AVAILABLE:
             return
-        try:
-            st = _load_risk_state(self._risk_state_file())
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("risk state restore skipped: %s", exc)
-            return
+        path = self._risk_state_file()
+        if _inspect_risk_state is not None:
+            # An unreadable file may have held a drawdown halt. Loading it as a
+            # blank state cleared that halt (fail open). Block NEW entries until
+            # an operator resets; open positions are still managed.
+            st, problem = _inspect_risk_state(path)
+            if problem:
+                logger.error("[%s] risk state file %s is unreadable (%s): new entries are "
+                             "BLOCKED until a manual reset (POST /api/config/reset-halt). "
+                             "The file is kept as *.corrupt-<time>.",
+                             self.cfg.get("symbol"), path, problem)
+                _quarantine_risk_state(path, problem)
+            self._state_unreadable = _unreadable_state_reason(path)
+        else:
+            try:
+                st = _load_risk_state(path)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("risk state restore skipped: %s", exc)
+                return
 
         today = date.today()
         if st.daily_date == today.isoformat() and st.daily_start_equity > 0:
@@ -3057,8 +3089,11 @@ class StandaloneAIBot:
 
     def reset_risk_halt(self, reason: str = "") -> None:
         """Clear a total-drawdown halt. Deliberately explicit and manual."""
-        previous = self._halt_reason
+        previous = self._halt_reason or getattr(self, "_state_unreadable", None)
         self._halt_reason = None
+        self._state_unreadable = None
+        if _clear_unreadable_state is not None and _RISK_STATE_AVAILABLE:
+            _clear_unreadable_state(self._risk_state_file())
         self._cooldown_until = None
         self._consecutive_losses = 0
         self._peak_equity = self.start_balance or self.daily_start or 0.0
@@ -3206,6 +3241,11 @@ class StandaloneAIBot:
         """
         if self._halt_reason:
             return False, 0.0, self._halt_reason
+
+        unreadable = getattr(self, "_state_unreadable", None)
+        if unreadable:
+            return False, 0.0, (f"risk state unreadable ({unreadable}) - new entries blocked "
+                                "until a manual reset")
 
         news = self._news_blackout_reason()
         if news:
@@ -6022,6 +6062,18 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
                 for b in bots:
                     b.cfg["default_manual_policy"] = str(payload["manual_policy"])
         elif section == "strategy":
+            # This route used to write ANY key with ANY value into the live config
+            # (dry_run, require_demo_account, every drawdown cap, magic_number...),
+            # with no validation, no confirmation and no audit. The dashboard's
+            # Strategy form only ever sends these seven display keys; everything
+            # else must go through POST /api/config, which validates against
+            # core/config/schema.py. A rejected payload applies nothing.
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=422, detail="payload must be a JSON object")
+            rejected = sorted(k for k in payload if k not in _STRATEGY_FORM_KEYS)
+            if rejected:
+                raise HTTPException(status_code=422, detail={
+                    "errors": [f"{k}: not a Strategy form field; use POST /api/config" for k in rejected]})
             for k, v in payload.items():
                 CONFIG[k] = v
                 for b in bots:
