@@ -87,6 +87,7 @@ class ContinuousTrainer:
         self._fit = fit
         self._evaluate = evaluate
         self._cycle_data_end: Optional[str] = None
+        self.settings_key = self._settings_key()
         self._last_data_end: Optional[str] = self._read_last_data_end()
 
     # -- helpers ---------------------------------------------------------
@@ -106,15 +107,33 @@ class ContinuousTrainer:
             logger.warning("champion unreadable, treating as absent: %r", exc)
             return None
 
+    def _settings_key(self) -> str:
+        """What a cycle's verdict depends on besides the data: the training
+        config and the holdout size. Stable across restarts."""
+        try:
+            from dataclasses import asdict, is_dataclass
+            cfg = asdict(self.cfg) if is_dataclass(self.cfg) else dict(vars(self.cfg))
+        except Exception:
+            cfg = {"repr": repr(self.cfg)}
+        return json.dumps({"cfg": cfg, "holdout_bars": self.holdout_bars},
+                          sort_keys=True, default=str)
+
     def _read_last_data_end(self) -> Optional[str]:
         """The newest bar a previous cycle trained on, from the history file, so a
-        restart does not retrain on data it has already used."""
+        restart does not retrain on data it has already used.
+
+        Only cycles run with the SAME settings count. When the operator changes
+        the confidence threshold or the holdout size (typically to get a verdict
+        other than "edge unmeasured"), the old verdict says nothing about the new
+        settings, so the next cycle trains immediately instead of waiting for
+        ``min_new_bars`` new bars (about a trading day)."""
         try:
             last = None
             with open(self.path + ".history.jsonl", encoding="utf-8") as fh:
                 for line in fh:
                     entry = json.loads(line)
-                    if entry.get("action") in ("promoted", "kept") and entry.get("data_end"):
+                    if (entry.get("action") in ("promoted", "kept") and entry.get("data_end")
+                            and entry.get("settings") == self.settings_key):
                         last = entry["data_end"]
             return last
         except (OSError, ValueError):
@@ -142,6 +161,7 @@ class ContinuousTrainer:
     def run_once(self) -> dict:
         self._cycle_data_end = None
         result = self._cycle()
+        result["settings"] = self.settings_key
         if self._cycle_data_end is not None:
             result["data_end"] = self._cycle_data_end
             if result["action"] in ("promoted", "kept"):

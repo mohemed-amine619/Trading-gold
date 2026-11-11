@@ -368,3 +368,47 @@ class TestPredictorHotReload:
         sig = p.predict_signal(bars.iloc[:1800])
         assert len(members_from_artifact(load_artifact(str(path)))) == CFG.n_models
         assert sum(sig.probs) == pytest.approx(1.0, abs=1e-6)
+
+
+# ── Changing the settings retrains at once (no day-long wait) ────────────────
+
+class TestSettingsChangeRetrains:
+    """After an "edge unmeasured" verdict the operator changes the threshold or the
+    holdout size. The old verdict says nothing about the new settings, so the next
+    cycle must train immediately instead of waiting for min_new_bars new bars."""
+
+    def _kept_once(self, tmp_path, bars, fakes, **kw):
+        fakes.edge = None                                   # unmeasured -> kept, no file
+        first = make_trainer(tmp_path, bars, fakes, **kw)
+        assert first.run_once()["action"] == "kept"
+        return len(fakes.fit_calls)
+
+    def test_same_settings_still_wait_for_new_bars(self, tmp_path):
+        bars, fakes = random_walk(n=2000, seed=3), Fakes()
+        calls = self._kept_once(tmp_path, bars, fakes)
+        again = make_trainer(tmp_path, bars, fakes)
+        assert again.run_once()["action"] == "skipped"
+        assert len(fakes.fit_calls) == calls
+
+    def test_a_new_holdout_size_trains_immediately(self, tmp_path):
+        bars, fakes = random_walk(n=2000, seed=3), Fakes()
+        calls = self._kept_once(tmp_path, bars, fakes, holdout_bars=600)
+        changed = make_trainer(tmp_path, bars, fakes, holdout_bars=700)
+        assert changed.run_once()["action"] != "skipped"
+        assert len(fakes.fit_calls) == calls + 1
+
+    def test_a_new_confidence_threshold_trains_immediately(self, tmp_path):
+        from dataclasses import replace
+        bars, fakes = random_walk(n=2000, seed=3), Fakes()
+        calls = self._kept_once(tmp_path, bars, fakes)
+        changed = ContinuousTrainer(lambda: bars, str(tmp_path / "nn.pt"),
+                                    replace(CFG, threshold=0.55), tolerance=0.02,
+                                    interval_s=0.0, fit=fakes.fit, evaluate=fakes.evaluate,
+                                    holdout_bars=600, min_new_bars=200, min_train_bars=800)
+        assert changed.run_once()["action"] != "skipped"
+        assert len(fakes.fit_calls) == calls + 1
+
+    def test_every_cycle_records_its_settings(self, tmp_path):
+        bars, fakes = random_walk(n=2000, seed=3), Fakes()
+        self._kept_once(tmp_path, bars, fakes)
+        assert all("settings" in e for e in history(tmp_path))
