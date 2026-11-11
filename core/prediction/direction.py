@@ -186,3 +186,106 @@ def predict_direction(
             base.consensus = "none"
 
     return base
+
+
+_TF_RANK = {
+    "M1": 1, "M2": 2, "M3": 3, "M5": 4, "M15": 5, "M30": 6,
+    "H1": 7, "H2": 8, "H4": 9, "D1": 10, "W1": 11,
+}
+
+
+@dataclass
+class TimeframePrediction:
+    timeframe: str
+    prediction: DirectionPrediction
+
+
+@dataclass
+class MultiTimeframePrediction:
+    symbol: Optional[str] = None
+    timeframes: Dict[str, DirectionPrediction] = field(default_factory=dict)
+    higher_timeframe: Optional[str] = None
+    consensus_direction: int = 0
+    consensus_label: str = "NEUTRAL"
+    alignment: int = 0
+    conflicting: List[str] = field(default_factory=list)
+    reasons: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "timeframes": {k: v.to_dict() for k, v in self.timeframes.items()},
+            "higher_timeframe": self.higher_timeframe,
+            "consensus_direction": self.consensus_direction,
+            "consensus_label": self.consensus_label,
+            "alignment": self.alignment,
+            "conflicting": list(self.conflicting),
+            "reasons": list(self.reasons),
+        }
+
+
+def predict_multi_timeframe(
+    frames: Dict[str, pd.DataFrame],
+    symbol: Optional[str] = None,
+    model_path: Optional[str] = None,
+    higher_timeframe: Optional[str] = None,
+    min_oos_edge: float = 0.0,
+) -> MultiTimeframePrediction:
+    """Combine per-timeframe predictions into one confluence read.
+
+    ``frames`` maps a timeframe label (e.g. "H1", "H4", "D1") to its OHLCV
+    frame. The higher timeframe is the dominant vote; when it is neutral the
+    majority of the lower timeframes decides. Location vetoes are already
+    applied inside ``predict_direction``.
+    """
+    result = MultiTimeframePrediction(symbol=symbol)
+
+    if not isinstance(frames, dict) or not frames:
+        result.reasons = ["No timeframe frames supplied"]
+        return result
+
+    preds: Dict[str, DirectionPrediction] = {}
+    for tf, df in frames.items():
+        preds[tf] = predict_direction(
+            df, symbol=symbol, timeframe=tf,
+            model_path=model_path, min_oos_edge=min_oos_edge,
+        )
+    result.timeframes = preds
+
+    # pick higher timeframe
+    if higher_timeframe is None or higher_timeframe not in preds:
+        higher_timeframe = max(preds.keys(), key=lambda t: _TF_RANK.get(t.upper(), 0))
+    result.higher_timeframe = higher_timeframe
+
+    higher_dir = preds[higher_timeframe].direction
+
+    # majority fallback
+    votes = [p.direction for p in preds.values()]
+    if higher_dir != 0:
+        consensus = higher_dir
+    else:
+        from collections import Counter
+        c = Counter(v for v in votes if v != 0)
+        if c:
+            consensus = c.most_common(1)[0][0]
+        else:
+            consensus = 0
+
+    result.consensus_direction = int(consensus)
+    result.consensus_label = _LABELS.get(consensus, "NEUTRAL")
+    result.alignment = sum(1 for p in preds.values() if p.direction == consensus and consensus != 0)
+    result.conflicting = [tf for tf, p in preds.items()
+                         if consensus != 0 and p.direction != 0 and p.direction != consensus]
+
+    # reasons
+    reasons = []
+    if higher_dir != 0:
+        reasons.append(f"higher timeframe {higher_timeframe} biases { _LABELS.get(higher_dir)}")
+    else:
+        reasons.append(f"higher timeframe {higher_timeframe} is neutral; using majority")
+    if result.conflicting:
+        reasons.append("conflicting timeframes: " + ", ".join(result.conflicting))
+    if result.alignment:
+        reasons.append(f"{result.alignment}/{len(preds)} timeframe(s) align with consensus")
+    result.reasons = reasons
+    return result

@@ -77,3 +77,22 @@ def test_location_bias_never_empty():
     df = _trending_df()
     pred = predict_direction(df)
     assert pred.location_bias != ""
+
+
+from core.prediction.direction import predict_multi_timeframe
+
+
+def test_multi_timeframe_basic():
+    df = _trending_df()
+    res = predict_multi_timeframe({"H1": df, "H4": df}, symbol="XAUUSDm")
+    assert set(res.timeframes.keys()) == {"H1", "H4"}
+    assert res.higher_timeframe == "H4"
+    assert res.consensus_label in ("LONG", "SHORT", "NEUTRAL")
+    assert res.alignment >= 0
+    assert isinstance(res.conflicting, list)
+
+
+def test_multi_timeframe_empty():
+    res = predict_multi_timeframe({})
+    assert res.consensus_label == "NEUTRAL"
+    assert res.reasons

@@ -22,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import pandas as pd
 
-from core.prediction.direction import predict_direction
+from core.prediction.direction import predict_direction, predict_multi_timeframe
 
 
 def load_bars(path: Path) -> pd.DataFrame:
@@ -72,9 +72,33 @@ def _label(d) -> str:
         return "NEUTRAL"
 
 
+
+def render_multi(pred) -> str:
+    lines = []
+    lines.append(f"Multi-timeframe consensus: {pred.consensus_label} "
+                f"(alignment {pred.alignment}/{len(pred.timeframes)})")
+    if pred.symbol:
+        lines.append(f"Symbol: {pred.symbol}")
+    if pred.higher_timeframe:
+        lines.append(f"Higher timeframe: {pred.higher_timeframe}")
+    lines.append("")
+    for tf, p in pred.timeframes.items():
+        lines.append(f"  {tf}: {p.label} (score {p.score}, loc {p.location_bias})")
+    if pred.conflicting:
+        lines.append("Conflicting: " + ", ".join(pred.conflicting))
+    if pred.reasons:
+        lines.append("Reasons:")
+        for r in pred.reasons:
+            lines.append(f"  - {r}")
+    lines.append("Note: analysis only, not a trading signal.")
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone directional bias from price history")
-    parser.add_argument("--csv", required=True, help="Path to OHLCV CSV (with 'time' column)")
+    parser.add_argument("--csv", required=False, help="Path to OHLCV CSV (with 'time' column)")
+    parser.add_argument("--tf", action="append", default=None,
+                        help="Timeframe frame as NAME=PATH (repeatable), e.g. --tf H1=a.csv --tf H4=b.csv")
     parser.add_argument("--symbol", default=None, help="Symbol label (display only)")
     parser.add_argument("--timeframe", default=None, help="Timeframe label (display only)")
     parser.add_argument("--model", default=None, help="Optional NN artifact path")
@@ -83,6 +107,35 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     args = parser.parse_args()
 
+    # Multi-timeframe mode
+    if args.tf:
+        frames = {}
+        for spec in args.tf:
+            if "=" not in spec:
+                print(f"bad --tf spec (expected NAME=PATH): {spec}", file=sys.stderr)
+                return 2
+            name, path = spec.split("=", 1)
+            try:
+                frames[name] = load_bars(Path(path))
+            except Exception as exc:
+                print(f"failed to read {path}: {exc!r}", file=sys.stderr)
+                return 2
+        pred = predict_multi_timeframe(
+            frames,
+            symbol=args.symbol,
+            model_path=args.model,
+            higher_timeframe=args.timeframe,
+            min_oos_edge=args.min_oos_edge,
+        )
+        if args.json:
+            print(json.dumps(pred.to_dict(), default=str, indent=2))
+        else:
+            print(render_multi(pred))
+        return 0
+
+    if not args.csv:
+        print("either --csv or --tf is required", file=sys.stderr)
+        return 2
     try:
         df = load_bars(Path(args.csv))
     except Exception as exc:
