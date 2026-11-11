@@ -186,6 +186,48 @@ def test_gold_macro_trend_veto(run_and_stub, monkeypatch):
     assert "gold macro veto" in reason
 
 
+def test_trend_score_ema_cross_alone_is_exactly_veto_boundary(run_and_stub):
+    """EMA50>EMA200 with H4 RSI <= 45 scores exactly 0.65 for BUY: that is the
+    stale-cross case observed live, and it must NOT trigger the macro veto (> 0.65)."""
+    run_module, _ = run_and_stub
+    base = {"ema50": [2660.0] * 30, "ema200": [2650.0] * 30,
+            "ema9": [2655.0] * 30, "ema21": [2658.0] * 30}
+    weak = pd.DataFrame({**base, "rsi": [40.0] * 30})
+    strong = pd.DataFrame({**base, "rsi": [60.0] * 30})
+    assert run_module._trend_score(weak, 1) == pytest.approx(0.65)
+    assert not run_module._trend_score(weak, 1) > 0.65      # SELL allowed
+    assert run_module._trend_score(strong, 1) > 0.65        # SELL vetoed
+
+
+def test_gold_macro_veto_not_triggered_by_stale_ema_cross(run_and_stub, monkeypatch):
+    """A SELL is not vetoed when H4 opposition is only the EMA cross (score 0.65)."""
+    run_module, _ = run_and_stub
+    cfg = dict(run_module.CONFIG)
+    cfg["symbol"] = "XAUUSDm"
+    cfg["min_signal_score"] = 55
+    cfg["gold_min_signal_score"] = 58
+    cfg["location_gate"] = False
+    bot = run_module.StandaloneAIBot(cfg)
+
+    idx = pd.date_range("2026-01-01", periods=60, freq="15min")
+    m15 = pd.DataFrame({
+        "open": np.linspace(2650, 2640, 60), "high": np.linspace(2651, 2641, 60),
+        "low": np.linspace(2649, 2639, 60), "close": np.linspace(2650, 2640, 60),
+        "tick_volume": [100.0] * 60,
+    }, index=idx)
+    m15p = run_module._prepare(m15, cfg)
+    monkeypatch.setattr(run_module, "_session_ok", lambda c: True)
+    monkeypatch.setattr(
+        run_module, "_score_direction",
+        lambda ai_dir, ai_conf, m, h1, h4, d, c, **kw: (75.0 if d == -1 else 10.0),
+    )
+    h4p = pd.DataFrame({"ema50": [2660.0] * 30, "ema200": [2650.0] * 30,
+                        "ema9": [2655.0] * 30, "ema21": [2658.0] * 30,
+                        "rsi": [40.0] * 30})
+    _, _, _, reason = bot._get_signal(m15p, h1p=None, h4p=h4p)
+    assert "gold macro veto" not in reason
+
+
 def test_gold_minimum_signal_score_floor(run_and_stub, monkeypatch):
     """Gold trades require minimum 58 confluence score."""
     run_module, _ = run_and_stub

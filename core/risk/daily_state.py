@@ -29,9 +29,12 @@ deterministic apart from the tracker's own latch; no broker or database import.
 
 from __future__ import annotations
 
+import math
+import numbers
 from dataclasses import dataclass
+from datetime import date, datetime
 from enum import Enum
-from typing import Hashable, Optional
+from typing import Any, Hashable, Optional
 
 
 class DayState(str, Enum):
@@ -128,3 +131,52 @@ class DailyTargetTracker:
         return DayDecision(state, action, net, self.target, floor, False, changed,
                            f"net {net:+.2f} reached target {self.target:.2f}: "
                            f"{action.value.lower().replace('_', ' ')}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Small pure helpers (used by core/risk/daily_pnl.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def finite_or_none(value: Any) -> Optional[float]:
+    """``value`` as a finite ``float``, or ``None`` when it is unknown.
+
+    None, NaN, +/-inf, booleans, strings and anything that is not a real number
+    are UNKNOWN. They are never converted to 0.0: a missing P&L is not a flat
+    day, and a missing price is not a price.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, numbers.Real):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def day_key(day: Any) -> Optional[str]:
+    """Canonical text key for a "day" value, or ``None`` when it is unusable.
+
+    ``date`` -> ISO date; ``datetime`` -> the ISO date it falls on (passing
+    ``datetime.now()`` by mistake must not reset the machine on every tick);
+    ``str`` -> itself, stripped; integers -> their decimal text. Booleans,
+    floats and every other type are rejected: a float such as ``time.time()``
+    would change on each call and silently disarm the latch.
+    """
+    if day is None or isinstance(day, bool):
+        return None
+    try:
+        if isinstance(day, datetime):
+            text = day.date().isoformat()
+            return None if text == "NaT" else text  # pandas NaT is a datetime
+        if isinstance(day, date):
+            return day.isoformat()
+    except (ValueError, AttributeError):  # pragma: no cover - defensive
+        return None
+    if isinstance(day, numbers.Integral):
+        return str(int(day))
+    if isinstance(day, str):
+        text = day.strip()
+        return text or None
+    return None

@@ -326,6 +326,9 @@ _add(_p("news_blackout_before_min", "News blackout: minutes before", "Risk", "fl
         env="NEWS_BLACKOUT_BEFORE_MIN"))
 _add(_p("news_blackout_after_min", "News blackout: minutes after", "Risk", "float", 15.0, 0.0, 240.0, 5.0,
         env="NEWS_BLACKOUT_AFTER_MIN"))
+_add(_p("min_free_disk_mb", "Min free disk space (MB)", "Risk", "float", 500.0, 0.0, 100000.0, 100.0,
+        env="MIN_FREE_DISK_MB",
+        help="No new entries while the data disk has less free space than this: the risk state, trade history and models could not be saved. Open trades are still managed. 0 = off."))
 _add(_p("nn_enabled", "Neural-network vote", "Strategies", "bool", True,
         env="NN_ENABLED",
         help="Use the saved neural-network model as one more vote. It is absent from the score unless a model exists with a measured positive out-of-sample edge and is confident."))
