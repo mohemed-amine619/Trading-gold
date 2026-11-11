@@ -580,6 +580,8 @@ CONFIG = {
     # location_target: aim the take-profit at resting liquidity when one exists
     #                  in the trade's favour, else keep the fixed RR.
     "location_gate": os.getenv("LOCATION_GATE", "true").lower() in ("true", "1", "yes"),
+    "mtf_confirmation": os.getenv("MTF_CONFIRMATION", "true").lower() in ("true", "1", "yes"),
+    "scalp_regime_filter": os.getenv("SCALP_REGIME_FILTER", "false").lower() in ("true", "1", "yes"),
     "strict_location_veto": os.getenv("STRICT_LOCATION_VETO", "true").lower() in ("true", "1", "yes"),
     "location_stop": os.getenv("LOCATION_STOP", "true").lower() in ("true", "1", "yes"),
     "location_target": os.getenv("LOCATION_TARGET", "true").lower() in ("true", "1", "yes"),
@@ -3416,6 +3418,19 @@ class StandaloneAIBot:
             if self._scalp_key != key:
                 names = tuple(s.strip() for s in str(self.cfg["scalp_strategies"]).split(",")
                               if s.strip())
+                # Regime-conditioned strategy selection (opt-in)
+                if self.cfg.get("scalp_regime_filter", False) and m15p is not None and not m15p.empty:
+                    try:
+                        from core.strategy.base import detect_regime, MarketRegime
+                        regime = detect_regime(m15p)
+                        trending = {"orb", "burst", "ema_pullback", "sweep", "breakout", "inside_break"}
+                        ranging = {"vwap_fade", "squeeze", "rsi2", "pinbar", "macd_cross", "stoch_cross"}
+                        if regime in (MarketRegime.TRENDING, MarketRegime.BREAKOUT):
+                            names = tuple(n for n in names if n not in ranging)
+                        elif regime == MarketRegime.RANGING:
+                            names = tuple(n for n in names if n not in trending)
+                    except Exception:
+                        pass
                 self._scalp_engine = _ScalpEngine(_ScalpConfig(
                     strategies=names, horizon=int(self.cfg["scalp_horizon"]),
                     check_bars=int(self.cfg["scalp_check_bars"]),
@@ -3605,6 +3620,15 @@ class StandaloneAIBot:
             min_conf = float(self.cfg.get("ai_confidence_threshold", 0.55))
             if ai_on and ai_conf < min_conf:
                 return 0, best_score, ai_conf, f"AI conf {ai_conf:.2f} < threshold ({min_conf:.2f})"
+
+        # --- Multi-timeframe confirmation (H1 must not strongly oppose) ---
+        if self.cfg.get("mtf_confirmation", True) and best_dir != 0 and h1p is not None and not h1p.empty:
+            h1_opp = _trend_score(h1p, -best_dir)
+            if h1_opp > 0.65:
+                logger.info("[%s] MTF veto: H1 opposes %s (score %.2f > 0.65)",
+                            self.cfg["symbol"], "BUY" if best_dir == 1 else "SELL", h1_opp)
+                return 0, best_score, ai_conf, ("mtf veto: H1 opposes "
+                                                + ("BUY" if best_dir == 1 else "SELL"))
 
         # --- market location gate -------------------------------------
         # The scoring above answers "what". This answers "where", and can only
