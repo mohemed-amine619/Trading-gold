@@ -146,7 +146,9 @@ def simulate_trade(trade: ReplayTrade, bars: pd.DataFrame, params: ManagementPar
             reaches = target >= be_sl if d == 1 else target <= be_sl
             if reaches and step_ok(d == 1, new_sl, target, min_step, be_sl):
                 new_sl = target
-        if 0 < profit < p.trail_activate_atr * atr and profit >= p.early_protect_atr * atr:
+        early = max(p.early_protect_atr, p.breakeven_trigger_atr) if p.enable_breakeven \
+            else p.early_protect_atr                       # same rule as run.py
+        if 0 < profit < p.trail_activate_atr * atr and profit >= early * atr:
             protect = entry + d * profit * 0.4
             if step_ok(d == 1, new_sl, protect, min_step):
                 new_sl = protect

@@ -591,7 +591,10 @@ CONFIG = {
     # --- dynamic trade management ("never lose" once in profit) ---
     "trail_atr_mult":          _profile_cfg("TRAIL_ATR_MULT", 1.5, 1.2, scalper_val=1.0),
     "trail_activate_atr":      _profile_cfg("TRAIL_ACTIVATE_ATR", 1.0, 0.8, scalper_val=0.7),
-    "early_protect_atr":       float(os.getenv("EARLY_PROTECT_ATR", "0.3")),
+    # Was 0.3: it locked 40% of a 0.3-ATR gain, so most winners were stopped at
+    # +$0.5..1.5 while losers ran to the full stop (diagnostics: avg win 1.37-1.55
+    # vs avg loss 4.70-5.89). It now also never fires before breakeven_trigger_atr.
+    "early_protect_atr":       float(os.getenv("EARLY_PROTECT_ATR", "0.8")),
     "trail_tighten1_atr":      _profile_cfg("TRAIL_TIGHTEN1_ATR", 2.0, 1.5),
     "trail_tighten1_mult":     _profile_cfg("TRAIL_TIGHTEN1_MULT", 1.0, 0.8),
     "trail_tighten2_atr":      _profile_cfg("TRAIL_TIGHTEN2_ATR", 3.0, 2.2),
@@ -765,8 +768,10 @@ CONFIG = {
     "loss_streak_cooldown_minutes": int(os.getenv("LOSS_STREAK_COOLDOWN_MIN", "60")),
 
     # --- manual trade management ---
-    "ai_protect_manual_trades":  True,
-    "manual_trade_sl_atr":       2.0,
+    # Read from the environment: these were hardcoded, so the documented
+    # AI_PROTECT_MANUAL_TRADES=false did nothing at startup.
+    "ai_protect_manual_trades":  os.getenv("AI_PROTECT_MANUAL_TRADES", "true").strip().lower() in ("1", "true", "yes"),
+    "manual_trade_sl_atr":       float(os.getenv("MANUAL_TRADE_SL_ATR", "2.0") or 2.0),
     "manage_manual_trades_full": False,
     "default_manual_policy":     os.getenv("DEFAULT_MANUAL_POLICY", "observe_only"),
     # --- Smart manual trade intelligence (analysis-based) ---
@@ -2100,6 +2105,28 @@ class AIEnsemble:
 # ---------------------------------------------------------------------------
 # Signal scoring (multi-layer confluence 0-100)
 # ---------------------------------------------------------------------------
+
+def _critic_label(cfg: dict) -> str:
+    """Name the critic honestly: with no LLM configured it is the built-in rule
+    engine, and its 'confidence' is a canned number, not a model's."""
+    provider = str(cfg.get("llm_provider", "embedded") or "embedded").strip().lower()
+    if provider in ("", "none", "embedded"):
+        return "built-in rules, not an LLM"
+    return f"LLM: {provider}"
+
+
+def _early_protect_trigger(cfg: dict) -> float:
+    """Profit (ATR) at which early protection may first move the stop.
+
+    It is ``early_protect_atr``, but never below ``breakeven_trigger_atr`` while
+    breakeven is enabled: protection that locks profit before the trade has even
+    reached breakeven only shortens winners.
+    """
+    early = float(cfg.get("early_protect_atr", 0.8) or 0.0)
+    if cfg.get("enable_breakeven", True):
+        early = max(early, float(cfg.get("breakeven_trigger_atr", 0.4) or 0.0))
+    return early
+
 
 def _session_ok(cfg: dict) -> bool:
     if not cfg.get("use_session_filter", True):
@@ -3537,15 +3564,16 @@ class StandaloneAIBot:
                     location=self._location_for(m15p) if _LOCATION_AVAILABLE else None,
                 )
                 if not critique.approved:
-                    logger.info("[%s] 🧠 LLM Trader Critic VETO: %s (Confidence: %.1f)",
-                                self.cfg["symbol"], critique.reasoning, critique.confidence)
+                    logger.info("[%s] 🧠 Trade critic [%s] VETO: %s (Confidence: %.1f)",
+                                self.cfg["symbol"], _critic_label(self.cfg),
+                                critique.reasoning, critique.confidence)
                     return 0, best_score, ai_conf, f"LLM critic veto: {critique.reasoning}"
                 else:
                     # The critic may approve or veto. Its confidence is logged but
                     # never becomes the sizing confidence: it is an unvalidated
                     # opinion, and sizing must rest on the measured model alone.
-                    logger.info("[%s] 🧠 LLM Trader Confirmed (critic conf %.0f): %s (Risk: %s)",
-                                self.cfg["symbol"], critique.confidence,
+                    logger.info("[%s] 🧠 Trade critic [%s] confirmed (conf %.0f): %s (Risk: %s)",
+                                self.cfg["symbol"], _critic_label(self.cfg), critique.confidence,
                                 critique.reasoning, critique.risk_assessment)
 
         return best_dir, best_score, ai_conf, "signal"
@@ -4059,7 +4087,7 @@ class StandaloneAIBot:
             price = tick.bid if is_buy else tick.ask
             keep = 0.8                      # keep 80% of the open price gain
             new_sl = pos.price_open + (price - pos.price_open) * keep
-            self._modify_sl(pos, new_sl)
+            self._modify_sl(pos, new_sl, "daily target ratchet")
 
     def _apply_daily_target(self) -> None:
         tracker = self._day_tracker
@@ -4161,9 +4189,10 @@ class StandaloneAIBot:
             pass
         return round(float(pos.sl), digits) if getattr(pos, "sl", 0.0) else 0.0
 
-    def _modify_sl(self, pos, new_sl: float) -> bool:
+    def _modify_sl(self, pos, new_sl: float, reason: str = "") -> bool:
+        why = f" ({reason})" if reason else ""
         if self.cfg.get("dry_run"):
-            logger.info("[DRY-RUN] Modify SL ticket=%s → %.5f", pos.ticket, new_sl)
+            logger.info("[DRY-RUN] Modify SL ticket=%s → %.5f%s", pos.ticket, new_sl, why)
             return True
         info = mt5.symbol_info(pos.symbol)
         digits = getattr(info, "digits", 2) or 2
@@ -4197,7 +4226,7 @@ class StandaloneAIBot:
         no_changes_code = getattr(mt5, "TRADE_RETCODE_NO_CHANGES", 10025)
         if result and result.retcode in (done_code, no_changes_code):
             if result.retcode == done_code:
-                logger.info("Modified SL ticket=%s → %.5f", pos.ticket, sl_val)
+                logger.info("Modified SL ticket=%s → %.5f%s", pos.ticket, sl_val, why)
                 tracked = self._track.get(pos.ticket)
                 if tracked is not None:
                     tracked["sl_mods"] += 1
@@ -4648,7 +4677,7 @@ class StandaloneAIBot:
                                 if abs(adv.new_sl - pos.sl) >= min_step_m - 1e-12 or adv.action == "MOVE_TO_BE":
                                     logger.info("[%s][MANUAL#%d] INTEL %s SL: %.5f -> %.5f (%s)",
                                                 self.cfg["symbol"], getattr(pos, "ticket", 0), adv.action, pos.sl, adv.new_sl, adv.reason)
-                                    self._modify_sl(pos, adv.new_sl)
+                                    self._modify_sl(pos, adv.new_sl, "manual intel")
                                     self._manual_intel[pos.ticket] = self._manual_intel.get(pos.ticket, {})
                                     self._manual_intel[pos.ticket]["last_action"] = adv.action
                     except Exception as exc:
@@ -4716,7 +4745,7 @@ class StandaloneAIBot:
                                 adj.action, direction, pos.sl, adj.new_sl, atr, self.cfg):
                             logger.info("[%s] AI Dynamic SL (%s): %.5f -> %.5f (%s)",
                                         pos.symbol, adj.action, pos.sl, adj.new_sl, adj.reasoning)
-                            self._modify_sl(pos, adj.new_sl)
+                            self._modify_sl(pos, adj.new_sl, f"ai dynamic {adj.action}")
 
             # --- MARKET STRUCTURE TRAILING STOP ---
             if (floating_pnl > 0 and profit_move >= tighten_after
@@ -4733,7 +4762,7 @@ class StandaloneAIBot:
                         # Ensure breathing room from current price to prevent correction clip
                         new_sl = min(new_sl, close_price - min_separation)
                         if new_sl > pos.sl + min_step and new_sl < close_price:
-                            self._modify_sl(pos, new_sl)
+                            self._modify_sl(pos, new_sl, "structure trail")
                 else:  # SELL
                     recent_high = m15p['high'].iloc[-5:].max()
                     if pos.sl == 0 or recent_high < pos.sl:
@@ -4742,7 +4771,7 @@ class StandaloneAIBot:
                             # Ensure breathing room from current price to prevent correction clip
                             new_sl = max(new_sl, close_price + min_separation)
                             if (pos.sl == 0 or new_sl < pos.sl - min_step) and new_sl > close_price:
-                                self._modify_sl(pos, new_sl)
+                                self._modify_sl(pos, new_sl, "structure trail")
 
             # ---- POWER-UP (A): hard per-trade stop-loss, % of equity ---
             max_loss_pct = self.cfg.get("max_loss_per_trade_pct")
@@ -4808,17 +4837,19 @@ class StandaloneAIBot:
                     if direction == 1:
                         target_sl = min(target_sl, close_price - min_dist)
                         if target_sl >= be_sl and _step_ok(True, pos.sl, target_sl, min_step, be_sl):
-                            self._modify_sl(pos, target_sl)
+                            self._modify_sl(pos, target_sl, "breakeven/lock")
                     else:
                         target_sl = max(target_sl, close_price + min_dist)
                         if target_sl <= be_sl and _step_ok(False, pos.sl, target_sl, min_step, be_sl):
-                            self._modify_sl(pos, target_sl)
+                            self._modify_sl(pos, target_sl, "breakeven/lock")
 
             # ---- EARLY PROTECTION: move SL closer at small profit to survive corrections ----
             # Before trailing fully activates, protect against pullbacks by tightening
             # SL toward breakeven at a smaller profit threshold. This prevents the
             # original wide SL from being hit during a routine correction.
-            early_protect_atr = self.cfg.get("early_protect_atr", 0.3) * atr
+            # Never earlier than the breakeven trigger: locking a share of a
+            # tiny gain is what turned winners into +$0.6 scratches.
+            early_protect_atr = _early_protect_trigger(self.cfg) * atr
             if 0 < profit_move < (self.cfg.get("trail_activate_atr", 1.0) * atr):
                 if profit_move >= early_protect_atr:
                     # Move SL to a protective level (halfway between entry and current price)
@@ -4826,12 +4857,12 @@ class StandaloneAIBot:
                         protect_sl = pos.price_open + (profit_move * 0.4)
                         if protect_sl > pos.sl + 1e-9:
                             if _sl_modify_allowed("early_protect", direction, pos.sl, protect_sl, atr, self.cfg):
-                                self._modify_sl(pos, protect_sl)
+                                self._modify_sl(pos, protect_sl, "early protect")
                     else:
                         protect_sl = pos.price_open - (profit_move * 0.4)
                         if pos.sl == 0 or protect_sl < pos.sl - 1e-9:
                             if _sl_modify_allowed("early_protect", direction, pos.sl, protect_sl, atr, self.cfg):
-                                self._modify_sl(pos, protect_sl)
+                                self._modify_sl(pos, protect_sl, "early protect")
 
             # ---- trailing stop (accelerating, never falls below breakeven)
             trail_atr  = self.cfg.get("trail_atr_mult", 1.5) * atr
@@ -4856,7 +4887,7 @@ class StandaloneAIBot:
                 trail_step = max((getattr(trail_info, "point", 0.01) or 0.01) * 1.5,
                                  float(self.cfg.get("min_sl_step_atr", 0.05) or 0.0) * atr)
                 if _step_ok(direction == 1, pos.sl, new_sl, trail_step, be_sl):
-                    self._modify_sl(pos, new_sl)
+                    self._modify_sl(pos, new_sl, "atr trail")
 
             # ---- multi-stage partial close ---------------------------
             if self.cfg.get("enable_partial_close", True):

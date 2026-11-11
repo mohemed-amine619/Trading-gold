@@ -87,7 +87,7 @@ def test_ratchet_mode_only_proposes_a_tighter_stop(run_and_stub, tmp_path):
     b._realized_today = lambda: 60.0
     b._close_position = lambda *a, **k: pytest.fail("ratchet must not close here")
     calls = []
-    b._modify_sl = lambda pos, sl: calls.append((pos.ticket, sl)) or True
+    b._modify_sl = lambda pos, sl, reason="": calls.append((pos.ticket, sl)) or True
     b._bot_positions_all = lambda: [_pos(1, profit=12.0, entry=2000.0)]
     tick = types.SimpleNamespace(bid=2010.0, ask=2010.2)
     run_module.mt5.symbol_info_tick = lambda s: tick

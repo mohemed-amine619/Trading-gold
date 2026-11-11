@@ -217,9 +217,9 @@ _add(_p("trail_atr_mult", "Trail distance (ATR)", "Trade Management", "float", 1
         env="TRAIL_ATR_MULT"))
 _add(_p("trail_activate_atr", "Trail activation (ATR profit)", "Trade Management", "float", 1.0, 0.1, 10.0, 0.1,
         env="TRAIL_ACTIVATE_ATR"))
-_add(_p("early_protect_atr", "Early protection trigger (ATR)", "Trade Management", "float", 0.3, 0.1, 5.0, 0.1,
+_add(_p("early_protect_atr", "Early protection trigger (ATR)", "Trade Management", "float", 0.8, 0.1, 5.0, 0.1,
         env="EARLY_PROTECT_ATR",
-        help="Move SL toward breakeven at this profit level to survive corrections before trailing activates."))
+        help="Before trailing starts, lock 40% of the open gain once the trade is this far in profit. Never fires before the break-even trigger. Set it to the trail activation level to turn it off. Low values (0.3) cut winners to scratches."))
 _add(_p("trail_tighten1_atr", "Tighten stage 1 at (ATR)", "Trade Management", "float", 2.0, 0.2, 20.0, 0.1,
         env="TRAIL_TIGHTEN1_ATR"))
 _add(_p("trail_tighten1_mult", "Stage 1 trail multiplier", "Trade Management", "float", 1.0, 0.1, 5.0, 0.05,
