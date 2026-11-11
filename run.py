@@ -632,6 +632,10 @@ CONFIG = {
     "profit_lock_ratio":       _profile_cfg("PROFIT_LOCK_RATIO", 0.50, 0.55),
     "enable_partial_close":    True,
     "partial_close_trigger_atr": _profile_cfg("PARTIAL_CLOSE_TRIGGER_ATR", 1.2, 0.9, scalper_val=0.8),
+    "partial_close2_trigger_atr": float(os.getenv("PARTIAL_CLOSE2_TRIGGER_ATR", "3.0")),
+    "partial_close2_fraction": float(os.getenv("PARTIAL_CLOSE2_FRACTION", "0.25")),
+    "partial_close3_trigger_atr": float(os.getenv("PARTIAL_CLOSE3_TRIGGER_ATR", "4.5")),
+    "partial_close3_fraction": float(os.getenv("PARTIAL_CLOSE3_FRACTION", "0.15")),
     "profit_lock_activate_atr": _profile_cfg("PROFIT_LOCK_ACTIVATE_ATR", 1.0, 0.8, scalper_val=0.7),
     "profit_giveback_pct":     _profile_cfg("PROFIT_GIVEBACK_PCT", 0.45, 0.45),
     "max_spread_atr_ratio":    _profile_cfg("MAX_SPREAD_ATR_RATIO", 0.40, 0.25, scalper_val=0.20),
@@ -3899,6 +3903,18 @@ class StandaloneAIBot:
         atr  = float(last.get("atr", info.point * 100))
         adx  = float(last.get("adx", 0.0))
 
+        # Volatility-adjusted sizing: shrink when ATR is above recent median.
+        vol_scale = 1.0
+        try:
+            _atr_series = m15p.get("atr")
+            if _atr_series is not None:
+                _med = float(_atr_series.dropna().tail(50).median())
+                if _med > 0 and atr > _med:
+                    vol_scale = max(0.5, _med / atr)
+        except Exception:
+            vol_scale = 1.0
+        size_multiplier = float(size_multiplier) * vol_scale
+
         if not self._spread_ok(info, tick, atr):
             return False
 
@@ -5073,6 +5089,14 @@ class StandaloneAIBot:
                             part2 = math.floor(pos.volume * frac2 / step) * step
                             if part2 >= vmin and pos.volume - part2 >= vmin:
                                 self._partial_close(pos, part2, 2)
+
+                    if 3 not in stages:
+                        trig3 = self.cfg.get("partial_close3_trigger_atr", 4.5) * atr
+                        if profit_move >= trig3:
+                            frac3 = self.cfg.get("partial_close3_fraction", 0.15)
+                            part3 = math.floor(pos.volume * frac3 / step) * step
+                            if part3 >= vmin and pos.volume - part3 >= vmin:
+                                self._partial_close(pos, part3, 3)
 
     # --------------------------------------------------------------
 
