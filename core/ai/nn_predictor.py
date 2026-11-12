@@ -145,6 +145,33 @@ def oos_refusal(oos: Optional[dict], min_oos_edge: float, strict: bool) -> Optio
     return None
 
 
+def oos_report_lines(oos: dict, min_oos_edge: float = 0.0) -> list:
+    """Human-readable lines for a walk-forward / holdout ``oos`` record, ending
+    with the verdict the predictor would reach (scripts/train_nn.py,
+    scripts/train_deep_nn.py)."""
+    def f(v):
+        return "n/a" if v is None else f"{v:+.3f}"
+    thresholds = oos.get("thresholds") or ([oos["threshold"]] if "threshold" in oos else [])
+    lines = [f"out-of-sample trades: {oos.get('trades', 0)} non-overlapping "
+             f"({oos.get('signals', 0)} signal bars); threshold(s) chosen on validation: "
+             + (", ".join(f"{t:.2f}" for t in thresholds) or "n/a")]
+    if oos.get("edge") is None:
+        lines.append("edge               : UNMEASURED (too few out-of-sample trades) "
+                     "- the predictor will refuse this model")
+        return lines
+    lines += [f"precision          : {oos['precision']:.3f}",
+              f"edge (mean R)      : {oos['edge']:+.3f}  (before spread and commission)",
+              f"edge lower bound   : {f(oos.get('edge_lcb'))}",
+              f"naive baseline     : {f(oos.get('baseline_edge'))} "
+              f"(always-{oos.get('baseline_direction') or '?'})",
+              f"timing skill (lcb) : {f(oos.get('excess_lcb'))}"]
+    refusal = oos_refusal(oos, min_oos_edge, strict=True)
+    lines.append("verdict            : " + (
+        f"REFUSED - {refusal}" if refusal else
+        "passes the gate on this data; confirm on other periods and on paper before trusting it"))
+    return lines
+
+
 class ModelPredictor:
     def __init__(self, artifact_path: str, min_confidence: float = 0.72,
                  min_oos_edge: float = 0.0):

@@ -194,7 +194,10 @@ def trained():
 def save_model(directory, artifact, edge):
     from core.ai.nn_model import save_artifact
     art = dict(artifact)
-    art["oos"] = {"edge": edge}
+    # A full holdout record (lower bound, naive baseline, timing skill): the
+    # current predictor requires them for an artifact that stores a threshold.
+    art["oos"] = {"edge": edge, "edge_lcb": edge, "baseline_edge": -0.5, "excess_lcb": edge}
+    art["threshold"] = 0.0          # vote at any confidence: these tests are about the edge gate
     path = directory / "nn_XAUUSDm_M5.pt"
     save_artifact(str(path), art)
     return str(path)

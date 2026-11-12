@@ -12,8 +12,10 @@ seen. The saved file is replaced only if the challenger is measurably better
 (see core/ai/nn_trainer.py). Ctrl+C stops it after the current cycle.
 
 Training more often does not make the model better by itself. If no challenger
-ever beats the floor, the file is never written and the predictor keeps saying
-"no trade". That is the safe outcome, not a fault.
+ever clears the gate (measured edge whose lower confidence bound beats
+``--floor``, better than the naive always-one-direction baseline), the file is
+never written and the predictor keeps saying "no trade". That is the safe
+outcome, not a fault.
 
 ``run.py`` starts this script itself (see core/runtime/helpers.py), passing
 ``--parent-pid`` so it stops if the bot dies. Exit code 3 means "cannot run on
@@ -74,7 +76,10 @@ def main(argv: Optional[List[str]] = None,
     parser.add_argument("--window", type=int, default=32)
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--barrier-mult", type=float, default=1.5)
-    parser.add_argument("--threshold", type=float, default=0.72)
+    parser.add_argument("--threshold", type=float, default=0.72,
+                        help="MINIMUM decision threshold: the trainer picks the threshold "
+                             "on validation in [max(this, 0.40), 0.90] and stores it in "
+                             "the model (run.py forwards NN_MIN_CONFIDENCE)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--models", type=int, default=3, help="seeds averaged per model")
     parser.add_argument("--arch", choices=("gru", "dual"), default="gru",
@@ -83,6 +88,9 @@ def main(argv: Optional[List[str]] = None,
                         help="dual only: capacity preset")
     parser.add_argument("--tolerance", type=float, default=0.02,
                         help="a challenger must beat the champion's edge by this much")
+    parser.add_argument("--floor", type=float, default=0.0,
+                        help="the lower confidence bound of the holdout edge must exceed "
+                             "this (never below 0; run.py forwards NN_MIN_OOS_EDGE)")
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
     parser.add_argument("--parent-pid", type=int, default=0,
                         help="stop when this process is gone (set by run.py)")
@@ -105,7 +113,7 @@ def main(argv: Optional[List[str]] = None,
     trainer = ContinuousTrainer(
         fetch, str(args.out), cfg, holdout_bars=args.holdout_bars,
         min_new_bars=args.min_new_bars, min_train_bars=args.min_train_bars,
-        tolerance=args.tolerance, interval_s=args.interval_min * 60.0)
+        floor=args.floor, tolerance=args.tolerance, interval_s=args.interval_min * 60.0)
 
     if args.once:
         result = trainer.run_once()

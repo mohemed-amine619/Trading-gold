@@ -83,17 +83,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     artifact = train_final(df, cfg, args.train_bars, args.test_bars)
     oos = artifact["oos"]
+    from core.ai.nn_predictor import oos_report_lines
     print(f"walk-forward folds : {oos['n_folds']}")
-    print(f"out-of-sample trades: {oos['trades']} at confidence >= {cfg.threshold}")
-    if oos["edge"] is None:
-        print("edge               : UNMEASURED (too few out-of-sample trades) "
-              "- the predictor will refuse this model")
-    else:
-        print(f"precision          : {oos['precision']:.3f}")
-        print(f"edge (mean R)      : {oos['edge']:+.3f}  (before spread and commission)")
-        print("verdict            : " + (
-            "NO EDGE - the predictor will refuse this model" if oos["edge"] <= 0 else
-            "positive on this data; confirm on other periods and on paper before trusting it"))
+    for line in oos_report_lines(oos):
+        print(line)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save_artifact(str(args.out), artifact)

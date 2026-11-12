@@ -9,13 +9,17 @@ walk-forward test, trains the model that would go live, and saves it.
 Read the report before acting on it:
 
 * ``edge`` is the mean R-multiple of the trades the model would take at the
-  confidence threshold, before spread and commission. It is "unmeasured" when
-  fewer than 30 out-of-sample trades were taken.
+  threshold chosen on each fold's validation rows (``--threshold`` is the
+  minimum), counted one position at a time, before spread and commission. It
+  is "unmeasured" below 30 non-overlapping out-of-sample trades. The report
+  also shows its lower confidence bound, the naive always-one-direction
+  baseline and the timing skill beyond it; the predictor refuses the model
+  unless all of them pass.
 * A positive number on one run is a hypothesis, not proof. Run it on more
   history and different periods, and trade it on paper first.
 * Nothing here changes the live bot. The saved file is only used by
-  core/ai/nn_predictor.py, which refuses a model whose edge is unmeasured or
-  below its floor.
+  core/ai/nn_predictor.py, which refuses a model whose edge is unmeasured,
+  not confidently above its floor, or no better than the naive baseline.
 """
 
 from __future__ import annotations
@@ -68,19 +72,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     artifact = train_final(df, cfg, args.train_bars, args.test_bars)
     oos = artifact["oos"]
 
+    from core.ai.nn_predictor import oos_report_lines
     print(f"walk-forward folds : {oos['n_folds']}")
-    print(f"out-of-sample trades: {oos['trades']} at confidence >= {cfg.threshold}")
-    if oos["edge"] is None:
-        print("edge               : UNMEASURED (too few out-of-sample trades) "
-              "- the predictor will refuse this model")
-    else:
-        print(f"precision          : {oos['precision']:.3f}")
-        print(f"edge (mean R)      : {oos['edge']:+.3f}  (before spread and commission)")
-        if oos["edge"] <= 0:
-            print("verdict            : NO EDGE - the predictor will refuse this model")
-        else:
-            print("verdict            : positive on this data; confirm on other periods "
-                  "and on paper before trusting it")
+    for line in oos_report_lines(oos):
+        print(line)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save_artifact(str(args.out), artifact)

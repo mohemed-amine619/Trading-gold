@@ -16,12 +16,13 @@ docs/PROJECT_STATUS.md "NN trainer: why no model was ever promoted"):
   ~[0.58, 0.21, 0.21]. Caution belongs in the decision threshold, not in the
   loss; both knobs are still reachable (``class_weighting``, ``fp_penalty``)
   to reproduce old runs.
-* Ensemble-level vector scaling. One scalar temperature per member cannot
-  remove a class bias; it saturated at its 10.0 clip and flattened every
-  probability to ~1/3, so no bar ever reached a trade threshold. Now the
-  members' raw probabilities are averaged and a per-class scale ``a`` and bias
-  ``b`` on the log-probabilities (``softmax(a * log p + b)``) are fitted by NLL
-  on the validation rows only. The map is convex in (a, b), has no clip, and
+* Ensemble-level calibration with a per-class bias. One scalar temperature
+  per member cannot remove a class bias; it saturated at its 10.0 clip and
+  flattened every probability to ~1/3, so no bar ever reached a trade
+  threshold. Now the members' raw probabilities are averaged and the map
+  ``softmax(a * log p + b)`` (one shared scale ``a``, one bias ``b`` per class;
+  ``calibration="vector"`` gives one scale per class) is fitted by NLL on the
+  validation rows only (``fit_calibration_map``). There is no clip, and the map
   is stored in the artifact as ``art["calibration"]``. Artifacts without it
   (old files) keep the old per-member temperatures and behave exactly as
   before.
@@ -67,15 +68,17 @@ from torch import nn
 from core.ai.deep_layout import (
     ARCH_DUAL, ARCH_GRU, build_model_features, feature_names, make_excursion,
 )
-from core.ai.nn_features import (
-    FEATURE_NAMES, LONG, N_CLASSES, NOISE, SHORT, FeatureScaler, build_features,
-    make_labels, make_windows, walk_forward_splits, window_end_indices,
+from core.ai.nn_features import (  # noqa: F401  (FEATURE_NAMES/build_features re-exported)
+    FEATURE_NAMES, LONG, MIN_TRADES_FOR_EDGE, N_CLASSES, NOISE, SHORT, FeatureScaler,
+    build_features, make_labels, make_windows, walk_forward_splits, window_end_indices,
 )
 
-MIN_TRADES_FOR_EDGE = 30          # non-overlapping trades before an edge counts as measured
 LCB_Z = 1.645                     # one-sided 95 % lower confidence bound
 THRESHOLD_SEARCH_FLOOR = 0.40     # never search below this, whatever the configured minimum
-CAL_KIND_VECTOR = "vector"
+CAL_KIND_VECTOR = "vector"               # stored map: softmax(scale * log p + bias), per class
+# TrainConfig.calibration values
+CAL_BIAS = "bias"                        # default: shared temperature + per-class bias
+CAL_VECTOR = "vector"                    # per-class scale + per-class bias
 CAL_KIND_TEMPERATURE = "temperature"     # legacy: one scalar per member, no ensemble map
 _MIN_CAL_ROWS = 30
 
@@ -105,7 +108,9 @@ class TrainConfig:
     threshold_max: float = 0.90
     threshold_step: float = 0.01
     threshold_search: bool = True     # False: use ``threshold`` as is (old behaviour)
-    calibration: str = CAL_KIND_VECTOR   # "vector" (ensemble) | "temperature" (legacy)
+    # Ensemble calibration: "bias" (temperature + per-class bias, default),
+    # "vector" (per-class scale + bias) or "temperature" (legacy per-member scalar).
+    calibration: str = CAL_BIAS
     lcb_z: float = LCB_Z
     n_models: int = 1                 # seeds averaged; more = lower variance
     # Architecture. "gru" is the original model and the default. "dual" is the
@@ -229,7 +234,7 @@ def fit_temperature(logits: np.ndarray, y: np.ndarray) -> float:
 
     Kept for ``calibration="temperature"`` and for old artifacts. It cannot
     remove a class BIAS (it rescales every logit equally), which is why it
-    saturated at 10 on the class-weighted model; use ``fit_vector_calibration``.
+    saturated at 10 on the class-weighted model; see ``fit_calibration_map``.
     """
     if len(logits) < 10:
         return 1.0
@@ -258,50 +263,54 @@ def softmax_np(logits: np.ndarray, temperature: float = 1.0) -> np.ndarray:
 # ── calibration of the ensemble ──────────────────────────────────────────────
 
 def identity_calibration() -> dict:
-    return {"kind": CAL_KIND_VECTOR, "scale": [1.0] * N_CLASSES, "bias": [0.0] * N_CLASSES,
-            "fitted": False, "rows": 0}
+    return {"kind": CAL_KIND_VECTOR, "fit": "identity", "scale": [1.0] * N_CLASSES,
+            "bias": [0.0] * N_CLASSES, "fitted": False, "rows": 0}
 
 
-def fit_vector_calibration(proba: np.ndarray, y: np.ndarray, l2: float = 1e-4) -> dict:
-    """Vector scaling of averaged class probabilities, fitted by NLL.
+def fit_calibration_map(proba: np.ndarray, y: np.ndarray, per_class_scale: bool = False,
+                        l2: float = 1e-4) -> dict:
+    """Calibrate averaged class probabilities: ``softmax(a * log(p) + b)``,
+    fitted by NLL on VALIDATION rows only.
 
-    ``calibrated = softmax(a * log(p) + b)`` with one scale ``a_c > 0`` and one
-    bias ``b_c`` per class. The biases remove a class bias (what one scalar
-    temperature cannot do); the scales soften or sharpen each class. A tiny L2
-    pull towards the identity (a=1, b=0) keeps the solution unique when a
-    class is absent or the model is uninformative. There is no clip to get
-    stuck on: ``a = softplus(s)`` is positive by construction, so the map never
-    inverts the model's ranking of a class.
+    ``b`` is one bias per class: it removes a class bias, which one scalar
+    temperature cannot do. ``a`` is one shared scale (temperature + per-class
+    bias, the default) or, with ``per_class_scale``, one per class (vector
+    scaling). Measured on synthetic gold-like M5 data the shared scale
+    generalises better: per-class scales lower the validation NLL but raise the
+    holdout NLL. ``a = exp(u)`` is positive by construction (the map never
+    inverts a class ranking) and there is no clip to get stuck on; a tiny L2 on
+    ``u`` and ``b`` only keeps the solution unique when the model is
+    uninformative, where the map then returns the validation base rates, not
+    1/3 each.
 
-    Fitted on VALIDATION rows only. Too few rows (or a single class) returns
-    the identity map, flagged ``fitted: False``.
+    Too few rows (or a single class) returns the identity map, flagged
+    ``fitted: False``.
     """
+    fit_kind = "vector" if per_class_scale else "bias"
     p = np.asarray(proba, dtype=float)
     y = np.asarray(y, dtype=int)
     if len(p) < _MIN_CAL_ROWS or len(np.unique(y)) < 2:
         return identity_calibration()
     lp = torch.tensor(np.log(np.clip(p, 1e-12, 1.0)), dtype=torch.float64)
     yt = torch.tensor(y, dtype=torch.long)
-    s0 = math.log(math.e - 1.0)                       # softplus(s0) == 1
-    s = torch.full((N_CLASSES,), s0, dtype=torch.float64, requires_grad=True)
+    u = torch.zeros(N_CLASSES if per_class_scale else 1, dtype=torch.float64, requires_grad=True)
     b = torch.zeros(N_CLASSES, dtype=torch.float64, requires_grad=True)
-    opt = torch.optim.LBFGS([s, b], lr=1.0, max_iter=500, tolerance_grad=1e-10,
+    opt = torch.optim.LBFGS([u, b], lr=1.0, max_iter=500, tolerance_grad=1e-10,
                             tolerance_change=1e-14, line_search_fn="strong_wolfe")
 
     def closure():
         opt.zero_grad()
-        a = F.softplus(s)
-        loss = F.cross_entropy(lp * a + b, yt) + l2 * (((a - 1.0) ** 2).sum() + (b ** 2).sum())
+        loss = F.cross_entropy(lp * torch.exp(u) + b, yt) + l2 * ((u ** 2).sum() + (b ** 2).sum())
         loss.backward()
         return loss
 
     opt.step(closure)
-    a = F.softplus(s).detach().numpy()
+    a = np.exp(u.detach().numpy()) * np.ones(N_CLASSES)
     bias = b.detach().numpy()
     bias = bias - bias.mean()                         # softmax is shift-invariant
     if not (np.isfinite(a).all() and np.isfinite(bias).all()):
         return identity_calibration()
-    return {"kind": CAL_KIND_VECTOR, "scale": [float(v) for v in a],
+    return {"kind": CAL_KIND_VECTOR, "fit": fit_kind, "scale": [float(v) for v in a],
             "bias": [float(v) for v in bias], "fitted": True, "rows": int(len(y))}
 
 
@@ -329,11 +338,11 @@ def fit_ensemble(x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray,
     lowers the variance of one unlucky initialisation; it does not create
     information the data does not hold.
 
-    With ``calibration="vector"`` (default) each member keeps temperature 1.0:
-    the ensemble AVERAGE is calibrated afterwards (``calibrate_ensemble``). With
-    the legacy ``"temperature"`` each member gets its own scalar temperature.
+    By default each member keeps temperature 1.0: the ensemble AVERAGE is
+    calibrated afterwards (``calibrate_ensemble``). With the legacy
+    ``calibration="temperature"`` each member gets its own scalar temperature.
     """
-    legacy = getattr(cfg, "calibration", CAL_KIND_VECTOR) == CAL_KIND_TEMPERATURE
+    legacy = getattr(cfg, "calibration", CAL_BIAS) == CAL_KIND_TEMPERATURE
     members = []
     for i in range(max(1, cfg.n_models)):
         model, info = fit_sequence_model(x_train, y_train, x_val, y_val,
@@ -348,13 +357,15 @@ def calibrate_ensemble(members: list, x_val: np.ndarray, y_val: np.ndarray,
                        cfg: TrainConfig) -> Optional[dict]:
     """The ensemble-level calibration map for ``cfg`` (``None`` for the legacy
     per-member temperatures). Fitted on the validation rows only."""
-    if getattr(cfg, "calibration", CAL_KIND_VECTOR) == CAL_KIND_TEMPERATURE:
+    kind = getattr(cfg, "calibration", CAL_BIAS)
+    if kind == CAL_KIND_TEMPERATURE:
         return None
-    if getattr(cfg, "calibration", CAL_KIND_VECTOR) != CAL_KIND_VECTOR:
-        raise ValueError(f"unknown calibration {cfg.calibration!r}")
+    if kind not in (CAL_BIAS, CAL_VECTOR):
+        raise ValueError(f"unknown calibration {kind!r}")
     if len(x_val) == 0:
         return identity_calibration()
-    return fit_vector_calibration(ensemble_proba(members, x_val), y_val)
+    return fit_calibration_map(ensemble_proba(members, x_val), y_val,
+                               per_class_scale=kind == CAL_VECTOR)
 
 
 def ensemble_proba(members: list, x: np.ndarray,

@@ -121,7 +121,12 @@ class Fakes:
         self.eval_calls.append((art.get("marker"), len(df), start_row))
         edge = art["edge"] if art.get("marker") is not None and art["edge"] != "champion" \
             else self.champion_edge
-        return {"windows": 500, "trades": 40, "coverage": 0.1, "precision": 0.5, "edge": edge}
+        # Shaped like evaluate_artifact's edge_report: a measured edge comes with a
+        # lower bound, a naive baseline and the timing skill beyond it (all passing
+        # here, so these tests exercise the trainer's flow, not the gate itself).
+        return {"windows": 500, "trades": 40, "coverage": 0.1, "precision": 0.5, "edge": edge,
+                "edge_lcb": edge, "baseline_edge": None if edge is None else -0.2,
+                "excess_lcb": edge, "threshold": 0.6}
 
 
 def make_trainer(tmp_path, bars, fakes, **kw):
@@ -338,7 +343,7 @@ class TestRealModelEndToEnd:
 class TestPredictorHotReload:
     def _save(self, path, art, edge):
         art = dict(art)
-        art["oos"] = {"edge": edge}
+        art["oos"] = {"edge": edge, "edge_lcb": edge, "baseline_edge": -0.5, "excess_lcb": edge}
         save_artifact(str(path), art)
 
     def test_a_replaced_model_file_is_picked_up_without_a_restart(self, tmp_path, artifact, bars):

@@ -6,8 +6,10 @@ Leakage rules this module enforces:
 
 * every feature at bar ``t`` is a causal function of bars ``<= t`` (rolling and
   EWM windows only look backwards, nothing is centred or shifted forward);
-* the scaler is fitted on the training rows only and then applied unchanged to
-  validation and live data (``FeatureScaler``);
+* the scaler is fitted on the training rows only (the rows feeding the
+  training windows, not the validation rows that pick the calibration and the
+  threshold) and then applied unchanged to validation and live data
+  (``FeatureScaler``);
 * a label looks forward by ``horizon`` bars, so the last ``horizon`` rows have an
   unknown future and are marked ``UNKNOWN`` rather than guessed, and walk-forward
   folds leave a ``gap`` of at least ``horizon`` bars between train and test.
@@ -31,6 +33,9 @@ from core.ai.labels import first_barrier_labels
 NOISE, LONG, SHORT = 0, 1, 2
 UNKNOWN = -1                     # future not yet observable; never train on it
 N_CLASSES = 3
+# Non-overlapping trades before an out-of-sample edge counts as measured. Lives
+# here (torch-free) so the trainer's gate and the model share one number.
+MIN_TRADES_FOR_EDGE = 30
 
 FEATURE_NAMES = (
     "ret1", "ret3", "ret5",
@@ -176,6 +181,23 @@ class FeatureScaler:
                    float(d.get("clip", 5.0)))
 
 
+def window_end_indices(features: np.ndarray, labels: np.ndarray, window: int) -> np.ndarray:
+    """The end bars of the windows ``make_windows`` would build, without
+    building them: every bar ``e >= window-1`` whose label is known and whose
+    ``window`` feature rows are all finite. Lets a caller split train /
+    validation (and fit the scaler on the training part) before scaling."""
+    x = np.asarray(features, dtype=float)
+    y = np.asarray(labels)
+    if len(x) != len(y):
+        raise ValueError("features and labels must have the same length")
+    if window < 1 or len(x) < window:
+        return np.empty((0,), dtype=int)
+    bad = np.concatenate([[0], np.cumsum(~np.isfinite(x).all(axis=1))])
+    ends = np.arange(window - 1, len(x))
+    ok = (bad[ends + 1] - bad[ends + 1 - window] == 0) & (y[ends] != UNKNOWN)
+    return ends[ok].astype(int)
+
+
 def make_windows(features: np.ndarray, labels: np.ndarray, window: int
                  ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sliding windows ending at each bar.
@@ -183,26 +205,16 @@ def make_windows(features: np.ndarray, labels: np.ndarray, window: int
     Returns ``(X, y, end_index)`` where ``X[k]`` holds rows
     ``end_index[k]-window+1 .. end_index[k]`` and ``y[k]`` is the label at the
     end bar. Windows containing a non-finite feature, or ending on an UNKNOWN
-    label, are dropped.
+    label, are dropped (``window_end_indices``).
     """
     x = np.asarray(features, dtype=float)
     y = np.asarray(labels)
-    if len(x) != len(y):
-        raise ValueError("features and labels must have the same length")
-    finite = np.isfinite(x).all(axis=1)
-    xs, ys, ends = [], [], []
-    for end in range(window - 1, len(x)):
-        if y[end] == UNKNOWN:
-            continue
-        if not finite[end - window + 1:end + 1].all():
-            continue
-        xs.append(x[end - window + 1:end + 1])
-        ys.append(y[end])
-        ends.append(end)
-    if not xs:
+    ends = window_end_indices(x, y, window)
+    if len(ends) == 0:
         return (np.empty((0, window, x.shape[1])), np.empty((0,), dtype=int),
                 np.empty((0,), dtype=int))
-    return np.stack(xs), np.asarray(ys, dtype=int), np.asarray(ends, dtype=int)
+    xs = np.stack([x[end - window + 1:end + 1] for end in ends])
+    return xs, np.asarray(y[ends], dtype=int), ends
 
 
 def latest_window(features: np.ndarray, window: int) -> Optional[np.ndarray]:

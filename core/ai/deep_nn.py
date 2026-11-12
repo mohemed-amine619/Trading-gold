@@ -13,7 +13,7 @@ Architecture (widths per preset):
 * Fusion head: concat -> three widening-to-narrowing dense layers (``large``
   512 -> 256 -> 128) with dropout, then
     - 3 logits  [NOISE, LONG, SHORT]  (first-barrier classes, calibrated later
-      by temperature scaling exactly as the GRU is), and
+      exactly as the GRU is: ensemble-level vector scaling on validation), and
     - an expected-excursion multiplier in ATR (softplus, so it is >= 0).
 
 Capacity is a choice, not a virtue: the ``large`` preset has millions of
@@ -144,14 +144,14 @@ def n_parameters(model: nn.Module) -> int:
 def fit_dual(x_train, y_train, x_val, y_val, cfg, aux_train=None, aux_val=None):
     """Train with AdamW (L2 decay), a plateau LR schedule and early stopping on
     validation loss; returns the best weights. ``cfg`` is a ``TrainConfig``."""
-    from core.ai.nn_model import _batches, balanced_class_weights, fp_penalised_loss
+    from core.ai.nn_model import _batches, class_weights_for, fp_penalised_loss
 
     torch.manual_seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
     model = build_dual(x_train.shape[2], cfg.preset, cfg.dropout)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=2, min_lr=1e-5)
-    weights = balanced_class_weights(y_train)
+    weights = class_weights_for(y_train, cfg)     # plain CE unless cfg.class_weighting
 
     xt = torch.tensor(x_train, dtype=torch.float32)
     yt = torch.tensor(y_train, dtype=torch.long)

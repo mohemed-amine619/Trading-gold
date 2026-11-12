@@ -9,9 +9,15 @@ Each cycle:
    (everything after its ``trained_through``), capped at ``holdout_bars``;
 3. train a challenger on the bars before the holdout, leaving a gap of one label
    horizon so no training label reaches into it;
-4. score champion and challenger with the SAME function on the SAME holdout;
+4. score champion and challenger with the SAME function on the SAME holdout
+   (``evaluate_artifact``: each model at its own stored threshold, trades
+   counted one position at a time, compared with the naive always-long /
+   always-short baselines on the same bars);
 5. promote the challenger only if ``should_promote`` says it is measurably
-   better; otherwise the champion stays.
+   better: measured edge, lower confidence bound above ``floor`` (never below
+   0), better than the naive baseline, timing skill beyond its direction, and
+   (against a measured champion) more than ``tolerance`` above the champion.
+   Otherwise the champion stays.
 
 A promoted model is written atomically (temp file, then ``os.replace``), the old
 one is kept as ``<file>.prev``, and every cycle appends one line to
@@ -37,30 +43,71 @@ from typing import Callable, Optional
 
 import pandas as pd
 
+from core.ai.nn_features import MIN_TRADES_FOR_EDGE
+
 logger = logging.getLogger(__name__)
+
+
+def _fmt(v) -> str:
+    return "n/a" if v is None else f"{v:+.3f}"
 
 
 def should_promote(champion: Optional[dict], challenger: dict, floor: float = 0.0,
                    tolerance: float = 0.02) -> tuple:
     """Decide whether the challenger replaces the champion.
 
-    Both dicts are ``trade_metrics`` results on the same holdout. An ``edge`` of
-    ``None`` is unmeasured (too few trades), which is never treated as zero.
-    Returns ``(promote, reason)``.
+    Both dicts are ``edge_report`` results on the same holdout, each model at its
+    own stored threshold, trades counted one position at a time. A value of
+    ``None`` (or a missing key) is unmeasured, which is never treated as zero and
+    always refuses. The challenger must clear EVERY gate:
+
+    1. ``edge`` measured (at least ``MIN_TRADES_FOR_EDGE`` non-overlapping trades);
+    2. ``edge_lcb`` (one-sided lower confidence bound) above ``floor``; the floor
+       is never below 0, whatever is passed: "positive with confidence" is not
+       negotiable;
+    3. ``edge`` above ``baseline_edge``, the better of always-long and
+       always-short on the same bars: a model no better than a naive direction
+       is refused;
+    4. ``excess_lcb > 0``: per trade, R minus the naive edge of the direction it
+       took is positive with confidence, so riding a trend is not skill.
+
+    Then, against a measured champion, the existing rule: beat its ``edge`` by
+    more than ``tolerance``. Returns ``(promote, reason)``; the reason is shown
+    in the bot log.
     """
+    floor = max(float(floor), 0.0)
     c_edge = challenger.get("edge")
+    n = challenger.get("trades")
+    thr = challenger.get("threshold")
+    at = f" at threshold {thr:.2f}" if isinstance(thr, (int, float)) else ""
     if c_edge is None:
-        return False, "challenger edge unmeasured (too few holdout trades)"
-    if c_edge <= floor:
-        return False, f"challenger edge {c_edge:+.3f} is not above the floor {floor:+.3f}"
+        return False, (f"challenger edge unmeasured (too few holdout trades: {n if n is not None else 0} "
+                       f"non-overlapping{at}, need {MIN_TRADES_FOR_EDGE})")
+    c_lcb = challenger.get("edge_lcb")
+    if c_lcb is None or c_lcb <= floor:
+        return False, (f"challenger edge {c_edge:+.3f} over {n} trades{at} is not confidently "
+                       f"above the floor {floor:+.3f} (lower bound {_fmt(c_lcb)})")
+    base = challenger.get("baseline_edge")
+    if base is None:
+        return False, (f"challenger edge {c_edge:+.3f}: the naive baseline was not measured "
+                       f"on this holdout, so it cannot be shown to beat it")
+    if c_edge <= base:
+        return False, (f"challenger edge {c_edge:+.3f}{at} is no better than the naive "
+                       f"always-{challenger.get('baseline_direction') or '?'} baseline {base:+.3f}")
+    excess = challenger.get("excess_lcb")
+    if excess is None or excess <= 0:
+        return False, (f"challenger edge {c_edge:+.3f}{at} shows no timing skill beyond its "
+                       f"direction (lower bound of R minus the naive edge {_fmt(excess)})")
+    summary = (f"challenger edge {c_edge:+.3f} (lower bound {c_lcb:+.3f}, {n} trades{at}, "
+               f"naive baseline {base:+.3f})")
     if champion is None:
-        return True, "no champion; challenger is above the floor"
+        return True, f"no champion; {summary} clears the floor {floor:+.3f}"
     h_edge = champion.get("edge")
     if h_edge is None:
-        return True, "champion edge unmeasured on this holdout; challenger is measured and above the floor"
+        return True, f"champion edge unmeasured on this holdout; {summary} clears the floor"
     if c_edge > h_edge + tolerance:
         return True, (f"challenger {c_edge:+.3f} beats champion {h_edge:+.3f} "
-                      f"by more than {tolerance:.3f}")
+                      f"by more than {tolerance:.3f}; {summary}")
     return False, (f"challenger {c_edge:+.3f} does not beat champion {h_edge:+.3f} "
                    f"by {tolerance:.3f}")
 
@@ -109,13 +156,16 @@ class ContinuousTrainer:
 
     def _settings_key(self) -> str:
         """What a cycle's verdict depends on besides the data: the training
-        config and the holdout size. Stable across restarts."""
+        config (any new ``TrainConfig`` field changes it, so a deploy that
+        changes the training recipe retrains at once), the holdout size and the
+        promotion gate (floor, tolerance). Stable across restarts."""
         try:
             from dataclasses import asdict, is_dataclass
             cfg = asdict(self.cfg) if is_dataclass(self.cfg) else dict(vars(self.cfg))
         except Exception:
             cfg = {"repr": repr(self.cfg)}
-        return json.dumps({"cfg": cfg, "holdout_bars": self.holdout_bars},
+        return json.dumps({"cfg": cfg, "holdout_bars": self.holdout_bars,
+                           "floor": self.floor, "tolerance": self.tolerance},
                           sort_keys=True, default=str)
 
     def _read_last_data_end(self) -> Optional[str]:
@@ -176,7 +226,11 @@ class ContinuousTrainer:
         except Exception as exc:
             return _result("error", f"could not fetch bars: {exc!r}")
         if df is None or len(df) < self.min_train_bars + self.cfg.horizon:
-            return _result("skipped", "not enough bars to train")
+            got = 0 if df is None else len(df)
+            return _result("skipped", f"not enough bars to train: got {got}, need "
+                                      f"{self.min_train_bars + self.cfg.horizon} "
+                                      f"(min_train_bars {self.min_train_bars} + horizon "
+                                      f"{self.cfg.horizon})")
 
         fit, evaluate = self._functions()
         champion = self._load_champion()
