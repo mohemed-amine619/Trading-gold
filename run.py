@@ -3617,7 +3617,7 @@ class StandaloneAIBot:
             return 0, best_score, ai_conf, "off-session"
 
         if best_score < self.cfg.get("min_signal_score", 55):
-            return 0, best_score, ai_conf, f"score {best_score:.0f} < threshold"
+            return 0, best_score, ai_conf, f"score {best_score:.1f} < threshold"
 
         # --- Gold (XAUUSD) specific volatility and macro trend protection ---
         sym_upper = str(self.cfg.get("symbol", "")).upper()
@@ -3642,7 +3642,7 @@ class StandaloneAIBot:
             # 2. Gold High-Confluence Minimum Score: Gold demands minimum 58 confluence
             gold_min_score = float(self.cfg.get("gold_min_signal_score", 58.0))
             if best_score < gold_min_score:
-                return 0, best_score, ai_conf, f"gold score {best_score:.0f} < threshold ({gold_min_score:.0f})"
+                return 0, best_score, ai_conf, f"gold score {best_score:.1f} < threshold ({gold_min_score:.1f})"
 
             # 3. Gold AI Confidence Gate: 0.50 is pure noise; Gold requires >= 0.55
             gold_min_conf = float(self.cfg.get("gold_min_ai_conf", 0.55))
