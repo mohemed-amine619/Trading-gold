@@ -96,3 +96,14 @@ def test_retrain_spacing_is_about_a_trading_day_per_timeframe():
 def test_no_model_and_no_history_says_the_trainer_has_not_finished(tmp_path):
     sig = ModelPredictor(str(tmp_path / "m.pt")).predict_signal(_bars())
     assert "no model file" in sig.reason and "not finished a cycle" in sig.reason
+
+
+def test_label_size_and_window_reach_the_trainer():
+    cmd = _cmd({"NN_BARRIER_MULT": "1.0", "NN_HORIZON": "12"})
+    assert cmd[cmd.index("--barrier-mult") + 1] == "1"
+    assert cmd[cmd.index("--horizon") + 1] == "12"
+
+
+def test_label_settings_unset_keep_the_trainer_defaults():
+    cmd = _cmd({})
+    assert "--barrier-mult" not in cmd and "--horizon" not in cmd

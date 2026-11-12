@@ -119,6 +119,8 @@ class HelperSettings:
     nn_threshold: float = 0.0       # NN_MIN_CONFIDENCE; 0 = the trainer's own default
     nn_holdout_bars: int = 0        # NN_TRAINER_HOLDOUT_BARS; 0 = the trainer's default
     nn_min_new_bars: int = 0        # NN_TRAINER_MIN_NEW_BARS; 0 = about one trading day
+    nn_barrier_mult: float = 0.0    # NN_BARRIER_MULT: label move size in ATR; 0 = trainer default (1.5)
+    nn_horizon: int = 0             # NN_HORIZON: label window in bars; 0 = trainer default (24)
     nn_arch: str = "gru"            # "gru" (default) | "dual" (core/ai/deep_nn.py)
     nn_preset: str = "small"        # dual only: small | medium | large
 
@@ -147,6 +149,8 @@ class HelperSettings:
             nn_threshold=_number(env.get("NN_MIN_CONFIDENCE"), 0.0, 0.0),
             nn_holdout_bars=int(_number(env.get("NN_TRAINER_HOLDOUT_BARS"), 0, 0)),
             nn_min_new_bars=int(_number(env.get("NN_TRAINER_MIN_NEW_BARS"), 0, 0)),
+            nn_barrier_mult=_number(env.get("NN_BARRIER_MULT"), 0.0, 0.0),
+            nn_horizon=int(_number(env.get("NN_HORIZON"), 0, 0)),
             nn_arch=(env.get("NN_ARCH") or "gru").strip().lower(),
             nn_preset=(env.get("NN_PRESET") or "small").strip().lower(),
             timeframe=timeframe,
@@ -168,6 +172,14 @@ def nn_command(python: str, root: Path, symbol: str, s: HelperSettings, parent_p
         cmd += ["--threshold", f"{s.nn_threshold:g}"]
     if s.nn_holdout_bars > 0:
         cmd += ["--holdout-bars", str(s.nn_holdout_bars)]
+    # What the network learns to call: a move of NN_BARRIER_MULT x ATR within
+    # NN_HORIZON bars. The defaults (1.5 ATR in 24 bars) label most M5 bars as
+    # "no move", so the network is rarely confident about a direction and the
+    # trainer can never measure an edge. A scalp-sized label fixes that.
+    if s.nn_barrier_mult > 0:
+        cmd += ["--barrier-mult", f"{s.nn_barrier_mult:g}"]
+    if s.nn_horizon > 0:
+        cmd += ["--horizon", str(s.nn_horizon)]
     # New bars needed before retraining. The trainer's own default (300) suits
     # M5 (~1 day); on M15 it meant ~3 trading days between attempts.
     min_new = s.nn_min_new_bars or MIN_NEW_BARS_PER_DAY.get(s.timeframe, 0)
