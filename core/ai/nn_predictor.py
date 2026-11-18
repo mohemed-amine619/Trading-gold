@@ -246,7 +246,8 @@ class ModelPredictor:
         """The confidence a call needs to vote: the artifact's stored threshold
         (where its edge was measured), never below ``min_confidence``; just
         ``min_confidence`` for an artifact that stores none."""
-        if self._stored_threshold is None:
+        self._load()
+        if not self._loaded or self._stored_threshold is None:
             return self.min_confidence
         return max(self._stored_threshold, self.min_confidence)
 

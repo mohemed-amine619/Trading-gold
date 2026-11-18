@@ -182,9 +182,16 @@ class TestArtifactAndPredictor:
         assert loaded["members"][0]["temperature"] == pytest.approx(art["members"][0]["temperature"])
 
     def _predictor(self, path, edge, **kw):
+        """A predictor whose loaded model reports ``edge`` out of sample. A
+        measured edge comes with a passing record (lower bound, naive baseline,
+        timing skill) so these tests reach the prediction path; the gates
+        themselves are covered in test_nn_honest_gate.py."""
         p = ModelPredictor(path, **kw)
         p._load()
         p._oos_edge = edge
+        p._oos = {} if edge is None else {"edge": edge, "edge_lcb": edge,
+                                          "baseline_edge": edge - 1.0, "excess_lcb": edge}
+        p._stored_threshold = 0.0           # vote at min_confidence, as these tests intend
         return p
 
     def test_probabilities_are_a_distribution_and_direction_is_valid(self, trained):

@@ -22,6 +22,8 @@ Classes: ``NOISE`` 0, ``LONG`` 1, ``SHORT`` 2.
 
 from __future__ import annotations
 
+import math
+import numbers
 from dataclasses import dataclass
 from typing import Iterator, Optional, Tuple
 
@@ -36,6 +38,25 @@ N_CLASSES = 3
 # Non-overlapping trades before an out-of-sample edge counts as measured. Lives
 # here (torch-free) so the trainer's gate and the model share one number.
 MIN_TRADES_FOR_EDGE = 30
+# One-sided 95 % lower confidence bound (mean - z*sd/sqrt(n)). Torch-free for the
+# same reason: the trainer's gate re-derives bounds at a stricter z.
+LCB_Z = 1.645
+
+
+def finite_number(value) -> Optional[float]:
+    """``value`` as a float when it is a real, finite number, else ``None``.
+
+    The promotion and vote gates read numbers from files (a corrupted or
+    hand-edited artifact, a history line). A comparison with NaN is always
+    False, so ``nan <= floor`` would let NaN through a "refuse when below"
+    test. Every gate therefore reads its numbers through this, and treats
+    ``None`` (missing, non-numeric, NaN, +-inf, bool) as unmeasured.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
 
 FEATURE_NAMES = (
     "ret1", "ret3", "ret5",

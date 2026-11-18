@@ -107,3 +107,34 @@ def test_label_size_and_window_reach_the_trainer():
 def test_label_settings_unset_keep_the_trainer_defaults():
     cmd = _cmd({})
     assert "--barrier-mult" not in cmd and "--horizon" not in cmd
+
+
+# ── The bot's floor reaches the trainer's promotion gate ─────────────────────
+
+def test_trainer_floor_follows_nn_min_oos_edge():
+    cmd = _cmd({"NN_MIN_OOS_EDGE": "0.05"})
+    assert cmd[cmd.index("--floor") + 1] == "0.05"
+
+
+def test_floor_unset_zero_or_negative_is_not_forwarded():
+    for env in ({}, {"NN_MIN_OOS_EDGE": "0"}, {"NN_MIN_OOS_EDGE": "-1"},
+                {"NN_MIN_OOS_EDGE": "abc"}):
+        assert "--floor" not in _cmd(env), env
+
+
+def test_the_live_settings_forward_threshold_and_floor_together():
+    cmd = _cmd({"NN_MIN_CONFIDENCE": "0.55", "NN_MIN_OOS_EDGE": "0.05",
+                "NN_TRAINER_HOLDOUT_BARS": "6000", "NN_TRAINER_BARS": "30000"})
+    assert cmd[cmd.index("--threshold") + 1] == "0.55"
+    assert cmd[cmd.index("--floor") + 1] == "0.05"
+
+
+def test_before_any_verdict_the_latest_skip_reason_is_shown_verbatim(tmp_path):
+    model = tmp_path / "nn.pt"
+    Path(str(model) + ".history.jsonl").write_text(
+        json.dumps({"action": "skipped", "reason": "not enough bars to train: got 2900, "
+                    "need 1024 (min_train_bars 1000 + horizon 24)"}) + "\n"
+        + json.dumps({"action": "skipped", "reason": "only 4970 bars before the holdout "
+                      "(need 5000)"}) + "\n", encoding="utf-8")
+    reason = ModelPredictor(str(model)).predict_signal(_bars()).reason
+    assert "has not trained yet: only 4970 bars before the holdout (need 5000)" in reason

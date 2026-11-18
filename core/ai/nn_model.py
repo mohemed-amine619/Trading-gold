@@ -68,12 +68,11 @@ from torch import nn
 from core.ai.deep_layout import (
     ARCH_DUAL, ARCH_GRU, build_model_features, feature_names, make_excursion,
 )
-from core.ai.nn_features import (  # noqa: F401  (FEATURE_NAMES/build_features re-exported)
-    FEATURE_NAMES, LONG, MIN_TRADES_FOR_EDGE, N_CLASSES, NOISE, SHORT, FeatureScaler,
+from core.ai.nn_features import (  # noqa: F401  (FEATURE_NAMES/build_features/LCB_Z re-exported)
+    FEATURE_NAMES, LCB_Z, LONG, MIN_TRADES_FOR_EDGE, N_CLASSES, NOISE, SHORT, FeatureScaler,
     build_features, make_labels, make_windows, walk_forward_splits, window_end_indices,
 )
 
-LCB_Z = 1.645                     # one-sided 95 % lower confidence bound
 THRESHOLD_SEARCH_FLOOR = 0.40     # never search below this, whatever the configured minimum
 CAL_KIND_VECTOR = "vector"               # stored map: softmax(scale * log p + bias), per class
 # TrainConfig.calibration values
@@ -411,17 +410,23 @@ def _trades(proba: np.ndarray, y: np.ndarray, threshold, ends: Optional[np.ndarr
     return r, c, n_signals
 
 
-def _summary(r: np.ndarray, min_trades: int, z: float) -> tuple:
-    """``(mean, lower bound)`` of ``r``; ``None`` below ``min_trades`` (and the
-    bound also below 2 values, where a spread does not exist)."""
+def _mean_se(r: np.ndarray, min_trades: int) -> tuple:
+    """``(mean, standard error)`` of ``r``; ``None`` below ``min_trades`` (and
+    the standard error also below 2 values, where a spread does not exist)."""
     n = len(r)
     if n == 0 or n < min_trades:
         return None, None
     mean = float(r.mean())
     if n < 2:
         return mean, None
-    sd = float(r.std(ddof=1))
-    return mean, float(mean - z * sd / math.sqrt(n))
+    return mean, float(r.std(ddof=1)) / math.sqrt(n)
+
+
+def _summary(r: np.ndarray, min_trades: int, z: float) -> tuple:
+    """``(mean, lower bound)`` of ``r``; ``None`` below ``min_trades`` (and the
+    bound also below 2 values, where a spread does not exist)."""
+    mean, se = _mean_se(r, min_trades)
+    return mean, (None if se is None else float(mean - z * se))
 
 
 def trade_metrics(proba: np.ndarray, y: np.ndarray, threshold,
@@ -445,12 +450,13 @@ def trade_metrics(proba: np.ndarray, y: np.ndarray, threshold,
     """
     r, _, n_signals = _trades(proba, y, threshold, ends, horizon)
     n = len(r)
-    edge, lcb = _summary(r, min_trades, z)
+    edge, se = _mean_se(r, min_trades)
+    lcb = None if se is None else float(edge - z * se)
     return {"signals": n_signals, "trades": int(n),
             "coverage": n_signals / max(len(np.asarray(y)), 1),
             "wins": int((r > 0).sum()), "losses": int((r < 0).sum()),
             "precision": float((r > 0).sum() / n) if n else None,
-            "edge": edge, "edge_lcb": lcb}
+            "edge": edge, "edge_lcb": lcb, "edge_se": se, "lcb_z": float(z)}
 
 
 def baseline_metrics(y: np.ndarray, ends: Optional[np.ndarray], horizon: int,
@@ -483,16 +489,19 @@ def edge_report(proba: np.ndarray, y: np.ndarray, threshold, ends: Optional[np.n
     ``excess`` is the mean over the model's trades of (R minus the naive edge
     of the direction that trade took) and ``excess_lcb`` its lower bound: a
     model that only rides the period's drift has ``excess`` ~ 0. All ``None``
-    when either side is unmeasured.
+    when either side is unmeasured. ``edge_se`` / ``excess_se`` are the standard
+    errors behind the bounds (``lcb_z`` is the z they were taken at), so the
+    trainer can re-take a bound at a stricter z.
     """
     m = trade_metrics(proba, y, threshold, min_trades, ends, horizon, z)
     base = baseline_metrics(y, ends, horizon, min_trades, z)
-    excess = excess_lcb = None
+    excess = excess_lcb = excess_se = None
     if m["edge"] is not None and base["baseline_edge"] is not None:
         r, c, _ = _trades(proba, y, threshold, ends, horizon)
         naive = np.where(c == LONG, base["baseline_long_edge"], base["baseline_short_edge"])
-        excess, excess_lcb = _summary(r - naive, min_trades, z)
-    return {**m, **base, "excess": excess, "excess_lcb": excess_lcb}
+        excess, excess_se = _mean_se(r - naive, min_trades)
+        excess_lcb = None if excess_se is None else float(excess - z * excess_se)
+    return {**m, **base, "excess": excess, "excess_lcb": excess_lcb, "excess_se": excess_se}
 
 
 def threshold_grid(cfg) -> np.ndarray:

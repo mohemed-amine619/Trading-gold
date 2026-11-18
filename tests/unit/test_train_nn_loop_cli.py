@@ -107,3 +107,19 @@ def test_a_live_parent_does_not_stop_the_loop(loop, tmp_path, bars, monkeypatch)
 
     args = ["--out", str(tmp_path / "nn.pt"), "--parent-pid", str(os.getpid())] + ARGS
     assert loop.main(args, fetch_bars=fetch, stop=stop) == 0 and len(calls) == 1
+
+
+def test_floor_reaches_the_promotion_gate(loop, tmp_path, bars):
+    import json
+    out = tmp_path / "nn.pt"
+    assert loop.main(["--out", str(out), "--once", "--floor", "0.07"] + ARGS,
+                     fetch_bars=lambda: bars) == 0
+    entry = json.loads((tmp_path / "nn.pt.history.jsonl").read_text().splitlines()[-1])
+    assert json.loads(entry["settings"])["floor"] == 0.07
+
+
+def test_floor_defaults_to_zero(loop, tmp_path, bars):
+    import json
+    loop.main(["--out", str(tmp_path / "nn.pt"), "--once"] + ARGS, fetch_bars=lambda: bars)
+    entry = json.loads((tmp_path / "nn.pt.history.jsonl").read_text().splitlines()[-1])
+    assert json.loads(entry["settings"])["floor"] == 0.0

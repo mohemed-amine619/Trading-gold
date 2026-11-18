@@ -124,9 +124,25 @@ class Fakes:
         # Shaped like evaluate_artifact's edge_report: a measured edge comes with a
         # lower bound, a naive baseline and the timing skill beyond it (all passing
         # here, so these tests exercise the trainer's flow, not the gate itself).
+        # The confirmation stage re-takes the bounds at a stricter z from the
+        # standard errors, so the fake report must carry them too.
         return {"windows": 500, "trades": 40, "coverage": 0.1, "precision": 0.5, "edge": edge,
-                "edge_lcb": edge, "baseline_edge": None if edge is None else -0.2,
-                "excess_lcb": edge, "threshold": 0.6}
+                "edge_lcb": edge, "edge_se": 0.0, "lcb_z": 1.645,
+                "baseline_edge": None if edge is None else -0.2,
+                "excess": edge, "excess_lcb": edge, "excess_se": 0.0,
+                "threshold": 0.6}
+
+
+def save_champion(path, bars, marker=1, edge=0.05):
+    """A confirmed champion, so tests can start from the second stage without
+    first driving a candidate through confirmation."""
+    save_artifact(str(path), {"marker": marker, "edge": edge, "config": {},
+                              "oos": {}, "trained_through": str(bars.index[-1])})
+
+
+def extend(bars, n, seed):
+    return pd.concat([bars, random_walk(n=n, seed=seed).set_axis(
+        pd.date_range(bars.index[-1] + pd.Timedelta(minutes=5), periods=n, freq="5min"))])
 
 
 def make_trainer(tmp_path, bars, fakes, **kw):
@@ -145,47 +161,45 @@ def history(tmp_path):
 class TestTrainerDecisions:
     def test_first_good_model_is_promoted_and_written(self, tmp_path, bars):
         fakes = Fakes()
-        res = make_trainer(tmp_path, bars, fakes).run_once()
+        trainer = make_trainer(tmp_path, bars, fakes)
+        # A passing challenger first goes on probation: no voting model file.
+        assert trainer.run_once()["action"] == "candidate"
+        assert not (tmp_path / "nn.pt").exists()
+        assert (tmp_path / "nn.pt.candidate").exists()
+        trainer.fetch_bars = lambda: extend(bars, 400, 22)
+        res = trainer.run_once()                                 # confirmed on later bars
         assert res["action"] == "promoted"
         saved = load_artifact(str(tmp_path / "nn.pt"))
         assert saved["marker"] == 1
-        assert saved["oos"]["source"] == "holdout" and saved["oos"]["edge"] == 0.10
+        assert saved["oos"]["source"] == "confirmation" and saved["oos"]["edge"] == 0.10
         assert not (tmp_path / "nn.pt.tmp").exists()            # written atomically
-        assert [h["action"] for h in history(tmp_path)] == ["promoted"]
+        assert not (tmp_path / "nn.pt.candidate").exists()
+        assert [h["action"] for h in history(tmp_path)] == ["candidate", "promoted"]
 
     def test_a_better_challenger_replaces_the_champion_and_keeps_a_backup(self, tmp_path, bars):
         fakes = Fakes()
+        save_champion(tmp_path / "nn.pt", bars, marker=0, edge=0.05)
+        fakes.champion_edge, fakes.edge = 0.05, 0.30
         trainer = make_trainer(tmp_path, bars, fakes)
-        trainer.run_once()                                       # champion: marker 1
-        fakes.edge = 0.30
-        # Champion's own holdout score comes from champion_edge, via the "champion" tag.
-        champ = load_artifact(str(tmp_path / "nn.pt"))
-        champ["edge"] = "champion"
-        save_artifact(str(tmp_path / "nn.pt"), champ)
-        fakes.champion_edge = 0.05
-        longer = pd.concat([bars, random_walk(n=400, seed=22).set_axis(
-            pd.date_range(bars.index[-1] + pd.Timedelta(minutes=5), periods=400, freq="5min"))])
-        trainer.fetch_bars = lambda: longer
-        res = trainer.run_once()
+        trainer.fetch_bars = lambda: extend(bars, 400, 22)
+        assert trainer.run_once()["action"] == "candidate"     # screened, not voting
+        trainer.fetch_bars = lambda: extend(bars, 800, 22)
+        res = trainer.run_once()                                 # confirmed later
         assert res["action"] == "promoted"
-        assert load_artifact(str(tmp_path / "nn.pt"))["marker"] == 2
-        assert load_artifact(str(tmp_path / "nn.pt.prev"))["marker"] == 1
+        assert load_artifact(str(tmp_path / "nn.pt"))["marker"] == 1
+        assert load_artifact(str(tmp_path / "nn.pt.prev"))["marker"] == 0
 
     def test_a_challenger_that_is_not_better_enough_is_kept_out(self, tmp_path, bars):
         fakes = Fakes()
-        trainer = make_trainer(tmp_path, bars, fakes)
-        trainer.run_once()
-        champ = load_artifact(str(tmp_path / "nn.pt"))
-        champ["edge"] = "champion"
-        save_artifact(str(tmp_path / "nn.pt"), champ)
+        save_champion(tmp_path / "nn.pt", bars, marker=1, edge=0.10)
         before = (tmp_path / "nn.pt").read_bytes()
         fakes.champion_edge, fakes.edge = 0.10, 0.11             # +0.01 < tolerance 0.02
-        longer = pd.concat([bars, random_walk(n=400, seed=23).set_axis(
-            pd.date_range(bars.index[-1] + pd.Timedelta(minutes=5), periods=400, freq="5min"))])
-        trainer.fetch_bars = lambda: longer
+        trainer = make_trainer(tmp_path, bars, fakes)
+        trainer.fetch_bars = lambda: extend(bars, 400, 23)
         res = trainer.run_once()
         assert res["action"] == "kept"
         assert (tmp_path / "nn.pt").read_bytes() == before
+        assert not (tmp_path / "nn.pt.candidate").exists()
         assert not (tmp_path / "nn.pt.prev").exists()
 
     def test_an_unmeasured_challenger_is_never_written(self, tmp_path, bars):
@@ -225,7 +239,7 @@ class TestTrainerDecisions:
         trainer = make_trainer(tmp_path, bars, fakes)
         assert trainer.run_once()["action"] == "error"
         fakes.fit_error = None
-        assert trainer.run_once()["action"] == "promoted"        # retried, not skipped
+        assert trainer.run_once()["action"] == "candidate"       # retried, not skipped
 
     def test_a_champion_trained_on_nearly_all_the_data_has_no_fair_holdout(self, tmp_path, bars):
         fakes = Fakes()
@@ -238,8 +252,8 @@ class TestTrainerDecisions:
 
     def test_a_fetch_failure_is_reported_and_leaves_the_champion_alone(self, tmp_path, bars):
         fakes = Fakes()
+        save_champion(tmp_path / "nn.pt", bars)
         trainer = make_trainer(tmp_path, bars, fakes)
-        trainer.run_once()
         before = (tmp_path / "nn.pt").read_bytes()
 
         def broken():
@@ -274,34 +288,29 @@ class TestHoldoutDiscipline:
 
     def test_champion_and_challenger_are_scored_on_the_same_bars(self, tmp_path, bars):
         fakes = Fakes()
+        save_champion(tmp_path / "nn.pt", bars)
         trainer = make_trainer(tmp_path, bars, fakes)
-        trainer.run_once()
-        champ = load_artifact(str(tmp_path / "nn.pt"))
-        champ["edge"] = "champion"
-        save_artifact(str(tmp_path / "nn.pt"), champ)
-        longer = pd.concat([bars, random_walk(n=400, seed=24).set_axis(
-            pd.date_range(bars.index[-1] + pd.Timedelta(minutes=5), periods=400, freq="5min"))])
+        longer = extend(bars, 400, 24)
         trainer.fetch_bars = lambda: longer
         fakes.eval_calls.clear()
         trainer.run_once()
-        assert len(fakes.eval_calls) == 2
-        (_, n1, s1), (_, n2, s2) = fakes.eval_calls
-        assert (n1, s1) == (n2, s2)
+        # re-check champion, then screen challenger and champion on one window.
+        assert len(fakes.eval_calls) == 3
+        (_, n1, s1), (_, n2, s2), (_, n3, s3) = fakes.eval_calls
+        assert n1 == n2 == n3 == len(longer)
+        assert (n2, s2) == (n3, s3)
 
     def test_the_holdout_starts_after_the_champions_training_end(self, tmp_path, bars):
         fakes = Fakes()
+        save_champion(tmp_path / "nn.pt", bars)
+        champion = load_artifact(str(tmp_path / "nn.pt"))
+        trained_through = pd.Timestamp(champion["trained_through"])
         trainer = make_trainer(tmp_path, bars, fakes)
-        trainer.run_once()
-        champ = load_artifact(str(tmp_path / "nn.pt"))
-        trained_through = pd.Timestamp(champ["trained_through"])
-        champ["edge"] = "champion"
-        save_artifact(str(tmp_path / "nn.pt"), champ)
-        longer = pd.concat([bars, random_walk(n=400, seed=25).set_axis(
-            pd.date_range(bars.index[-1] + pd.Timedelta(minutes=5), periods=400, freq="5min"))])
+        longer = extend(bars, 400, 25)
         trainer.fetch_bars = lambda: longer
         fakes.eval_calls.clear()
         trainer.run_once()
-        start_row = fakes.eval_calls[0][2]
+        start_row = fakes.eval_calls[1][2]                       # the screen window
         assert longer.index[start_row] > trained_through
 
 
@@ -332,9 +341,12 @@ class TestRealModelEndToEnd:
         trainer = ContinuousTrainer(lambda: bars, str(tmp_path / "nn.pt"), CFG,
                                     holdout_bars=600, min_train_bars=800, interval_s=0.0)
         res = trainer.run_once()
-        assert res["action"] in ("kept", "promoted")
+        assert res["action"] in ("kept", "candidate", "promoted")
         if res["action"] == "kept":
             assert not (tmp_path / "nn.pt").exists()
+        elif res["action"] == "candidate":       # passed the screen but not confirmed yet
+            assert not (tmp_path / "nn.pt").exists()
+            assert (tmp_path / "nn.pt.candidate").exists()
         else:                                    # a noise model may pass by luck; it must be measured
             assert load_artifact(str(tmp_path / "nn.pt"))["oos"]["edge"] > 0
         assert history(tmp_path)[0]["holdout_bars"] == 600

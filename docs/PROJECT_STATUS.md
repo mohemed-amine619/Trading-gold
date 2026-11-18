@@ -30,7 +30,11 @@ customer runs the bot on their own machine with their own MT5 login.
 
 ## 0. TEST BASELINE
 
-**1494 passing, 0 failing** — `.venv/bin/python -m pytest tests/ -q`
+**1626 passing, 2 failing** — `.venv/bin/python -m pytest tests/ -q` (2026-11-12).
+The 2 failures (`test_run_py_wiring.py::TestGetSignalVeto`, the MTF veto "H1 opposes
+SELL" blocks the test signal) already failed on this machine before the NN change
+below, with the local `.env` loaded (it sets `TRADING_PROFILE=scalper`); they are
+not caused by it.
 
 | Area | Tests | Status |
 |---|---|---|
@@ -44,6 +48,7 @@ customer runs the bot on their own machine with their own MT5 login.
 | NN challenger: features, labels, scaler, splits | 26 | Implemented and tested |
 | NN challenger: model, calibration, walk-forward, predictor, trainer CLI | 32 | Implemented and tested (not wired into run.py) |
 | NN continuous trainer: seed ensemble, champion/challenger gate, hot reload, loop script | 47 | Implemented and tested (not wired into run.py) |
+| NN honest gate: ensemble calibration, non-overlapping trades, naive baselines, validation threshold, promotion/vote safety end to end, `--floor` wiring | 55 | Implemented and tested |
 | Diagnostics collector: secret scrubbing, deal pairing, trade/log statistics, findings, zip bundle | 65 | Implemented and tested (MT5 history read is untested against a real terminal) |
 | Helper processes from run.py (NN trainer, diagnostics): supervision, backoff, parent watch | 46 | Implemented and tested |
 | Stop guard: never loosen (live broker stop), step floors, tighten-after knob | 46 | Implemented and tested (replay of the live-log bug) |
@@ -76,6 +81,126 @@ customer runs the bot on their own machine with their own MT5 login.
 
 **No automated test submits a real order.** All broker interaction uses
 `MockMT5Adapter` or an in-memory scripted fake.
+
+---
+
+## 0.000001 NEW — NN TRAINER: WHY NO MODEL WAS EVER PROMOTED, AND THE HONEST GATE
+
+**Symptom.** The live sequence-NN trainer (`scripts/train_nn_loop.py` →
+`core/ai/nn_trainer.py` → `core/ai/nn_model.py`) never promoted a model; every
+cycle logged "kept - challenger edge unmeasured (too few holdout trades)".
+
+**Root cause (reproduced with numbers).** The loss used inverse-frequency class
+weights (NOISE is ~3-4 % of gold M5 labels, so its weight was ~8-12) plus a
+false-positive penalty. That moved an uninformed model's optimum to ~[0.58,
+0.21, 0.21]. Calibration was ONE scalar temperature per member, clipped to
+[0.05, 10]: it cannot remove a class bias, so it pinned at 10.0 and flattened
+every probability to ~1/3. The largest LONG/SHORT probability on the holdout
+was ~0.34-0.38, so there were 0 trades at any threshold, the edge was always
+`None`, and even a strongly predictive synthetic model (68 % hit rate) was
+refused.
+
+**What changed (`core/ai/nn_model.py`, `nn_trainer.py`, `nn_predictor.py`).**
+
+- **Loss:** plain cross-entropy by default (`class_weighting=False`,
+  `fp_penalty=0.0`). Caution belongs in the decision threshold, not the loss.
+  The old loss is still reachable through `TrainConfig`.
+- **Calibration of the ensemble average,** not of each member:
+  `softmax(a * log p + b)` with a shared scale and one bias per class
+  (`calibration="bias"`, default; `"vector"` = one scale per class;
+  `"temperature"` = the old per-member scalar), fitted by NLL on the
+  validation rows only, no clip. Stored as `art["calibration"]`. On synthetic
+  gold-like data the shared scale generalised better than per-class scales
+  (holdout NLL 0.836 vs 0.893 on one series; per-class scales overfit
+  validation).
+- **Honest trade counting:** `trade_metrics` takes trades one position at a
+  time (after a trade on the window ending at bar `e`, signals are ignored
+  until `e + horizon`). It reports `signals` (raw bars) and `trades`
+  (non-overlapping), `edge` (mean R, same +1/-1/0 convention) and `edge_lcb`
+  (mean − 1.645·sd/√n). Both are `None` below 30 non-overlapping trades. The
+  old bar count made a no-skill model look positive (+0.016..+0.042) where one
+  position at a time it was −0.03.
+- **Naive baselines:** `edge_report` adds the always-long and always-short
+  edges on the same bars (`baseline_edge` = the better one) and `excess_lcb`,
+  the lower bound of each trade's R minus the naive edge of its direction
+  (timing skill beyond riding a trend).
+- **Threshold chosen on validation:** the trainer scans
+  `[max(NN_MIN_CONFIDENCE, 0.40), 0.90]` on the validation rows and keeps the
+  threshold with the best `edge_lcb` among those with ≥ 30 trades that beat
+  the validation baseline (otherwise the minimum). It is stored as
+  `art["threshold"]`. `NN_MIN_CONFIDENCE` / `--threshold` is now the MINIMUM.
+  The holdout is never used to choose it.
+- **Promotion (`should_promote`):** measured edge AND `edge_lcb > floor`
+  (floor never below 0) AND `edge > baseline_edge` AND `excess_lcb > 0`; then,
+  against a measured champion, the unchanged `tolerance` rule. A missing
+  value refuses.
+- **Floor plumbing:** `scripts/train_nn_loop.py --floor`, and
+  `core/runtime/helpers.py` forwards `NN_MIN_OOS_EDGE` as `--floor` when it is
+  above 0. The floor and every new `TrainConfig` field are in the trainer's
+  settings key, so the first cycle after this deploy trains immediately.
+- **Predictor:** an artifact from the new trainer (it stores a `threshold`)
+  votes only when its holdout record has `edge ≥ NN_MIN_OOS_EDGE`,
+  `edge_lcb > max(NN_MIN_OOS_EDGE, 0)`, `edge > baseline_edge` and
+  `excess_lcb > 0`, at `max(stored threshold, NN_MIN_CONFIDENCE)`. An artifact
+  saved by the old code loads and predicts exactly as before (per-member
+  temperatures, configured `min_confidence`, edge-only floor). The "no model
+  file" note now shows the latest skip reason verbatim (with its bar counts)
+  until the trainer reaches a first real verdict.
+- **Scaler** is fitted only on the rows that feed the training windows (not
+  the validation rows), in `fit_artifact` and per walk-forward fold.
+- **Dual arch** (`NN_ARCH=dual`) shares all of this; only its loss weights
+  needed the `class_weighting` switch. `core/ai/deep_model.py` /
+  `deep_predictor.py` (a separate pipeline with its own temperature
+  calibration, not used by `run.py` or the trainer) are unchanged.
+
+**Measured end to end (real trainer, real gate, real predictor; tests in
+`tests/unit/test_nn_honest_gate.py`).** Small seeded series, window 8,
+horizon 6, 1 model: a random walk is never promoted (5/5 seeds kept); a
+strongly predictable regime series is promoted (5/5 seeds; seed 1: threshold
+0.69 chosen on validation, 151 non-overlapping holdout trades, edge +0.609,
+lower bound +0.519, naive baseline +0.060) and then votes only at its stored
+threshold; a constant-ATR up-trend (always-long wins, nothing beats it) is
+refused (5/5 seeds). On 3 of those 5 the trend rider's point edge beat the
+naive baseline and its lower bound was positive; only the timing-skill bound
+(`excess_lcb`) refused it, which is why that gate exists.
+
+At the live settings (30000 M5 bars, 6000-bar holdout, window 32, horizon 24,
+GRU, 3 models, `--threshold 0.55`, `--floor 0.05`) on the seeded gold-like
+generator from the diagnosis (GARCH, intraday seasonality, AR(1) drift):
+
+| Series (seed) | Verdict | Threshold | Trades (signal bars) | Edge | Lower bound | Naive baseline | Timing lcb |
+|---|---|---|---|---|---|---|---|
+| drift 0.3 (default) | promoted | 0.72 | 110 (1960) | +0.482 | +0.345 | +0.185 long | +0.256 |
+| drift 0.3 (1) | promoted | 0.79 | 67 (1065) | +0.731 | +0.593 | +0.145 long | +0.559 |
+| drift 0.3 (2) | promoted | 0.87 | 41 (603) | +0.805 | +0.651 | +0.092 short | +0.671 |
+| drift 0.3 (3) | promoted | 0.87 | 39 (590) | +0.641 | +0.436 | +0.012 long | +0.444 |
+| no drift (default) | kept | 0.55 | 64 (388) | +0.078 | −0.127 | +0.016 short | −0.142 |
+| no drift (1) | kept | 0.58 | 61 (443) | −0.344 | −0.540 | +0.012 long | −0.532 |
+| no drift (2) | kept | 0.55 | 57 (489) | −0.211 | −0.423 | +0.064 short | −0.488 |
+| no drift (3) | kept | 0.55 | 29 (74) | unmeasured | — | +0.016 long | — |
+
+With the old code the same drift-0.3 series produced 0 trades and was never
+promoted. One cycle takes ~45-55 s on 4 CPU threads (plain cross-entropy
+early-stops sooner than the old weighted loss).
+
+**Confirmation before a vote (two stages).** One test per cycle is not one test:
+the holdout slides and a 95 % bound re-tested daily would let a no-skill model
+through within months. A challenger that clears the gate above is now saved as
+`<file>.candidate` and does **not** vote. It is promoted only after bars that
+arrived past its screening holdout (once they hold ≥ 30 non-overlapping trades)
+confirm it, with both bounds re-taken at `confirmation_z(k)` for the k-th
+confirmation since the last promotion: alpha-spending,
+alpha_k = 5 % · 6 / (π²k²), summing to 5 % over every confirmation ever made. A
+candidate still unmeasured after `max_confirm_bars` fresh bars is rejected. A
+promoted model keeps its vote only while fresh bars still agree with its record;
+otherwise it is moved to `<file>.retired` and the predictor is neutral again.
+`finite_number()` treats NaN, infinities, bools and non-numeric values as
+unmeasured everywhere in these gates. The verdicts in the table above are the
+screen/gate results; with the current trainer a "promoted" row first becomes a
+candidate and is promoted only at the confirmation on later bars.
+
+**Not established.** No edge on real XAUUSDm data is claimed. The gate is now
+able to say yes; on real data it may still, correctly, say no.
 
 ---
 

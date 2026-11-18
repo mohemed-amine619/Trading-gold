@@ -351,7 +351,8 @@ _add(_p("nn_enabled", "Neural-network vote", "Strategies", "bool", True,
 _add(_p("nn_weight", "Neural-network weight (pts)", "Strategies", "float", 15.0, 0.0, 40.0, 1.0,
         env="NN_WEIGHT"))
 _add(_p("nn_min_confidence", "Neural network: confidence needed", "Strategies", "float", 0.72, 0.5, 0.99, 0.01,
-        env="NN_MIN_CONFIDENCE", percent=True))
+        env="NN_MIN_CONFIDENCE", percent=True,
+        help="Minimum calibrated probability for a network call to vote. The trainer chooses each model's own threshold on validation data, never below this value, and the model votes at the higher of the two. Read by the trainer at bot start-up."))
 _add(_p("nn_entry_required", "Neural network must confirm every entry", "Strategies", "bool", False,
         env="NN_ENTRY_REQUIRED",
         help="Off: the network is a score vote. On: an entry also needs the network to call the same direction at or above its confidence threshold. With no validated model the network is neutral, so turning this on then blocks every trade."))
@@ -360,7 +361,7 @@ _add(_p("nn_size_boost_max", "Neural network: max size boost", "Strategies", "fl
         help="Extra size earned by confidence above the threshold (0.5 = up to 1.5x). Only applied at full size, never while the drawdown ladder or a losing streak has reduced it, and never because a profit target is still far away. 0 disables."))
 _add(_p("nn_min_oos_edge", "Neural network: minimum measured edge", "Strategies", "float", 0.05, 0.0, 1.0, 0.01,
         env="NN_MIN_OOS_EDGE",
-        help="Mean R-multiple of the model's trades on bars it never saw (at least 30 trades). A model below this, or with no measurement, does not vote."))
+        help="Mean R-multiple of the model's trades on bars it never saw (at least 30 non-overlapping trades). For models from the current trainer the lower 95% confidence bound of that edge must exceed this, and the edge must also beat the naive always-long/always-short baseline. A model below this, or with no measurement, does not vote. Also the trainer's promotion floor (read at bot start-up)."))
 _add(_p("scalp_enabled", "Scalping strategies", "Strategies", "bool", True,
         env="SCALP_ENABLED",
         help="Opening-range breakout, VWAP fade, squeeze, RSI(2), momentum burst, EMA pullback and liquidity sweep. Each votes only while its own replay over the recent bars shows a statistically clear edge; with none proven and live the score is exactly as if this were off."))

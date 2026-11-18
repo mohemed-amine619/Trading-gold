@@ -2964,16 +2964,20 @@ class StandaloneAIBot:
                 self._update_status(connected=False)
                 return False
             self.start_balance = acc.balance if acc else 0.0
-            self.daily_start   = acc.equity  if acc else 0.0
+            current_equity     = acc.equity  if acc else 0.0
+            self.daily_start   = current_equity
             self.daily_date    = date.today()
             # A restart must not re-arm today's loss budget or forget a
             # loss-streak cooldown. Same-day state wins; a stale day rolls
             # over naturally on the next _daily_dd_ok() call.
             self._restore_risk_state(self.daily_start)
-            logger.info("Connected: balance=%.2f equity=%.2f",
-                        self.start_balance, self.daily_start)
+            # Log the account's CURRENT equity. _restore_risk_state may have
+            # replaced daily_start with the morning's value, which used to be
+            # printed here as "equity" and looked like an unexplained loss.
+            logger.info("Connected: balance=%.2f equity=%.2f (day started at %.2f)",
+                        self.start_balance, current_equity, self.daily_start)
             self._update_status(connected=True, balance=self.start_balance,
-                                 equity=self.daily_start, start_equity=self.daily_start)
+                                 equity=current_equity, start_equity=self.daily_start)
         else:
             logger.error("MT5 login failed: %s", mt5.last_error())
             self._update_status(connected=False)
