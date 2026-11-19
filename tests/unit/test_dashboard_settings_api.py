@@ -747,14 +747,23 @@ def test_api_llm_test_endpoint(run_and_stub):
     app = run_module.create_app([bot])
     client = TestClient(app, headers=AUTH)
 
-    # Test with embedded provider (always succeeds)
+    # "embedded" no longer names a provider: the built-in rule engine was
+    # removed, so there is nothing to test and the endpoint must say so rather
+    # than report a successful connection to something that does not exist.
     payload = {"provider": "embedded", "url": "http://localhost:1235/v1", "model": "test-model"}
     res = client.post("/api/llm/test", json=payload)
     assert res.status_code == 200
     data = res.json()
-    assert data["ok"] is True
-    assert "latency_ms" in data
+    assert data["ok"] is False
     assert data["provider"] == "embedded"
+    assert "No LLM is configured" in data["error"]
+
+    # An unreachable real provider reports a failure, not a fabricated success.
+    payload = {"provider": "local_endpoint", "url": "http://localhost:59999/v1",
+               "model": "test-model"}
+    res = client.post("/api/llm/test", json=payload)
+    assert res.status_code == 200
+    assert res.json()["ok"] is False
 
 
 

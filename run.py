@@ -242,9 +242,14 @@ _DEAL_REASONS = {0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "sl", 5: "t
 _ANALOG_KEYS = ("analog_window", "analog_k", "analog_horizon", "analog_vote",
                 "analog_min_edge", "analog_min_z", "analog_check_bars", "analog_min_calls")
 
+# Provider names that mean "no LLM". Mirrored from core.ai.provider so the
+# label and the factory agree even when the import below failed.
+_NO_LLM_NAMES = ("", "none", "off", "disabled", "embedded", "builtin", "internal")
+
 try:
     from core.ai.dynamic_sltp import DynamicSLTPReasoner as _DynamicSLTPReasoner
     from core.ai.provider import get_llm_provider as _get_llm_provider
+    from core.ai.provider import NO_PROVIDER_NAMES as _NO_LLM_NAMES
     _DYNAMIC_SLTP_AVAILABLE = True
 except Exception as _sltp_import_error:  # pragma: no cover - defensive
     _DynamicSLTPReasoner = None
@@ -671,7 +676,7 @@ CONFIG = {
     # --- dynamic AI reasoning & SL/TP ---
     "dynamic_sltp_enabled":    os.getenv("DYNAMIC_SLTP_ENABLED", "true").lower() in ("1", "true", "yes"),
     "llm_critic_enabled":      os.getenv("LLM_CRITIC_ENABLED", "true").lower() in ("1", "true", "yes"),
-    "llm_provider":            os.getenv("LLM_PROVIDER", "embedded"),
+    "llm_provider":            os.getenv("LLM_PROVIDER", "none"),
     "local_llm_url":           os.getenv("LOCAL_LLM_URL", "http://localhost:1234/v1"),
     "local_llm_model":         os.getenv("LOCAL_LLM_MODEL", "local-model"),
     "local_llm_api_key":       os.getenv("LOCAL_LLM_API_KEY", "") or os.getenv("LLM_API_KEY", ""),
@@ -2163,11 +2168,15 @@ class AIEnsemble:
 # ---------------------------------------------------------------------------
 
 def _critic_label(cfg: dict) -> str:
-    """Name the critic honestly: with no LLM configured it is the built-in rule
-    engine, and its 'confidence' is a canned number, not a model's."""
-    provider = str(cfg.get("llm_provider", "embedded") or "embedded").strip().lower()
-    if provider in ("", "none", "embedded"):
-        return "built-in rules, not an LLM"
+    """Name the critic honestly.
+
+    With no LLM configured there is no critic at all: the built-in rule engine
+    that used to answer here (with canned confidence numbers) was removed, so
+    the trade stands on its technical confluence alone.
+    """
+    provider = str(cfg.get("llm_provider", "none") or "none").strip().lower()
+    if provider in _NO_LLM_NAMES:
+        return "disabled — not an LLM critic, technical confluence only"
     return f"LLM: {provider}"
 
 
@@ -2758,7 +2767,7 @@ class StandaloneAIBot:
         """Lazy initializer for the DynamicSLTPReasoner engine."""
         if self._sltp_reasoner is None and _DYNAMIC_SLTP_AVAILABLE:
             try:
-                p_name = self.cfg.get("llm_provider", "embedded")
+                p_name = self.cfg.get("llm_provider", "none")
                 b_url = self.cfg.get("local_llm_url", "http://localhost:1234/v1")
                 model_name = self.cfg.get("local_llm_model", "")
                 provider = _get_llm_provider(
@@ -2769,14 +2778,21 @@ class StandaloneAIBot:
                     api_key=self.cfg.get("local_llm_api_key", ""),
                 )
                 self._sltp_reasoner = _DynamicSLTPReasoner(provider=provider, config=self.cfg)
-                logger.info("[%s] Dynamic AI SL/TP Reasoner initialized (provider=%s, url=%s)",
-                            self.cfg.get("symbol", ""), p_name, b_url)
-                if p_name in ("local_endpoint", "local", "lmstudio", "vllm", "openai_compatible"):
+                if provider is None:
+                    # No LLM configured. The reasoner still plans stops and
+                    # targets from structure; it just gets no AI refinement.
+                    logger.info("[%s] Dynamic SL/TP Reasoner initialized with no LLM "
+                                "(provider=%s): structural stops and targets only, "
+                                "no AI opinion.", self.cfg.get("symbol", ""), p_name)
+                else:
+                    logger.info("[%s] Dynamic AI SL/TP Reasoner initialized (provider=%s, url=%s)",
+                                self.cfg.get("symbol", ""), p_name, b_url)
                     try:
                         provider.generate("ping", "Reply with {\"status\":\"ok\"}", json_mode=True)
-                        logger.info("[%s] 🧠 Local LLM connected successfully at %s", self.cfg.get("symbol", ""), b_url)
+                        logger.info("[%s] 🧠 LLM connected successfully at %s", self.cfg.get("symbol", ""), b_url)
                     except Exception as ping_err:
-                        logger.warning("[%s] ⚠️ LLM ping to %s failed: %s (embedded fallback active)",
+                        logger.warning("[%s] ⚠️ LLM ping to %s failed: %s — trades will run on "
+                                       "technical confluence alone until it responds.",
                                        self.cfg.get("symbol", ""), b_url, ping_err)
             except Exception as exc:
                 logger.warning("[%s] Failed to initialize DynamicSLTPReasoner: %r",
@@ -5615,7 +5631,7 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             "profit_giveback_pct": round(float(cfg.get("profit_giveback_pct", 0.45) or 0.45) * 100, 1) if float(cfg.get("profit_giveback_pct", 0.45) or 0.45) <= 1.0 else float(cfg.get("profit_giveback_pct", 45.0)),
             "strict_location_veto": bool(cfg.get("strict_location_veto", True)),
             "llm_critic_enabled": bool(cfg.get("llm_critic_enabled", True)),
-            "llm_provider": str(cfg.get("llm_provider", "embedded")),
+            "llm_provider": str(cfg.get("llm_provider", "none")),
             "local_llm_url": str(cfg.get("local_llm_url", "http://localhost:1234/v1")),
             "local_llm_model": str(cfg.get("local_llm_model", "local-model")),
             "default_manual_policy": cfg.get("default_manual_policy", "observe_only"),
@@ -6187,7 +6203,7 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
         except Exception:
             body = {}
         cfg = bots[0].cfg if bots else CONFIG
-        provider_name = body.get("provider") or cfg.get("llm_provider", "embedded")
+        provider_name = body.get("provider") or cfg.get("llm_provider", "none")
         base_url = body.get("url") or cfg.get("local_llm_url", "http://localhost:1234/v1")
         model = body.get("model") or cfg.get("local_llm_model", "local-model")
         api_key = cfg.get("local_llm_api_key", "")
@@ -6201,6 +6217,14 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
                 api_key=api_key,
                 timeout=4.0
             )
+            if p is None:
+                return {
+                    "ok": False,
+                    "provider": provider_name,
+                    "error": "No LLM is configured. Choose 'local_endpoint' or "
+                             "'openai_compatible' and set the URL/model; there is "
+                             "no built-in engine to test.",
+                }
             test_prompt = "Reply with JSON: {\"status\": \"ok\", \"analyst\": \"ready\"}"
             sys_prompt = "You are an AI Quant Critic. Respond in valid JSON."
             resp = p.generate(test_prompt, sys_prompt, json_mode=True)

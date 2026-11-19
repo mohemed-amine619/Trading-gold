@@ -441,10 +441,12 @@ _add(_p("llm_critic_enabled", "Pre-trade AI critic", "AI", "bool", True,
         env="LLM_CRITIC_ENABLED"))
 _add(_p("dynamic_sltp_enabled", "Dynamic SL/TP planner", "AI", "bool", True,
         env="DYNAMIC_SLTP_ENABLED"))
-_add(_p("llm_provider", "Reasoning provider", "AI", "enum", "embedded",
-        choices=("embedded", "local_endpoint", "openai_compatible"),
+_add(_p("llm_provider", "Reasoning provider", "AI", "enum", "none",
+        choices=("none", "local_endpoint", "openai_compatible"),
         env="LLM_PROVIDER",
-        help="'embedded' is the built-in rule engine. No Ollama, no external server."))
+        help="'none' means no LLM: trades stand on technical confluence alone. "
+             "The old 'embedded' rule engine was removed because its confidence "
+             "numbers were hand-written constants, not measurements."))
 _add(_p("local_llm_url", "Local endpoint URL", "AI", "str", "http://localhost:1234/v1",
         env="LOCAL_LLM_URL"))
 _add(_p("local_llm_model", "Local endpoint model", "AI", "str", "local-model",

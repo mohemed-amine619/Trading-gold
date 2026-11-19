@@ -8,7 +8,9 @@ import logging
 import json
 from pydantic import BaseModel, ValidationError
 
-from core.ai.provider import LLMProvider
+from typing import Optional
+
+from core.ai.provider import LLMProvider, LLMUnavailable
 from core.strategy.base import Signal
 
 logger = logging.getLogger(__name__)
@@ -20,9 +22,17 @@ class AIDecisionSchema(BaseModel):
     risk_assessment: str
 
 class AIEngine:
-    def __init__(self, provider: LLMProvider):
+    def __init__(self, provider: Optional[LLMProvider]):
+        #: ``None`` means no LLM is configured. ``evaluate_signal`` then takes
+        #: its existing "AI unavailable" path, which keeps the technical signal
+        #: with a score haircut rather than inventing a verdict.
         self.provider = provider
-        
+
+    def _generate(self, prompt: str, system_prompt: str) -> str:
+        if self.provider is None:
+            raise LLMUnavailable("no LLM provider configured")
+        return self.provider.generate(prompt, system_prompt, json_mode=True)
+
     def evaluate_signal(self, technical_signal: Signal, market_context: str) -> Signal:
         """
         Takes a technical signal and asks the LLM to validate it.
@@ -52,7 +62,7 @@ class AIEngine:
         )
         
         try:
-            response = self.provider.generate(prompt, system_prompt, json_mode=True)
+            response = self._generate(prompt, system_prompt)
             decision_data = json.loads(response)
             ai_decision = AIDecisionSchema(**decision_data)
             

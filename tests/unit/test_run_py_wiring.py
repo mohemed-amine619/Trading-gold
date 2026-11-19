@@ -404,11 +404,25 @@ class TestDashboardContract:
 
 class TestDynamicAISLTP:
     def test_dynamic_sltp_reasoner_initialization(self, run_and_stub):
+        """The reasoner is built even with no LLM: it plans stops and targets
+        from structure. Only the optional AI refinement is absent."""
         run_module, _ = run_and_stub
         bot = build_bot(run_module)
         reasoner = bot._get_sltp_reasoner()
         assert reasoner is not None
+        # Default config configures no LLM, so there is no provider and the
+        # reasoner must not have invented a stand-in for one.
+        assert reasoner.provider is None
+        assert reasoner.llm_enabled is False
+
+    def test_dynamic_sltp_reasoner_uses_a_configured_llm(self, run_and_stub):
+        """When a real provider is configured it is actually wired in."""
+        run_module, _ = run_and_stub
+        bot = build_bot(run_module, llm_provider="local_endpoint")
+        reasoner = bot._get_sltp_reasoner()
+        assert reasoner is not None
         assert reasoner.provider is not None
+        assert reasoner.llm_enabled is True
 
     def test_dynamic_sltp_entry_logs_reasoning(self, run_and_stub, caplog):
         run_module, stub = run_and_stub

@@ -107,9 +107,16 @@ def test_enum_rejects_unknown_choice():
 
 
 def test_enum_is_case_insensitive():
-    values, errors = validate_payload({"llm_provider": "EMBEDDED"})
+    values, errors = validate_payload({"llm_provider": "NONE"})
     assert not errors
-    assert values["llm_provider"] == "embedded"
+    assert values["llm_provider"] == "none"
+
+
+def test_embedded_is_no_longer_an_offered_provider():
+    """The built-in rule engine was removed; the dashboard must not offer it."""
+    values, errors = validate_payload({"llm_provider": "embedded"})
+    assert values == {}
+    assert any("not one of" in e for e in errors)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

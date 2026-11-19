@@ -22,7 +22,7 @@ from typing import Optional, Dict, Any, Tuple
 import pandas as pd
 import numpy as np
 
-from core.ai.provider import LLMProvider, EmbeddedReasoningProvider
+from core.ai.provider import LLMProvider, LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -341,9 +341,30 @@ class DynamicSLTPReasoner:
     """
 
     def __init__(self, provider: Optional[LLMProvider] = None, config: Optional[Dict[str, Any]] = None):
-        self.provider = provider or EmbeddedReasoningProvider()
+        #: ``None`` means no LLM is configured. The reasoner stays fully usable:
+        #: every path below computes a complete deterministic answer first and
+        #: only *refines* it with the LLM, so no provider simply means no
+        #: refinement. There is no built-in engine to fall back to any more.
+        self.provider = provider
         self.cfg = config or {}
         self.guard = SLTPSafetyGuard()
+
+    @property
+    def llm_enabled(self) -> bool:
+        """True when an actual LLM is wired up."""
+        return self.provider is not None
+
+    def _ask(self, prompt: str, system_prompt: str) -> str:
+        """Ask the LLM, or raise :class:`LLMUnavailable` when there is none.
+
+        Raising (rather than returning a canned verdict) is the point: each
+        caller already wraps this in ``try/except`` and falls back to its
+        deterministic result, so "no LLM" degrades to "no AI opinion" instead
+        of to an invented one.
+        """
+        if self.provider is None:
+            raise LLMUnavailable("no LLM provider configured")
+        return self.provider.generate(prompt, system_prompt, json_mode=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     # 1. Entry SL & TP Calculation
@@ -469,7 +490,7 @@ class DynamicSLTPReasoner:
             "Task: Evaluate entry SL/TP validity with focus on Fibonacci confluence and trap avoidance. Output JSON."
         )
         try:
-            raw_ai = self.provider.generate(prompt, ENTRY_SLTP_SYSTEM_PROMPT, json_mode=True)
+            raw_ai = self._ask(prompt, ENTRY_SLTP_SYSTEM_PROMPT)
             ai_data = json.loads(raw_ai)
             if ai_data.get("reasoning"):
                 reasoning_parts.append(f"AI: {ai_data['reasoning']}")
@@ -757,7 +778,7 @@ class DynamicSLTPReasoner:
             "Output JSON: {\"decision\": \"BUY\"|\"SELL\"|\"PASS\", \"confidence\": float, \"reasoning\": str, \"risk_assessment\": str}"
         )
         try:
-            raw = self.provider.generate(prompt, QUANT_CRITIC_SYSTEM_PROMPT, json_mode=True)
+            raw = self._ask(prompt, QUANT_CRITIC_SYSTEM_PROMPT)
             data = json.loads(raw)
             decision = str(data.get("decision", "PASS")).upper().strip()
             confidence = float(data.get("confidence", 80.0))

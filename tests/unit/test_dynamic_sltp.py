@@ -13,8 +13,9 @@ from core.ai.dynamic_sltp import (
     PositionAdjustmentPlan,
 )
 from core.ai.provider import (
-    EmbeddedReasoningProvider,
     LocalEndpointProvider,
+    MockLLMProvider,
+    OpenAICompatibleProvider,
     get_llm_provider,
 )
 from core.ai.decision import AIEngine
@@ -272,46 +273,54 @@ def test_dynamic_sltp_pinbar_profit_securing():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Embedded AI Provider Tests
+# 3. LLM Provider Tests (no built-in engine)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_embedded_ai_provider_direct():
-    """Embedded provider correctly evaluates signals in pure Python without external servers."""
-    provider = EmbeddedReasoningProvider()
-    engine = AIEngine(provider)
+def test_no_llm_keeps_the_technical_signal_without_inventing_one():
+    """With no provider the AI layer must not fabricate a verdict.
 
-    # Bullish confluence
-    buy_signal = Signal(direction=1, score=75.0, reason="EMA cross + strong ADX", invalidation="")
-    result = engine.evaluate_signal(buy_signal, "Market Context: Uptrend confirmed, ADX 30, discount zone.")
-    assert result.direction == 1
-    assert result.score > 0
-    assert "Embedded AI" in result.reason or "confirms" in result.reason.lower() or "AI" in result.reason
+    It takes the existing "AI unavailable" path: the technical direction
+    survives with a score haircut, and nothing claims to be AI reasoning.
+    """
+    engine = AIEngine(None)
 
-    # Bearish risk warning -> pass/rejection
-    result_rejected = engine.evaluate_signal(buy_signal, "Market Context: Extreme resistance overhead, news incoming.")
-    assert result_rejected.direction == 0
-    assert result_rejected.score == 0.0
+    buy_signal = Signal(direction=1, score=70.0, reason="Tech Buy", invalidation="")
+    result = engine.evaluate_signal(buy_signal, "Market Context: Uptrend confirmed, ADX 30.")
+
+    assert result.direction == 1, "no LLM must not veto a technical signal"
+    assert 0 < result.score <= buy_signal.score, "score is discounted, never boosted"
+    assert "Embedded AI" not in result.reason
 
 
-def test_local_endpoint_fallback():
-    """LocalEndpointProvider falls back to EmbeddedReasoningProvider when server is unreachable."""
-    # Port 59999 has no server running
+def test_no_llm_never_boosts_a_signal():
+    """The removed engine returned confidence 86-92, which boosted the score.
+    Absence must never do that."""
+    engine = AIEngine(None)
+    sig = Signal(direction=1, score=80.0, reason="EMA cross + strong ADX", invalidation="")
+    result = engine.evaluate_signal(sig, "Market Context: discount zone.")
+    assert result.score <= sig.score
+
+
+def test_local_endpoint_unreachable_degrades_safely():
+    """An unreachable LLM must not crash the signal path, and must not be
+    silently replaced by a fabricating stand-in."""
     local_provider = LocalEndpointProvider(base_url="http://localhost:59999/v1", timeout=0.5)
     engine = AIEngine(local_provider)
 
     buy_signal = Signal(direction=1, score=70.0, reason="Tech Buy", invalidation="")
     result = engine.evaluate_signal(buy_signal, "Market context: Normal trading session.")
 
-    # Must NOT crash, falls back safely to embedded AI
     assert result.direction == 1
-    assert result.score > 0
+    assert 0 < result.score <= buy_signal.score
 
 
 def test_get_llm_provider_factory():
-    """Factory correctly resolves embedded, local, and mock providers."""
-    assert isinstance(get_llm_provider("embedded"), EmbeddedReasoningProvider)
-    assert isinstance(get_llm_provider("none"), EmbeddedReasoningProvider)
+    """Factory resolves real providers, and 'no LLM' names to None."""
+    assert get_llm_provider("embedded") is None
+    assert get_llm_provider("none") is None
     assert isinstance(get_llm_provider("local_endpoint"), LocalEndpointProvider)
+    assert isinstance(get_llm_provider("openai_compatible"), OpenAICompatibleProvider)
+    assert isinstance(get_llm_provider("mock"), MockLLMProvider)
 
 
 def test_gold_volatility_stop_floor():
@@ -392,9 +401,14 @@ def test_openai_compatible_provider_mock(monkeypatch):
     assert '"confidence": 88.0' in res
 
 
-def test_openai_compatible_provider_fallback_on_network_error(monkeypatch):
-    """When remote LLM times out or fails, fallback to embedded reasoning safely."""
-    from core.ai.provider import OpenAICompatibleProvider
+def test_openai_compatible_provider_raises_on_network_error(monkeypatch):
+    """A remote LLM that times out must raise, not answer.
+
+    It used to fall back to the built-in rule engine, so a dead network still
+    produced a confident-looking 'decision'. Callers now see LLMUnavailable and
+    take their own deterministic path.
+    """
+    from core.ai.provider import LLMUnavailable, OpenAICompatibleProvider
 
     provider = OpenAICompatibleProvider(base_url="http://invalid-llm-host:1234/v1")
 
@@ -404,10 +418,8 @@ def test_openai_compatible_provider_fallback_on_network_error(monkeypatch):
 
     monkeypatch.setattr(requests, "post", mock_post_fail)
 
-    # Must NOT raise exception; returns embedded fallback
-    res = provider.generate("Evaluate SL/TP", "System Prompt", json_mode=True)
-    assert isinstance(res, str)
-    assert "decision" in res
+    with pytest.raises(LLMUnavailable):
+        provider.generate("Evaluate SL/TP", "System Prompt", json_mode=True)
 
 
 def test_evaluate_trade_candidate_critic_approval(monkeypatch):
