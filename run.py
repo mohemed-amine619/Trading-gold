@@ -147,6 +147,9 @@ try:
         DailyTargetTracker as _DailyTargetTracker, DayState as _DayState,
         LockAction as _LockAction,
     )
+    from core.risk.baseline import (
+        deposit_baseline_adjustment as _deposit_baseline_adjustment,
+    )
     _PHASE1_AVAILABLE = True
 except Exception as _phase1_import_error:  # pragma: no cover - defensive
     _PHASE1_AVAILABLE = False
@@ -161,6 +164,7 @@ except Exception as _phase1_import_error:  # pragma: no cover - defensive
     _DailyTargetTracker = None
     _DayState = None
     _LockAction = None
+    _deposit_baseline_adjustment = None
     # Legacy split: no gap, validation is the tail of the window.
     _purged_split = lambda n, n_val, gap: (slice(0, n - n_val), slice(n - n_val, n))
     print(
@@ -2971,6 +2975,37 @@ class StandaloneAIBot:
             # loss-streak cooldown. Same-day state wins; a stale day rolls
             # over naturally on the next _daily_dd_ok() call.
             self._restore_risk_state(self.daily_start)
+            # A deposit raises equity without a trade. With a flat account and
+            # no trades today it can only be external cash, so rebase the daily
+            # baseline: otherwise equity - daily_start looks like profit and
+            # latches the daily profit target, blocking every entry for the
+            # rest of the day. Never rebase once a trade or position exists —
+            # then profit and a deposit are indistinguishable and moving the
+            # baseline would erase a real result. core/risk/baseline.py is
+            # deliberately conservative about exactly this.
+            if _deposit_baseline_adjustment is not None:
+                try:
+                    open_count = len(mt5.positions_get() or [])
+                except Exception:
+                    open_count = None  # unknown -> fail closed, no rebase
+                adjustment = _deposit_baseline_adjustment(
+                    self.daily_start, current_equity, self.start_balance,
+                    self.trades_today, open_count,
+                )
+                if adjustment > 0:
+                    old_start = self.daily_start
+                    self.daily_start += adjustment
+                    logger.warning(
+                        "[%s] External deposit of %.2f detected on a flat account with "
+                        "no trades today; daily baseline %.2f -> %.2f",
+                        self.cfg.get("symbol"), adjustment, old_start, self.daily_start)
+                    try:
+                        self.notifier.send(
+                            f"💰 {self.cfg.get('symbol')}: external deposit {adjustment:+.2f}; "
+                            f"daily baseline rebased to {self.daily_start:.2f}")
+                    except Exception:
+                        pass
+                    self._persist_risk_state()
             # Log the account's CURRENT equity. _restore_risk_state may have
             # replaced daily_start with the morning's value, which used to be
             # printed here as "equity" and looked like an unexplained loss.

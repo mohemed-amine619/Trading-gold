@@ -30,11 +30,12 @@ customer runs the bot on their own machine with their own MT5 login.
 
 ## 0. TEST BASELINE
 
-**1626 passing, 2 failing** — `.venv/bin/python -m pytest tests/ -q` (2026-11-12).
-The 2 failures (`test_run_py_wiring.py::TestGetSignalVeto`, the MTF veto "H1 opposes
-SELL" blocks the test signal) already failed on this machine before the NN change
-below, with the local `.env` loaded (it sets `TRADING_PROFILE=scalper`); they are
-not caused by it.
+**1644 passing, 3 failing** — `.venv/bin/python -m pytest tests/ -q` (2026-11-19).
+The 3 failures are pre-existing and unrelated to the deposit-baseline work:
+two `test_run_py_wiring.py::TestGetSignalVeto` cases (the MTF veto "H1 opposes
+SELL" blocks the test signal), and `test_env_example_documents_trading_mode`
+because the tracked `.env.example` still defaults `TRADING_MODE=live`. Neither
+is caused by the local `.env` (tests stub `load_dotenv`).
 
 | Area | Tests | Status |
 |---|---|---|
@@ -68,7 +69,17 @@ not caused by it.
 | Manual trades isolation & order execution | 7 | Implemented and tested |
 | **Phase-1 intelligence: purged split, barrier labels, streak brake** | **45** | **Implemented and tested. Barrier labels and streak brake are opt-in** |
 | **Dual-stream NN, location features, daily-target state machine, NN sizing, config sync** | **44** | **Implemented and tested** |
+| **Deposit-aware daily baseline (cash vs profit)** | **19** | **Implemented and tested (`run.py::connect` + pure helper)** |
 | Other unit tests | 56 | Implemented and tested |
+
+**Deposit-aware daily baseline (2026-11-19):** on connect, if the account is
+flat and no trade was made today, an equity/balance rise above the restored
+`daily_start` is treated as an external deposit and the baseline is rebased
+(logged, notified and persisted). With any trade or open position the baseline
+is never moved — profit and cash inflow cannot be told apart from that data,
+so the guard fails closed. This fixes the live case where a deposit was read
+as profit and latched the daily profit target, blocking entries for the day
+(`core/risk/baseline.py`, `run.py::connect`).
 
 **Phase 1 changes (behavior):**
 
