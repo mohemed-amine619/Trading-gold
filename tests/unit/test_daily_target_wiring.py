@@ -116,7 +116,7 @@ def test_new_defaults_match_across_schema_run_and_settings(run_and_stub, monkeyp
         monkeypatch.delenv(var, raising=False)       # the fixture blanks some of these
     s = Settings(_env_file=None)
     for key, want in (("daily_profit_target_money", 70.0), ("profit_lock_buffer_usd", 5.0),
-                      ("daily_lock_action", "close"), ("nn_min_confidence", 0.72)):
+                      ("daily_lock_action", "close"), ("nn_min_confidence", 0.55)):
         assert PARAMS[key].default == want, key
         assert run_module.CONFIG[key] == want, key
         assert getattr(s, key) == want, key

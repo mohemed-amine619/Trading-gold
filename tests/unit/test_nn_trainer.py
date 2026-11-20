@@ -418,8 +418,14 @@ class TestSettingsChangeRetrains:
         from dataclasses import replace
         bars, fakes = random_walk(n=2000, seed=3), Fakes()
         calls = self._kept_once(tmp_path, bars, fakes)
+        # Derive the new value from the current default rather than hardcoding
+        # one. This test previously used the literal 0.55; when 0.55 BECAME the
+        # default, `replace(..., threshold=0.55)` silently stopped changing
+        # anything and the test asserted that an unchanged config retrains.
+        other = round(CFG.threshold + 0.10, 2)
+        assert other != CFG.threshold, "the test must actually change the threshold"
         changed = ContinuousTrainer(lambda: bars, str(tmp_path / "nn.pt"),
-                                    replace(CFG, threshold=0.55), tolerance=0.02,
+                                    replace(CFG, threshold=other), tolerance=0.02,
                                     interval_s=0.0, fit=fakes.fit, evaluate=fakes.evaluate,
                                     holdout_bars=600, min_new_bars=200, min_train_bars=800)
         assert changed.run_once()["action"] != "skipped"

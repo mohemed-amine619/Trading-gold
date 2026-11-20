@@ -95,7 +95,7 @@ class TestBot:
         run_module, _ = run_and_stub
         for key in ("nn_enabled", "nn_weight", "nn_min_confidence", "nn_min_oos_edge"):
             assert key in run_module.CONFIG and key in PARAMS, key
-        assert run_module.CONFIG["nn_min_confidence"] == 0.72
+        assert run_module.CONFIG["nn_min_confidence"] == 0.55
         assert run_module.CONFIG["nn_min_oos_edge"] == 0.05      # stricter than the trainer's floor
 
     def test_the_model_path_matches_where_the_trainer_saves(self, run_and_stub, monkeypatch):
