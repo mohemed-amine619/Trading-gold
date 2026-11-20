@@ -130,7 +130,7 @@ class DeepConfig:
     val_fraction: float = 0.2
     patience: int = 6
     seed: int = 7
-    threshold: float = 0.72
+    threshold: float = 0.55
     n_models: int = 1                       # seeds averaged; more = lower variance
 
     def __post_init__(self) -> None:

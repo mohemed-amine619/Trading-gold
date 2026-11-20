@@ -76,7 +76,7 @@ def main(argv: Optional[List[str]] = None,
     parser.add_argument("--window", type=int, default=32)
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--barrier-mult", type=float, default=1.5)
-    parser.add_argument("--threshold", type=float, default=0.72,
+    parser.add_argument("--threshold", type=float, default=0.55,
                         help="MINIMUM decision threshold: the trainer picks the threshold "
                              "on validation in [max(this, 0.40), 0.90] and stores it in "
                              "the model (run.py forwards NN_MIN_CONFIDENCE)")

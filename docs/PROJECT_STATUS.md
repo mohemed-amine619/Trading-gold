@@ -95,6 +95,102 @@ as profit and latched the daily profit target, blocking entries for the day
 
 ---
 
+## 0.0000001 NEW — THE SEARCH FLOOR THAT STILL BLOCKED EVERY PROMOTION
+
+**Symptom (live, 2026-11-19, all four symbols).** Months after the honest gate
+below was built, the trainer *still* promoted nothing. Every symbol logged:
+
+```
+NN not voting: no model file at ...\nn_<SYMBOL>_M5.pt
+  (trainer's last verdict: kept - challenger edge unmeasured
+   (too few holdout trades: 0 non-overlapping at threshold 0.72, need 30))
+```
+
+Zero trades, on XAUUSDm, EURUSDm, BTCUSDm and ETHUSDm alike.
+
+**Root cause.** `TrainConfig.threshold` is the **minimum** of the validation
+threshold search (`threshold_grid` → `[max(threshold, 0.40), 0.90]`). It
+shipped as **0.72**, but the gate was never validated at 0.72: the
+walk-forward table in §0.000001 was produced with **`--threshold 0.55`**, and
+the search *selected* 0.72/0.79/0.87 on the series that earned them and stayed
+at 0.55–0.58 on the ones that did not. Shipping 0.72 as the floor deleted that
+choice. A calibrated 3-class model on noisy intraday bars tops out near 0.80
+confidence, so the grid `[0.72, 0.90]` sat almost entirely above anything the
+model could reach — every threshold scored 0 non-overlapping trades, `edge`
+came back `None`, and `should_promote` correctly refused an unmeasured model
+forever. The gate was working; it was never given a measurable band.
+
+Measured here with the real `build_features`/`fit_ensemble`/`trade_metrics` on
+a synthetic series (the edge value is meaningless — the *trade count* is the
+point; a real series is noisier and reaches lower):
+
+| Threshold | Signal bars | Non-overlapping trades | Gate (needs 30) |
+|---|---|---|---|
+| 0.50 | 6961 | 298 | measurable |
+| 0.55 | 6119 | 285 | measurable |
+| 0.65 | 4138 | 210 | measurable |
+| **0.72** | 2018 | 125 | measurable *on easy synthetic data only* |
+| 0.80 | 37 | 4 | **unmeasured → never promotes** |
+| 0.90 | 0 | 0 | **unmeasured → never promotes** |
+
+Validation confidence distribution for that model: p50 0.669, p90 0.762,
+p99 0.793, **max 0.821**. A real walk-forward at floor 0.72 returned
+`thresholds=[0.72 × 6 folds], trades=0, edge=None` — reproducing the live log
+exactly.
+
+**Fix.** The default floor is **0.55**, the value the gate was actually
+validated at — in `TrainConfig`, `deep_model.TrainConfig`, the three
+`--threshold` CLI defaults, `ModelPredictor`/`DeepPredictor.min_confidence`,
+`run.py CONFIG`, `core/settings.py` and `core/config/schema.py`.
+
+**This does not weaken the proof gate.** `select_threshold` still requires
+≥ `MIN_TRADES_FOR_EDGE` (30) non-overlapping trades and keeps the threshold
+with the best `edge_lcb`; `should_promote` still demands a measured edge,
+`edge_lcb > floor`, `edge > baseline_edge` and `excess_lcb > 0`; the predictor
+still votes at `max(stored threshold, NN_MIN_CONFIDENCE)` — and the stored
+threshold is the one where the edge was *measured*, so a model that earns 0.79
+still votes at 0.79. Only the measurement is unblocked.
+
+Pinned by `tests/unit/test_nn_honest_gate.py::TestThresholdSelection`
+(`test_the_default_floor_is_reachable_by_a_calibrated_model`,
+`test_an_unreachable_floor_measures_nothing`).
+
+---
+
+## 0.0000002 NEW — THE EMBEDDED REASONING ENGINE IS GONE
+
+`core/ai/provider.py` carried `EmbeddedReasoningProvider`: the default
+`llm_provider` **and** the implicit fallback for both HTTP providers. It
+matched keywords in the prompt (`"bearish divergence" in prompt_lower`) and
+returned hand-written verdicts with hand-written confidence numbers — 86.0,
+91.0, 92.0 — which were logged and scored as AI confidence although nothing
+had been measured. One branch was tuned to a specific test case
+(`# Check if it's the specific test case`). `_critic_label` already admitted
+it in a docstring: *"its 'confidence' is a canned number, not a model's."*
+
+That is precisely the failure mode `AIEnsemble.predict` and the NN gate above
+exist to prevent: a component that votes forever without a measured edge.
+
+**No LLM configured now means no AI opinion.**
+
+- `get_llm_provider` returns `Optional[LLMProvider]` — `None` for `none`,
+  `embedded`, `builtin`, `internal`, `off`, `disabled`, `""` and any unknown
+  name. `embedded` stays an accepted alias so a stale `.env` keeps loading.
+- The HTTP providers raise `LLMUnavailable` instead of silently falling back to
+  something that invents an answer. An *explicitly supplied* fallback is still
+  honoured.
+- `DynamicSLTPReasoner` and `AIEngine` accept `provider=None` and take their
+  existing "AI unavailable" paths: structural SL/TP and technical confluence.
+  Absence never boosts a score (pinned by
+  `test_no_llm_never_boosts_a_signal`).
+- `LLM_PROVIDER` / `llm_provider` default to `none`; the dashboard enum no
+  longer offers `embedded`; `POST /api/llm/test` reports there is nothing to
+  test rather than a successful connection to a thing that does not exist.
+
+`tests/unit/test_embedded_reasoning.py` was deleted with the engine.
+
+---
+
 ## 0.000001 NEW — NN TRAINER: WHY NO MODEL WAS EVER PROMOTED, AND THE HONEST GATE
 
 **Symptom.** The live sequence-NN trainer (`scripts/train_nn_loop.py` →
@@ -525,7 +621,7 @@ liquidity magnets, or dynamic trade adaptation.
 
 | Module | Responsibility |
 |---|---|
-| `core/ai/provider.py` | Self-contained `EmbeddedReasoningProvider` (runs locally in pure Python with zero external model dependencies), plus `LocalEndpointProvider` (OpenAI-compatible). Ollama was removed; unknown provider names resolve to the embedded engine. |
+| `core/ai/provider.py` | `LocalEndpointProvider` and `OpenAICompatibleProvider` (both OpenAI-compatible HTTP), or **no provider at all**. Ollama was removed, and so was `EmbeddedReasoningProvider` — see §0.0b. `get_llm_provider` returns `Optional[LLMProvider]`; unknown names and every "no LLM" alias resolve to `None`. |
 | `core/ai/dynamic_sltp.py` | `DynamicSLTPReasoner`: dynamic entry SL/TP (anchored to structural invalidation swings and liquidity pool magnets) + dynamic position ratcheting. |
 | `SLTPSafetyGuard` | Mathematical safety invariants: **Never Loosen SL** (one-way ratchet), ATR floor/ceiling bounds, broker stops level compliance, half-up tick grid price snapping. |
 | `run.py` & `core/settings.py` | Defensively wired into live bot order submission (`_send_order`) and continuous position management (`_manage_positions`). |
@@ -533,8 +629,8 @@ liquidity magnets, or dynamic trade adaptation.
 ### Guarded Invariants
 
 1. **Never loosen SL**: A BUY stop can only ratchet upward; a SELL stop can only ratchet downward. Any loosening suggestion is rejected immediately.
-2. **Deterministic execution**: The embedded model runs in sub-millisecond time and requires no external servers, API keys, or GPU setup.
-3. **Fail-safe fallback**: If any AI layer is disabled or unavailable, the bot falls back seamlessly to structural stops and standard trailing without interrupting live trading.
+2. **No LLM is the default**: `LLM_PROVIDER=none`. The reasoner plans stops and targets from structure alone; an LLM only ever *refines* a plan that already exists.
+3. **Fail-safe fallback**: If any AI layer is disabled or unavailable, the bot falls back seamlessly to structural stops and standard trailing without interrupting live trading. Unavailable now means *silent*, never a substituted opinion.
 
 ---
 

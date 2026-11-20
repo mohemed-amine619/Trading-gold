@@ -350,7 +350,7 @@ _add(_p("nn_enabled", "Neural-network vote", "Strategies", "bool", True,
         help="Use the saved neural-network model as one more vote. It is absent from the score unless a model exists with a measured positive out-of-sample edge and is confident."))
 _add(_p("nn_weight", "Neural-network weight (pts)", "Strategies", "float", 15.0, 0.0, 40.0, 1.0,
         env="NN_WEIGHT"))
-_add(_p("nn_min_confidence", "Neural network: confidence needed", "Strategies", "float", 0.72, 0.5, 0.99, 0.01,
+_add(_p("nn_min_confidence", "Neural network: confidence needed", "Strategies", "float", 0.55, 0.5, 0.99, 0.01,
         env="NN_MIN_CONFIDENCE", percent=True,
         help="Minimum calibrated probability for a network call to vote. The trainer chooses each model's own threshold on validation data, never below this value, and the model votes at the higher of the two. Read by the trainer at bot start-up."))
 _add(_p("nn_entry_required", "Neural network must confirm every entry", "Strategies", "bool", False,

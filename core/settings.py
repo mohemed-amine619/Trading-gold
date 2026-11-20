@@ -270,7 +270,7 @@ class Settings(BaseSettings):
     # ──────────────────────────────────────────────────────────
     min_signal_score: float = Field(default=55.0, ge=0.0, le=100.0)
     # Neural network vote: same defaults as run.py CONFIG / core/config/schema.py.
-    nn_min_confidence: float = Field(default=0.72, ge=0.5, le=0.99)
+    nn_min_confidence: float = Field(default=0.55, ge=0.5, le=0.99)
     # Daily profit target (account currency; 0 disables). A ceiling, never a
     # reason to size up. Defaults mirror run.py CONFIG.
     daily_profit_target_money: float = Field(default=70.0, ge=0.0)

@@ -103,7 +103,27 @@ class TrainConfig:
     seed: int = 7
     # MINIMUM decision threshold. The trainer searches [max(threshold, 0.40),
     # threshold_max] on validation and stores the chosen one in the artifact.
-    threshold: float = 0.72
+    #
+    # This is a SEARCH FLOOR, not a safety setting, and it used to be 0.72.
+    #
+    # 0.72 never matched the setting this gate was actually validated at. The
+    # walk-forward table in docs/PROJECT_STATUS.md ("Measured end to end") was
+    # produced with ``--threshold 0.55``, and the search then SELECTED 0.72,
+    # 0.79 and 0.87 on the series that deserved them and stayed at 0.55-0.58 on
+    # the ones that did not. Shipping 0.72 as the floor removed that choice:
+    # a calibrated 3-class model on noisy intraday bars tops out near 0.80, so
+    # the grid [0.72, 0.90] sat almost entirely above reachable confidence.
+    # Every threshold scored 0 non-overlapping trades, the edge came back
+    # unmeasured, and no model was ever promoted on any symbol (observed live
+    # on XAUUSDm/EURUSDm/BTCUSDm/ETHUSDm: "too few holdout trades: 0
+    # non-overlapping at threshold 0.72, need 30").
+    #
+    # Restoring 0.55 does NOT weaken the proof gate: select_threshold still
+    # requires MIN_TRADES_FOR_EDGE non-overlapping trades and keeps the
+    # threshold with the best edge lower-confidence-bound, and the predictor
+    # still refuses an artifact whose edge is unmeasured or does not beat the
+    # naive baseline. It only lets the measurement happen at all.
+    threshold: float = 0.55
     threshold_max: float = 0.90
     threshold_step: float = 0.01
     threshold_search: bool = True     # False: use ``threshold`` as is (old behaviour)

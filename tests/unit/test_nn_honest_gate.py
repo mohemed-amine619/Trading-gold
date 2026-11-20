@@ -257,6 +257,38 @@ class TestBaselines:
 # ── 3. the threshold is chosen on validation, never below the minimum ────────
 
 class TestThresholdSelection:
+    def test_the_default_floor_is_reachable_by_a_calibrated_model(self):
+        """Regression: the default search floor must sit below what a calibrated
+        3-class model can actually reach.
+
+        It used to be 0.72. A calibrated model on noisy intraday bars tops out
+        near 0.80, so the whole grid [0.72, 0.90] scored 0 non-overlapping
+        trades, every edge came back "unmeasured", and no model was ever
+        promoted on any symbol. The floor is a search bound, not a safety
+        setting -- the >=MIN_TRADES_FOR_EDGE and positive-lower-bound gates are
+        what keep an unproven model from voting.
+        """
+        default = TrainConfig()
+        assert default.threshold <= 0.60, (
+            "the default search floor must leave room below a calibrated "
+            "model's reachable confidence, or the edge can never be measured"
+        )
+        grid = threshold_grid(default)
+        assert grid[0] <= 0.60
+        # The band a real model actually occupies has to be inside the grid.
+        assert grid.min() < 0.75 < grid.max()
+
+    def test_an_unreachable_floor_measures_nothing(self):
+        """Why the floor matters: with calls capped at 0.70 confidence, a 0.72
+        floor yields no trades at all, which is exactly 'edge unmeasured'."""
+        proba = calls(LONG, 0.70, 200)
+        y = np.full(200, LONG)
+        m = trade_metrics(proba, y, 0.72, ends=np.arange(200), horizon=1)
+        assert m.get("trades", 0) == 0
+        # The same model measured at a reachable floor does produce trades.
+        m2 = trade_metrics(proba, y, 0.50, ends=np.arange(200), horizon=1)
+        assert m2.get("trades", 0) > 0
+
     def test_the_grid_starts_at_the_configured_minimum_and_never_below_040(self):
         assert threshold_grid(TrainConfig(threshold=0.55))[0] == pytest.approx(0.55)
         assert threshold_grid(TrainConfig(threshold=0.10))[0] == pytest.approx(0.40)

@@ -721,7 +721,7 @@ CONFIG = {
     # measured out-of-sample edge of at least nn_min_oos_edge and is confident.
     "nn_enabled":              os.getenv("NN_ENABLED", "true").lower() in ("1", "true", "yes"),
     "nn_weight":               float(os.getenv("NN_WEIGHT", "15")),
-    "nn_min_confidence":       float(os.getenv("NN_MIN_CONFIDENCE", "0.72")),
+    "nn_min_confidence":       float(os.getenv("NN_MIN_CONFIDENCE", "0.55")),
     "nn_min_oos_edge":         float(os.getenv("NN_MIN_OOS_EDGE", "0.05")),
     # Require the network to agree (same direction, >= nn_min_confidence) before
     # ANY entry. Off by default: with no validated model the network is neutral,
@@ -5330,7 +5330,7 @@ class StandaloneAIBot:
                     if nn is None or not _nn_entry_ok(
                             getattr(nn, "direction", 0), direction,
                             getattr(nn, "confidence", 0.0),
-                            float(self.cfg.get("nn_min_confidence", 0.72))):
+                            float(self.cfg.get("nn_min_confidence", 0.55))):
                         allowed, gate_reason = False, "neural network does not confirm this entry"
                 if not allowed:
                     logger.info("[%s] Entry blocked: %s", self.cfg["symbol"], gate_reason)
@@ -5351,7 +5351,7 @@ class StandaloneAIBot:
                         f = _nn_size_factor(
                             getattr(self._last_nn, "direction", 0), direction,
                             getattr(self._last_nn, "confidence", 0.0),
-                            float(self.cfg.get("nn_min_confidence", 0.72)),
+                            float(self.cfg.get("nn_min_confidence", 0.55)),
                             float(self.cfg.get("nn_size_boost_max", 0.0) or 0.0))
                         boosted = _apply_nn_boost(size_mult, f)
                         if boosted != size_mult:
