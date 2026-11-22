@@ -51,6 +51,14 @@ class RiskState:
     week_key: Optional[str] = None
     week_start_equity: float = 0.0
     halted_reason: Optional[str] = None
+    #: ISO timestamp of the newest broker balance operation (deposit or
+    #: withdrawal) already accounted for. Withdrawals lower ``peak_equity``
+    #: exactly once; without this marker every restart would re-apply the same
+    #: withdrawal and walk the peak down to the current equity. ``None`` means
+    #: "not established yet" — the first run records the current time and
+    #: rebases nothing, so an old withdrawal history is never applied
+    #: retroactively.
+    last_balance_deal_ts: Optional[str] = None
 
     # -- helpers ---------------------------------------------------------
     def is_new_day(self, today: Optional[date] = None) -> bool:

@@ -149,6 +149,7 @@ try:
     )
     from core.risk.baseline import (
         deposit_baseline_adjustment as _deposit_baseline_adjustment,
+        withdrawal_peak_reduction as _withdrawal_peak_reduction,
     )
     _PHASE1_AVAILABLE = True
 except Exception as _phase1_import_error:  # pragma: no cover - defensive
@@ -165,6 +166,7 @@ except Exception as _phase1_import_error:  # pragma: no cover - defensive
     _DayState = None
     _LockAction = None
     _deposit_baseline_adjustment = None
+    _withdrawal_peak_reduction = None
     # Legacy split: no gap, validation is the tail of the window.
     _purged_split = lambda n, n_val, gap: (slice(0, n - n_val), slice(n - n_val, n))
     print(
@@ -2666,6 +2668,8 @@ class StandaloneAIBot:
         self._consecutive_losses = 0
         self._cooldown_until: Optional[datetime] = None
         self._peak_equity = 0.0
+        #: Newest broker balance operation already applied to the peak.
+        self._last_balance_deal_ts: Optional[str] = None
         self._week_start_equity = 0.0
         self._week_key: Optional[str] = None
         self._halt_reason: Optional[str] = None
@@ -3022,6 +3026,12 @@ class StandaloneAIBot:
                     except Exception:
                         pass
                     self._persist_risk_state()
+            # The mirror image: cash taken OUT lowers equity without a losing
+            # trade, so the peak-to-trough reference has to follow it down or
+            # the total-drawdown ceiling halts the bot for good. Driven by the
+            # broker's balance operations, never by a fall in equity, because
+            # a loss and a withdrawal look identical from equity alone.
+            self._rebase_peak_after_withdrawal(current_equity)
             # Log the account's CURRENT equity. _restore_risk_state may have
             # replaced daily_start with the morning's value, which used to be
             # printed here as "equity" and looked like an unexplained loss.
@@ -3061,6 +3071,98 @@ class StandaloneAIBot:
             self._risk_state_path = _risk_state_path(base, self.cfg.get("symbol", "unknown"))
         return self._risk_state_path
 
+    def _withdrawals_since_last_check(self) -> tuple:
+        """(withdrawn, newest_ts) from the broker's balance operations.
+
+        A withdrawal shows up as a ``DEAL_TYPE_BALANCE`` deal with a negative
+        profit. That is the only signal that distinguishes cash leaving the
+        account from a losing trade — equity alone cannot, which is why this
+        reads the broker's ledger instead of inferring anything.
+
+        Returns ``(0.0, marker)`` and does **not** look backwards on the first
+        run: without a stored marker the whole deposit/withdrawal history would
+        be applied at once and walk the peak down to today's equity. Returns
+        ``(0.0, None)`` when the history cannot be read, so an unreadable
+        terminal fails closed and leaves the peak alone.
+        """
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        if self._last_balance_deal_ts is None:
+            # First run on this account: establish the marker, rebase nothing.
+            return 0.0, now_iso
+        try:
+            since = datetime.fromisoformat(self._last_balance_deal_ts)
+        except (TypeError, ValueError):
+            return 0.0, now_iso
+
+        try:
+            deals = mt5.history_deals_get(since, datetime.now())
+        except Exception as exc:  # pragma: no cover - broker/terminal dependent
+            logger.debug("balance-deal history unavailable: %s", exc)
+            return 0.0, None
+        if deals is None:
+            return 0.0, None
+
+        balance_type = getattr(mt5, "DEAL_TYPE_BALANCE", 2)
+        withdrawn = 0.0
+        newest = since
+        for d in deals:
+            if getattr(d, "type", None) != balance_type:
+                continue
+            profit = float(getattr(d, "profit", 0.0) or 0.0)
+            stamp = datetime.fromtimestamp(int(getattr(d, "time", 0) or 0))
+            if stamp <= since:
+                continue           # already accounted for
+            newest = max(newest, stamp)
+            if profit < 0:
+                withdrawn += -profit
+        return withdrawn, newest.isoformat(timespec="seconds")
+
+    def _rebase_peak_after_withdrawal(self, equity: float) -> None:
+        """Lower the peak by any cash withdrawn since the last check.
+
+        Without this a withdrawal is read as a peak-to-trough drawdown and
+        hard-halts the bot: taking 1000 out of a 1500 account shows as 66%
+        against a 20% ceiling, and only a manual reset clears it. Only
+        *withdrawals* move the peak, only downward, and never below current
+        equity — a deposit must not manufacture fresh drawdown headroom.
+        """
+        if _withdrawal_peak_reduction is None:
+            return
+        try:
+            withdrawn, newest = self._withdrawals_since_last_check()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("withdrawal check skipped: %s", exc)
+            return
+        if newest is None:
+            return                      # unreadable history: leave the peak alone
+
+        reduction = _withdrawal_peak_reduction(self._peak_equity, equity, withdrawn)
+        self._last_balance_deal_ts = newest
+        if reduction <= 0:
+            self._persist_risk_state()
+            return
+
+        old_peak = self._peak_equity
+        self._peak_equity = max(float(equity or 0.0), old_peak - reduction)
+        # The weekly ceiling is measured the same way and would re-arm on the
+        # next tick otherwise, exactly as reset_risk_halt documents.
+        self._week_key = None
+        if self._halt_reason and "total DD" in str(self._halt_reason):
+            logger.warning("[%s] clearing total-drawdown halt: it was caused by a withdrawal",
+                           self.cfg.get("symbol"))
+            self._halt_reason = None
+        logger.warning(
+            "[%s] External withdrawal of %.2f detected; drawdown peak %.2f -> %.2f "
+            "(equity %.2f). Total-drawdown ceiling re-based on the smaller account.",
+            self.cfg.get("symbol"), withdrawn, old_peak, self._peak_equity, equity)
+        try:
+            self.notifier.send(
+                f"🏦 {self.cfg.get('symbol')}: external withdrawal {withdrawn:.2f}; "
+                f"drawdown peak rebased {old_peak:.2f} -> {self._peak_equity:.2f}")
+        except Exception:
+            pass
+        self._persist_risk_state()
+
     def _persist_risk_state(self) -> None:
         """Mirror the in-memory guard to disk. Never raises."""
         if not _RISK_STATE_AVAILABLE:
@@ -3078,6 +3180,7 @@ class StandaloneAIBot:
                 week_key=self._week_key,
                 week_start_equity=float(self._week_start_equity or 0.0),
                 halted_reason=self._halt_reason,
+                last_balance_deal_ts=self._last_balance_deal_ts,
             )
             _save_risk_state(self._risk_state_file(), state)
         except Exception as exc:  # pragma: no cover - defensive
@@ -3134,6 +3237,7 @@ class StandaloneAIBot:
         self._week_key = st.week_key
         self._week_start_equity = float(st.week_start_equity or 0.0)
         self._halt_reason = st.halted_reason
+        self._last_balance_deal_ts = st.last_balance_deal_ts
 
         logger.info(
             "[%s] risk state restored: daily_start=%.2f trades_today=%d "
