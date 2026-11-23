@@ -248,6 +248,17 @@ _add(_p("profit_lock_activate_atr", "Profit lock activation (ATR)", "Trade Manag
         env="PROFIT_LOCK_ACTIVATE_ATR"))
 _add(_p("profit_giveback_pct", "Close on giveback from peak", "Trade Management", "float", 0.45, 0.05, 1.0, 0.05,
         env="PROFIT_GIVEBACK_PCT", percent=True))
+# Scratch exit: close a trade that never went the predicted way. OFF at 0.
+_add(_p("scratch_after_min", "Scratch: give up after (minutes)", "Trade Management", "float", 0.0, 0.0, 240.0, 1.0,
+        env="SCRATCH_AFTER_MIN",
+        help="0 = off. After this many minutes, a trade whose PEAK profit never "
+             "reached 'Scratch: minimum peak' is closed at market instead of "
+             "riding to the full stop. Judged on peak, never on current profit, "
+             "so a winner in a pullback is never cut."))
+_add(_p("scratch_min_peak_atr", "Scratch: minimum peak (ATR)", "Trade Management", "float", 0.3, 0.0, 3.0, 0.05,
+        env="SCRATCH_MIN_PEAK_ATR",
+        help="The peak profit a trade must have shown to be spared. Measured in "
+             "ATR so it works on any instrument."))
 _add(_p("enable_partial_close", "Scale out in stages", "Trade Management", "bool", True,
         env="ENABLE_PARTIAL_CLOSE"))
 _add(_p("partial_close_trigger_atr", "First scale-out at (ATR)", "Trade Management", "float", 1.2, 0.2, 10.0, 0.1,

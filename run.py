@@ -300,7 +300,13 @@ except Exception as _cfg_import_error:  # pragma: no cover - defensive
 # one rule that must never be lost: a stop may only move toward price.
 try:
     from core.position.sl_guard import is_tighter as _is_tighter, step_ok as _step_ok
+    from core.position.scratch import should_scratch as _should_scratch
 except Exception as _sl_guard_import_error:  # pragma: no cover - defensive
+    # Without the module the scratch exit simply never fires, which is its
+    # default state anyway.
+    def _should_scratch(*_a, **_k):
+        return False
+
     def _is_tighter(is_buy, current_sl, new_sl):
         if new_sl is None or new_sl <= 0:
             return False
@@ -667,6 +673,11 @@ CONFIG = {
     "partial_close3_fraction": float(os.getenv("PARTIAL_CLOSE3_FRACTION", "0.15")),
     "profit_lock_activate_atr": _profile_cfg("PROFIT_LOCK_ACTIVATE_ATR", 1.0, 0.8, scalper_val=0.7),
     "profit_giveback_pct":     _profile_cfg("PROFIT_GIVEBACK_PCT", 0.45, 0.45),
+    # Scratch exit — OFF (0). After this many minutes a trade whose PEAK profit
+    # never reached scratch_min_peak_atr is closed at market instead of riding
+    # to the full stop. See core/position/scratch.py for the evidence.
+    "scratch_after_min":       float(os.getenv("SCRATCH_AFTER_MIN", "0") or 0.0),
+    "scratch_min_peak_atr":    float(os.getenv("SCRATCH_MIN_PEAK_ATR", "0.3") or 0.3),
     "max_spread_atr_ratio":    _profile_cfg("MAX_SPREAD_ATR_RATIO", 0.40, 0.25, scalper_val=0.20),
     
     # --- system ---
@@ -4970,6 +4981,31 @@ class StandaloneAIBot:
             peak = max(self._peak_profit.get(pos.ticket, 0.0), profit_move)
             self._peak_profit[pos.ticket] = peak
             self._track_move(pos, direction, profit_move, atr)
+
+            # --- SCRATCH EXIT (off unless scratch_after_min > 0) ------------
+            # A trade that has had its time and never showed scratch_min_peak_atr
+            # of profit is closed here rather than riding to the full stop.
+            # Judged on PEAK, so a winner inside a pullback is never cut — that
+            # case belongs to profit_giveback_pct and the trailing logic.
+            # Bot trades only: a manual position is the operator's, and the
+            # default ManualPolicy is observe_only.
+            if getattr(pos, "magic", 0) == self.cfg.get("magic_number", 888999):
+                tracked = self._track.get(pos.ticket) or {}
+                first_seen = tracked.get("first_seen")
+                if first_seen is not None and _should_scratch(
+                    peak, atr, time.time() - float(first_seen),
+                    float(self.cfg.get("scratch_after_min", 0.0) or 0.0) * 60.0,
+                    float(self.cfg.get("scratch_min_peak_atr", 0.3) or 0.0),
+                ):
+                    logger.info(
+                        "[%s] SCRATCH ticket=%s: peak %.2f (%.2f ATR) never reached "
+                        "%.2f ATR in %.0f min — closing at market instead of the full stop.",
+                        pos.symbol, pos.ticket, peak, (peak / atr) if atr else 0.0,
+                        float(self.cfg.get("scratch_min_peak_atr", 0.3) or 0.0),
+                        float(self.cfg.get("scratch_after_min", 0.0) or 0.0))
+                    if self._close_position(pos, "scratch: never went the predicted way"):
+                        self._peak_profit.pop(pos.ticket, None)
+                        continue
             # Structure/AI tightening waits until the trade has this much profit
             # (in ATR). 0 = tighten as soon as the trade is in profit.
             tighten_after = float(self.cfg.get("min_profit_before_tighten_atr", 0.0) or 0.0) * atr
