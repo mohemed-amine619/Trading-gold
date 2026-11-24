@@ -192,7 +192,10 @@ def build_bot(run_module, **overrides):
 class TestGetSignalVeto:
     def test_counter_trend_short_is_vetoed_with_the_gate_on(self, strong_short):
         run_module = strong_short
-        bot = build_bot(run_module, location_gate=True)
+        # The MTF gate is off so this test isolates the location veto: the
+        # fixture feeds one uptrend frame as M5/H1/H4, so H1 opposes the SELL
+        # and the MTF gate would return first, before location is consulted.
+        bot = build_bot(run_module, location_gate=True, mtf_confirmation=False)
         frame = run_module._prepare(uptrend_frame(), bot.cfg)
 
         direction, score, conf, reason = bot._get_signal(frame, frame, frame)
@@ -205,7 +208,7 @@ class TestGetSignalVeto:
         """The control. Without this the veto test proves nothing — it would
         pass for any reason the signal returned 0."""
         run_module = strong_short
-        bot = build_bot(run_module, location_gate=False)
+        bot = build_bot(run_module, location_gate=False, mtf_confirmation=False)
         frame = run_module._prepare(uptrend_frame(), bot.cfg)
 
         direction, score, conf, reason = bot._get_signal(frame, frame, frame)
