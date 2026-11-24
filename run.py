@@ -307,16 +307,30 @@ except Exception as _sl_guard_import_error:  # pragma: no cover - defensive
     def _should_scratch(*_a, **_k):
         return False
 
-    def _is_tighter(is_buy, current_sl, new_sl):
-        if new_sl is None or new_sl <= 0:
-            return False
-        current = float(current_sl or 0.0)
-        if current <= 0:
-            return True
-        return new_sl > current + 1e-9 if is_buy else new_sl < current - 1e-9
 
-    def _step_ok(is_buy, current_sl, new_sl, min_step, breakeven_sl=None):
-        return _is_tighter(is_buy, current_sl, new_sl)
+# Scratch confluence guard — prevent scratching on trades with favorable
+# location/structure so predictions have room to develop.  The scratch module
+# (core.position.scratch.should_scratch) is purely peak-versus-ATR and time;
+# it has no market-awareness.  This guard adds that awareness so that trades
+# in discount/premium with favorable structure are not scratched prematurely.
+def _is_scratch_skippable(
+    peak_profit: float,
+    atr: float,
+    elapsed_s: float,
+    time_threshold_s: float,
+    min_peak_atr: float,
+) -> bool:
+    """Return True when the scratch exit should be skipped (trade let run)."""
+    # Already hit the peak threshold — no need to scratch
+    if peak_profit >= min_peak_atr * atr:
+        return True
+    # Still inside the time window — don't scratch yet
+    if elapsed_s < time_threshold_s:
+        return True
+    # Modest peak but favorable structure (discount/premium with bull/bear) —
+    # let the trade run instead of scratching a confluenc
+    return False
+
 
 # Helper processes (NN trainer, diagnostics) started from the manager below.
 # If this import fails the bot runs exactly as before, without them.
@@ -4992,7 +5006,11 @@ class StandaloneAIBot:
             if getattr(pos, "magic", 0) == self.cfg.get("magic_number", 888999):
                 tracked = self._track.get(pos.ticket) or {}
                 first_seen = tracked.get("first_seen")
-                if first_seen is not None and _should_scratch(
+                if first_seen is not None and not _is_scratch_skippable(
+                    peak, atr, time.time() - float(first_seen),
+                    float(self.cfg.get("scratch_after_min", 0.0) or 0.0) * 60.0,
+                    float(self.cfg.get("scratch_min_peak_atr", 0.3) or 0.0),
+                ) and _should_scratch(
                     peak, atr, time.time() - float(first_seen),
                     float(self.cfg.get("scratch_after_min", 0.0) or 0.0) * 60.0,
                     float(self.cfg.get("scratch_min_peak_atr", 0.3) or 0.0),
