@@ -99,8 +99,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--step", type=int, default=150)
     parser.add_argument("--forward", type=int, default=300, help="bars scored after each proof")
     parser.add_argument("--horizon", type=int, default=12)
-    parser.add_argument("--strategies", default=",".join(ALL_STRATEGIES))
+    parser.add_argument("--strategies", default="all",
+                        help="names or groups: all, classic, price_action, smc, ict, indicators, "
+                             "scalping, daytrading, swing, quant, volume, events")
     parser.add_argument("--min-z", type=float, default=2.7)
+    parser.add_argument("--no-auto-z", action="store_true",
+                        help="do NOT raise min-z for the number of strategies tested")
+    parser.add_argument("--utc-offset", type=float, default=0.0,
+                        help="hours the CSV clock is ahead of UTC (session strategies)")
+    parser.add_argument("--check-bars", type=int, default=None,
+                        help="bars replayed to prove a strategy (default: window - 100)")
     parser.add_argument("--open-hour", type=int, default=7, help="opening-range hour in the CSV's clock")
     args = parser.parse_args(argv)
 
@@ -111,23 +119,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     cfg = ScalpConfig(strategies=tuple(s.strip() for s in args.strategies.split(",") if s.strip()),
                       horizon=args.horizon, min_z=args.min_z, open_hour=args.open_hour,
-                      check_bars=min(900, args.window - 100))
+                      check_bars=args.check_bars or (args.window - 100),
+                      auto_z=not args.no_auto_z, server_utc_offset=args.utc_offset)
     results = evaluate(df, cfg, args.window, args.step, args.forward)
 
     def fmt(x):
         return "   n/a" if x is None else f"{x:+.3f}"
 
     first = next(iter(results.values()))
-    print(f"{len(df)} bars, {first['windows']} windows of {args.window}, forward {args.forward} bars")
-    print(f"{'strategy':14}{'proven':>9}{'fwd calls':>11}{'fwd edge':>10}{'always-on edge':>16}   verdict")
+    gate = ScalpEngine(cfg)
+    print(f"{len(df)} bars, {first['windows']} windows of {args.window}, forward {args.forward} bars, "
+          f"{len(gate.names)} strategies at {gate.min_z:.2f} sigma")
+    print(f"{'strategy':24}{'proven':>9}{'fwd calls':>11}{'fwd edge':>10}{'always-on edge':>16}   verdict")
     for name, r in results.items():
         share = f"{(r['proven_share'] or 0) * 100:.0f}%"
-        print(f"{name:14}{share:>9}{r['forward_calls_proven']:>11}{fmt(r['forward_edge_proven']):>10}"
+        print(f"{name:24}{share:>9}{r['forward_calls_proven']:>11}{fmt(r['forward_edge_proven']):>10}"
               f"{fmt(r['forward_edge_always_on']):>16}   {verdict(r)}")
     held = [n for n, r in results.items() if verdict(r) == "edge HELD after proof"]
     print()
     print(f"strategies whose edge held after proof: {', '.join(held) if held else 'none'}")
-    print("Seven strategies were examined, so one looking good by chance is expected. Confirm on "
+    print(f"{len(results)} strategies were examined, so one looking good by chance is expected. Confirm on "
           "other periods and on a demo account before relying on any of them (spread and "
           "commission are not included).")
     return 0

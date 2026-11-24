@@ -174,6 +174,17 @@ except Exception as _phase1_import_error:  # pragma: no cover - defensive
         f"using legacy label, split and sizing."
     )
 
+# Martingale / anti-martingale / Kelly sizing and grid / DCA adds. OFF by default.
+try:
+    from core.risk.progression import (
+        progression_multiplier as _progression_multiplier, grid_add as _grid_add,
+        total_risk_if_stopped as _total_risk_if_stopped,
+    )
+except Exception:  # pragma: no cover - defensive
+    _progression_multiplier = None
+    _grid_add = None
+    _total_risk_if_stopped = None
+
 # "History repeats" strategy. If the import fails the bot scores exactly as it
 # did before: an absent strategy takes no share of the score budget.
 try:
@@ -210,7 +221,9 @@ _STRATEGY_FORM_KEYS = frozenset({"trend_enabled", "trend_fast_ma", "trend_slow_m
                                  "trend_min_score", "mr_enabled", "mr_rsi"})
 
 _SCALP_KEYS = ("scalp_strategies", "scalp_horizon", "scalp_check_bars", "scalp_min_calls",
-               "scalp_min_edge", "scalp_min_z", "scalp_valid_bars", "scalp_open_hour")
+               "scalp_min_edge", "scalp_min_z", "scalp_valid_bars", "scalp_open_hour",
+               "scalp_auto_z", "scalp_server_utc_offset", "scalp_walkforward_folds",
+               "scalp_regime_filter")
 
 # Pause on one direction after a losing trade. Without the import the bot trades
 # as before (no pause).
@@ -758,8 +771,11 @@ CONFIG = {
     "nn_size_boost_max":       float(os.getenv("NN_SIZE_BOOST_MAX", "0.5")),
     "scalp_enabled":           os.getenv("SCALP_ENABLED", "true").lower() in ("1", "true", "yes"),
     "scalp_weight":            float(os.getenv("SCALP_WEIGHT", "15")),
-    "scalp_strategies":        os.getenv("SCALP_STRATEGIES",
-                                         "orb,vwap_fade,squeeze,rsi2,burst,ema_pullback,sweep,breakout,pinbar,macd_cross,stoch_cross,inside_break"),
+    # "all" = the full catalogue (core/strategy/library: price action, SMC/ICT,
+    # sessions, indicators, patterns, volume proxies, news) + the original twelve.
+    # Group tokens: classic, price_action, smc, ict, indicators, scalping,
+    # daytrading, swing, quant, volume, events. Each still votes only once proven.
+    "scalp_strategies":        os.getenv("SCALP_STRATEGIES", "all"),
     "scalp_horizon":           int(os.getenv("SCALP_HORIZON", "12")),
     "scalp_check_bars":        int(os.getenv("SCALP_CHECK_BARS", "900")),
     "scalp_min_calls":         int(os.getenv("SCALP_MIN_CALLS", "15")),
@@ -768,6 +784,28 @@ CONFIG = {
     "scalp_valid_bars":        int(os.getenv("SCALP_VALID_BARS", "2")),
     "scalp_walkforward_folds":  int(os.getenv("SCALP_WALKFORWARD_FOLDS", "1")),
     "scalp_open_hour":         int(os.getenv("SCALP_OPEN_HOUR", "7")),
+    # Raise the significance bar with the number of strategies tested at once
+    # (Bonferroni): ~3.5 sigma for the full catalogue instead of 2.7 for seven.
+    "scalp_auto_z":            os.getenv("SCALP_AUTO_Z", "true").lower() in ("1", "true", "yes"),
+    # Hours the broker/data clock is ahead of UTC, for the New York session
+    # strategies (ICT kill zones, opens, macros). Exness server time = UTC = 0.
+    "scalp_server_utc_offset": float(os.getenv("SCALP_SERVER_UTC_OFFSET", "0")),
+    # ── position-size progressions and adds (core/risk/progression.py) ──
+    # OFF by default. off | martingale | anti_martingale | kelly
+    "sizing_progression":      os.getenv("SIZING_PROGRESSION", "off").strip().lower(),
+    "progression_factor":      float(os.getenv("PROGRESSION_FACTOR", "2.0")),
+    "progression_max_steps":   int(os.getenv("PROGRESSION_MAX_STEPS", "3")),
+    "progression_max_mult":    float(os.getenv("PROGRESSION_MAX_MULT", "4.0")),
+    "kelly_fraction":          float(os.getenv("KELLY_FRACTION", "0.25")),
+    "kelly_min_trades":        int(os.getenv("KELLY_MIN_TRADES", "30")),
+    # off | grid | dca. Adds share the first position's stop; never unprotected.
+    "grid_mode":               os.getenv("GRID_MODE", "off").strip().lower(),
+    "grid_spacing_atr":        float(os.getenv("GRID_SPACING_ATR", "1.0")),
+    "grid_max_levels":         int(os.getenv("GRID_MAX_LEVELS", "3")),
+    "dca_scale":               float(os.getenv("DCA_SCALE", "1.5")),
+    # Refuse an add if ALL legs stopped out together would lose more than this
+    # fraction of equity.
+    "grid_max_total_risk":     float(os.getenv("GRID_MAX_TOTAL_RISK", "0.03")),
     "fib_zone_low":            float(os.getenv("FIB_ZONE_LOW", "0.382")),
     "fib_zone_high":           float(os.getenv("FIB_ZONE_HIGH", "0.786")),
     "fib_extension_target":    float(os.getenv("FIB_EXTENSION_TARGET", "1.618")),
@@ -2871,6 +2909,90 @@ class StandaloneAIBot:
             pnls = list(self._recent_pnls)
         return _streak_multiplier(pnls)
 
+    def _progression_size_factor(self) -> tuple:
+        """(multiplier, reason) from SIZING_PROGRESSION. (1.0, "") when off."""
+        mode = str(self.cfg.get("sizing_progression", "off") or "off").lower()
+        if mode == "off" or _progression_multiplier is None:
+            return 1.0, ""
+        with self._status_lock:
+            pnls = list(self._recent_pnls)
+        try:
+            return _progression_multiplier(
+                mode, pnls,
+                factor=float(self.cfg.get("progression_factor", 2.0)),
+                max_steps=int(self.cfg.get("progression_max_steps", 3)),
+                max_mult=float(self.cfg.get("progression_max_mult", 4.0)),
+                risk_per_trade=float(self.cfg.get("risk_per_trade", 0.01)),
+                kelly_fraction_=float(self.cfg.get("kelly_fraction", 0.25)),
+                kelly_min_trades=int(self.cfg.get("kelly_min_trades", 30)))
+        except Exception as exc:                     # a bad setting never sizes UP
+            logger.warning("Size progression skipped: %r", exc)
+            return 1.0, ""
+
+    def _maybe_grid_add(self, direction: int, equity: float, m15p, ai_conf: float) -> bool:
+        """Grid / DCA: add one position to an open trade that has moved against it.
+
+        Every add uses the FIRST position's stop-loss and take-profit, so nothing
+        is ever opened without a stop and no stop is widened. Refused when the
+        positions on this symbol are not all on the signal's side, when the
+        overall position cap or the daily gates say no, or when all legs stopped
+        out together would lose more than ``grid_max_total_risk`` of equity.
+        """
+        if _grid_add is None:
+            return False
+        try:
+            bot_magic = self.cfg.get("magic_number", 888999)
+            sym = self.cfg["symbol"]
+            legs = [p for p in self._open_positions()
+                    if getattr(p, "magic", 0) == bot_magic and getattr(p, "symbol", sym) == sym]
+            if not legs:
+                return False
+            want = 0 if direction == 1 else 1             # POSITION_TYPE_BUY / _SELL
+            if any(int(getattr(p, "type", -1)) != want for p in legs):
+                return False
+            if self._count_positions() >= self.cfg.get("max_open_pos", 3):
+                return False
+            if not self._trades_today_ok():
+                return False
+            allowed, _, gate_reason = self._entry_gate(equity)
+            if not allowed:
+                logger.info("[%s] Grid add blocked: %s", sym, gate_reason)
+                return False
+            first = min(legs, key=lambda p: (getattr(p, "time", 0), getattr(p, "ticket", 0)))
+            tick = mt5.symbol_info_tick(sym)
+            info = mt5.symbol_info(sym)
+            if tick is None or info is None:
+                return False
+            price = float(tick.ask if direction == 1 else tick.bid)
+            atr = float(m15p.iloc[-1].get("atr", 0.0) or 0.0)
+            plan = _grid_add(direction, float(first.price_open), float(getattr(first, "sl", 0.0) or 0.0),
+                             float(getattr(first, "tp", 0.0) or 0.0), price, atr, len(legs),
+                             mode=str(self.cfg.get("grid_mode", "off")),
+                             spacing_atr=float(self.cfg.get("grid_spacing_atr", 1.0)),
+                             max_levels=int(self.cfg.get("grid_max_levels", 3)),
+                             dca_scale=float(self.cfg.get("dca_scale", 1.5)))
+            if not plan.allowed:
+                return False
+            base_vol = float(first.volume)
+            step = float(getattr(info, "volume_step", 0.01) or 0.01)
+            vol = max(float(info.volume_min),
+                      min(float(info.volume_max), math.floor(base_vol * plan.size_mult / step) * step))
+            ppl = float(info.trade_tick_value) / max(float(info.trade_tick_size), 1e-12)
+            all_legs = [(float(p.price_open), float(p.volume)) for p in legs] + [(price, vol)]
+            risk = _total_risk_if_stopped(direction, plan.stop, all_legs, ppl)
+            cap = equity * float(self.cfg.get("grid_max_total_risk", 0.03))
+            if risk > cap:
+                logger.info("[%s] Grid add refused: %.2f at risk if the shared stop is hit "
+                            "> cap %.2f", sym, risk, cap)
+                return False
+            logger.warning("[%s] %s, vol=%.2f, shared SL=%.5f, total at risk %.2f",
+                           sym, plan.reason, vol, plan.stop, risk)
+            return self._send_order(direction, equity, m15p, ai_conf,
+                                    fixed_volume=vol, shared_sl=plan.stop, shared_tp=plan.target)
+        except Exception as exc:
+            logger.warning("Grid add skipped: %r", exc)
+            return False
+
     def _record_trade_result(self, pnl: float, reason: str = "") -> None:
         with self._status_lock:
             self._recent_pnls.append(float(pnl))
@@ -3636,6 +3758,18 @@ class StandaloneAIBot:
                 logger.warning("[%s] NN vote failed and is skipped: %r", self.cfg.get("symbol"), exc)
             return None
 
+    def _scalp_events(self) -> tuple:
+        """((utc datetime, title), ...) from the bot's news calendar, for the news
+        strategies. Empty when the calendar is off or fails: those strategies then
+        abstain (NFP is still generated by rule)."""
+        try:
+            cal = self._news_calendar()
+            if cal is None:
+                return ()
+            return tuple((e.when, e.title) for e in cal.events())
+        except Exception:
+            return ()
+
     def _get_scalp(self, m15p):
         """Live votes from the scalping strategies that have proven themselves, or
         ``None`` when the component is off or failed. Never raises into the signal
@@ -3643,7 +3777,8 @@ class StandaloneAIBot:
         if not self.cfg.get("scalp_enabled", True) or _ScalpEngine is None:
             return None
         try:
-            key = tuple(self.cfg.get(k) for k in _SCALP_KEYS)
+            events = self._scalp_events()
+            key = tuple(self.cfg.get(k) for k in _SCALP_KEYS) + (events,)
             if self._scalp_key != key:
                 names = tuple(s.strip() for s in str(self.cfg["scalp_strategies"]).split(",")
                               if s.strip())
@@ -3667,8 +3802,14 @@ class StandaloneAIBot:
                     min_edge=float(self.cfg["scalp_min_edge"]), min_z=float(self.cfg["scalp_min_z"]),
                     valid_bars=int(self.cfg["scalp_valid_bars"]),
                     open_hour=int(self.cfg["scalp_open_hour"]),
-                    walkforward_folds=int(self.cfg.get("scalp_walkforward_folds", 1))))
+                    walkforward_folds=int(self.cfg.get("scalp_walkforward_folds", 1)),
+                    auto_z=bool(self.cfg.get("scalp_auto_z", True)),
+                    server_utc_offset=float(self.cfg.get("scalp_server_utc_offset", 0.0) or 0.0),
+                    events=events))
                 self._scalp_key = key
+                logger.info("[%s] Strategy library: %d strategies under test, significance %.2f sigma",
+                            self.cfg.get("symbol"), len(self._scalp_engine.names),
+                            self._scalp_engine.min_z)
             result = self._scalp_engine.evaluate(m15p)
             # Persist the proof report for offline review
             try:
@@ -4109,7 +4250,9 @@ class StandaloneAIBot:
 
     # --------------------------------------------------------------
     def _send_order(self, direction: int, equity: float, m15p: pd.DataFrame,
-                    ai_conf: float = 0.0, size_multiplier: float = 1.0) -> bool:
+                    ai_conf: float = 0.0, size_multiplier: float = 1.0,
+                    fixed_volume: Optional[float] = None, shared_sl: Optional[float] = None,
+                    shared_tp: Optional[float] = None) -> bool:
         """`m15p` is the already-prepared frame from the main loop —
         avoids an extra MT5 fetch + full indicator recompute per entry.
 
@@ -4162,7 +4305,17 @@ class StandaloneAIBot:
         sltp_done = False
 
         # --- DYNAMIC AI REASONING FOR ENTRY SL/TP ---
-        if self.cfg.get("dynamic_sltp_enabled", True) and self.cfg.get("location_stop", True) and _DYNAMIC_SLTP_AVAILABLE and atr > 0:
+        if shared_sl:
+            # Grid / DCA add: reuse the first position's stop and target as they are.
+            sl = float(shared_sl)
+            tp = float(shared_tp) if shared_tp else (price + direction * abs(price - sl)
+                                                     * self.cfg["tp_rr_ratio"])
+            sl_dist = abs(price - sl)
+            stop_source, stop_note, sltp_done = "shared", "grid/DCA add shares the first stop", True
+            if (price - sl) * direction <= 0:
+                logger.info("[%s] Grid add skipped: price is through the shared stop", sym)
+                return False
+        elif self.cfg.get("dynamic_sltp_enabled", True) and self.cfg.get("location_stop", True) and _DYNAMIC_SLTP_AVAILABLE and atr > 0:
             reasoner = self._get_sltp_reasoner()
             if reasoner is not None:
                 location = self._location_for(m15p) if _LOCATION_AVAILABLE else None
@@ -4225,19 +4378,25 @@ class StandaloneAIBot:
             logger.info("[%s] Stop via %s: %s", self.cfg["symbol"], stop_source, stop_note)
 
         min_d = info.trade_stops_level * info.point
+        if shared_sl and min_d > 0 and abs(price - sl) < min_d:
+            logger.info("[%s] Grid add skipped: too close to the shared stop for the broker", sym)
+            return False
         if min_d > 0:
             if abs(price - sl) < min_d:
                 sl = price - min_d if direction == 1 else price + min_d
             if abs(tp - price) < min_d:
                 tp = price + min_d if direction == 1 else price - min_d
 
-        volume = _size_lot(
-            equity, abs(price - sl),
-            info.trade_tick_size, info.trade_tick_value,
-            info.volume_min, info.volume_max, info.volume_step,
-            self.cfg, adx=adx, ai_conf=ai_conf,
-            size_multiplier=size_multiplier,
-        )
+        if fixed_volume is not None:
+            volume = float(fixed_volume)
+        else:
+            volume = _size_lot(
+                equity, abs(price - sl),
+                info.trade_tick_size, info.trade_tick_value,
+                info.volume_min, info.volume_max, info.volume_step,
+                self.cfg, adx=adx, ai_conf=ai_conf,
+                size_multiplier=size_multiplier,
+            )
         if volume is None:
             logger.info("[%s] Entry skipped: cannot size within the risk budget", sym)
             return False
@@ -5478,6 +5637,9 @@ class StandaloneAIBot:
             if direction != 0 and sym_open >= sym_cap:
                 logger.info("[%s] Entry skipped: %d/%d position(s) already open on %s",
                             self.cfg["symbol"], sym_open, sym_cap, self.cfg["symbol"])
+            if (direction != 0 and sym_open >= 1
+                    and str(self.cfg.get("grid_mode", "off")).lower() in ("grid", "dca")):
+                self._maybe_grid_add(direction, equity, m15p, ai_conf)
 
             if (direction != 0 and
                     self._entry_slots_ok() and
@@ -5505,6 +5667,11 @@ class StandaloneAIBot:
                         size_mult *= streak
                         logger.info("[%s] Losing streak: size x%.2f",
                                     self.cfg["symbol"], size_mult)
+                    prog, prog_why = self._progression_size_factor()
+                    if prog != 1.0:
+                        size_mult *= prog
+                        logger.warning("[%s] Size progression (%s): x%.2f -> size x%.2f",
+                                       self.cfg["symbol"], prog_why, prog, size_mult)
                     if _nn_size_factor is not None and self._last_nn is not None:
                         f = _nn_size_factor(
                             getattr(self._last_nn, "direction", 0), direction,

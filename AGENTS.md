@@ -84,7 +84,28 @@ Treat these as blockers for any live-trading work, not trivia:
    (checked at `core/risk/engine.py:327`), but that engine is only constructed
    by `core/trading/orchestrator.py`, which is **not an entrypoint**. Do not
    assume the modular kill switch stops the live bot.
-5. **No martingale, grid, or automatic stop-widening.** Preserve this. `core/position/trailing.py` enforces "never loosen SL" — `tests/test_trailing.py::test_never_loosen_sl` guards it.
+5. **No automatic stop-widening.** Preserve this. `core/position/trailing.py` enforces "never loosen SL" — `tests/test_trailing.py::test_never_loosen_sl` guards it.
+   **Martingale / anti-martingale / Kelly sizing and grid / DCA adds now exist**
+   (`core/risk/progression.py`), added at the owner's explicit request on
+   2026-11-24, overriding the earlier "no martingale, no grid" rule. They are
+   **OFF by default** (`SIZING_PROGRESSION=off`, `GRID_MODE=off`) and must stay so.
+   Hard limits that must not be removed: progression steps and an absolute
+   multiplier cap; every grid/DCA add reuses the FIRST position's stop-loss (never
+   an add without a stop, never a wider stop); an add is refused if all legs
+   stopped out together would exceed `GRID_MAX_TOTAL_RISK` of equity.
+   `tests/unit/test_progression.py` pins these.
+
+## Strategy library
+
+`core/strategy/library/` holds ~106 causal signal generators (price action,
+SMC/ICT, sessions, indicators, chart patterns, tick-volume proxies, news) that the
+scalping engine (`core/strategy/scalp.py`) runs through its proof gate next to the
+original twelve. `SCALP_STRATEGIES=all` is the default; `SCALP_AUTO_Z=true` raises
+the significance bar with the number of strategies (Bonferroni). Every name from
+the brief is in `CATALOGUE` with its kind (signal / sizing / existing /
+unavailable) — see `docs/STRATEGY_LIBRARY.md`. Any new generator must pass the
+look-ahead tests in `tests/unit/test_strategy_library.py` (they run on every name
+in `LIBRARY_STRATEGIES` automatically).
 
 ## Multi-asset
 

@@ -161,6 +161,33 @@ _add(_p("loss_streak_cooldown_minutes", "Cooldown after loss streak (min)", "Ris
 _add(_p("streak_sizing", "Halve size after a losing streak", "Risk", "bool", False,
         env="STREAK_SIZING",
         help="After two consecutive losses, new entries are sized at half. Only ever reduces size."))
+_add(_p("sizing_progression", "Size progression", "Risk", "enum", "off",
+        choices=("off", "martingale", "anti_martingale", "kelly"), env="SIZING_PROGRESSION",
+        safe_live=False, dangerous=True,
+        help="martingale: multiply size by the factor after each consecutive loss (DANGEROUS: losses compound). anti_martingale: after each consecutive win. kelly: fractional Kelly from the closed-trade record. Always capped by max steps and max multiplier."))
+_add(_p("progression_factor", "Progression factor", "Risk", "float", 2.0, 1.0, 3.0, 0.1,
+        env="PROGRESSION_FACTOR", safe_live=False, dangerous=True))
+_add(_p("progression_max_steps", "Progression max steps", "Risk", "int", 3, 0, 6, 1,
+        env="PROGRESSION_MAX_STEPS", safe_live=False, dangerous=True))
+_add(_p("progression_max_mult", "Progression max multiplier", "Risk", "float", 4.0, 1.0, 8.0, 0.5,
+        env="PROGRESSION_MAX_MULT", safe_live=False, dangerous=True,
+        help="Absolute ceiling on the size multiplier from any progression."))
+_add(_p("kelly_fraction", "Kelly fraction", "Risk", "float", 0.25, 0.05, 1.0, 0.05,
+        env="KELLY_FRACTION", safe_live=False))
+_add(_p("kelly_min_trades", "Kelly: trades needed", "Risk", "int", 30, 10, 500, 5,
+        env="KELLY_MIN_TRADES"))
+_add(_p("grid_mode", "Grid / DCA adds", "Risk", "enum", "off",
+        choices=("off", "grid", "dca"), env="GRID_MODE", safe_live=False, dangerous=True,
+        help="Add to a trade that moved against it every spacing x ATR. Every add uses the first position's stop-loss, so nothing is unprotected and the total loss if that stop is hit is capped by 'Grid max total risk'. grid = equal size, dca = each add scaled."))
+_add(_p("grid_spacing_atr", "Grid spacing (ATR)", "Risk", "float", 1.0, 0.25, 5.0, 0.05,
+        env="GRID_SPACING_ATR", safe_live=False))
+_add(_p("grid_max_levels", "Grid max adds", "Risk", "int", 3, 1, 10, 1,
+        env="GRID_MAX_LEVELS", safe_live=False, dangerous=True))
+_add(_p("dca_scale", "DCA size scale per add", "Risk", "float", 1.5, 1.0, 3.0, 0.1,
+        env="DCA_SCALE", safe_live=False, dangerous=True))
+_add(_p("grid_max_total_risk", "Grid max total risk", "Risk", "float", 0.03, 0.005, 0.10, 0.005,
+        env="GRID_MAX_TOTAL_RISK", safe_live=False, percent=True,
+        help="Refuse an add if all legs stopped out together would lose more than this share of equity."))
 _add(_p("dynamic_risk", "Scale risk with ADX", "Risk", "bool", True,
         env="DYNAMIC_RISK"))
 _add(_p("min_risk_scale", "Minimum risk scale", "Risk", "float", 0.5, 0.0, 1.0, 0.05,
@@ -373,14 +400,14 @@ _add(_p("nn_size_boost_max", "Neural network: max size boost", "Strategies", "fl
 _add(_p("nn_min_oos_edge", "Neural network: minimum measured edge", "Strategies", "float", 0.05, 0.0, 1.0, 0.01,
         env="NN_MIN_OOS_EDGE",
         help="Mean R-multiple of the model's trades on bars it never saw (at least 30 non-overlapping trades). For models from the current trainer the lower 95% confidence bound of that edge must exceed this, and the edge must also beat the naive always-long/always-short baseline. A model below this, or with no measurement, does not vote. Also the trainer's promotion floor (read at bot start-up)."))
-_add(_p("scalp_enabled", "Scalping strategies", "Strategies", "bool", True,
+_add(_p("scalp_enabled", "Strategy library", "Strategies", "bool", True,
         env="SCALP_ENABLED",
-        help="Opening-range breakout, VWAP fade, squeeze, RSI(2), momentum burst, EMA pullback and liquidity sweep. Each votes only while its own replay over the recent bars shows a statistically clear edge; with none proven and live the score is exactly as if this were off."))
+        help="The strategy library: price action, SMC/ICT, session, indicator, chart-pattern, volume and news strategies plus the original scalping set. Each votes only while its own replay over the recent bars shows a statistically clear edge; with none proven and live the score is exactly as if this were off."))
 _add(_p("scalp_weight", "Scalping weight (pts)", "Strategies", "float", 15.0, 0.0, 40.0, 1.0,
         env="SCALP_WEIGHT"))
-_add(_p("scalp_strategies", "Scalping strategies in use", "Strategies", "str",
-        "orb,vwap_fade,squeeze,rsi2,burst,ema_pullback,sweep,breakout,pinbar,macd_cross,stoch_cross,inside_break", env="SCALP_STRATEGIES",
-        help="Comma-separated. Names: orb, vwap_fade, squeeze, rsi2, burst, ema_pullback, sweep, breakout, pinbar, macd_cross, stoch_cross, inside_break."))
+_add(_p("scalp_strategies", "Strategies in use", "Strategies", "str",
+        "all", env="SCALP_STRATEGIES",
+        help="Comma-separated names or groups. Groups: all, classic, price_action, smc, ict, indicators, scalping, daytrading, swing, quant, volume, events. See docs/STRATEGY_LIBRARY.md for every name. More strategies raise the significance bar (see auto significance)."))
 _add(_p("scalp_horizon", "Scalping: outcome horizon (bars)", "Strategies", "int", 12, 3, 48, 1,
         env="SCALP_HORIZON"))
 _add(_p("scalp_check_bars", "Scalping: bars replayed to prove a strategy", "Strategies", "int", 900, 200, 4000, 50,
@@ -397,6 +424,12 @@ _add(_p("scalp_valid_bars", "Scalping: bars a signal stays live", "Strategies", 
         env="SCALP_VALID_BARS"))
 _add(_p("scalp_open_hour", "Scalping: opening-range hour (data clock)", "Strategies", "int", 7, 0, 23, 1,
         env="SCALP_OPEN_HOUR"))
+_add(_p("scalp_auto_z", "Strategies: auto significance", "Strategies", "bool", True,
+        env="SCALP_AUTO_Z",
+        help="Raise the significance bar with the number of strategies tested at once (about 3.5 sigma for the full library), so the chance that ANY strategy proves itself by luck stays near 2.5%. Turning it off with many strategies lets noise vote."))
+_add(_p("scalp_server_utc_offset", "Strategies: data clock vs UTC (hours)", "Strategies", "float", 0.0, -12.0, 14.0, 0.5,
+        env="SCALP_SERVER_UTC_OFFSET",
+        help="Hours the broker's chart clock is ahead of UTC, for the New York session strategies (kill zones, opens, macros, Silver Bullet). Exness = 0; many brokers use 2 (winter) / 3 (summer)."))
 _add(_p("fib_zone_low", "Fib discount zone start", "Strategies", "float", 0.382, 0.0, 1.0, 0.001,
         env="FIB_ZONE_LOW"))
 _add(_p("fib_zone_high", "Fib discount zone end", "Strategies", "float", 0.786, 0.0, 1.0, 0.001,

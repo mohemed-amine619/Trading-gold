@@ -40,7 +40,7 @@ Pure numpy/pandas. No broker, no torch.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -67,6 +67,11 @@ class ScalpConfig:
     open_hour: int = 7            # opening-range hour, in the data's own clock
     range_bars: int = 6           # bars that make the opening range
     walkforward_folds: int = 1    # 1 = single window (default); >1 = require edge in every fold
+    # ── library strategies (core/strategy/library) ──
+    server_utc_offset: float = 0.0  # hours the data clock is ahead of UTC (Exness: 0)
+    auto_z: bool = False          # raise min_z for the number of strategies tested at once
+    family_alpha: float = 0.025   # with auto_z: chance that ANY strategy proves itself by luck
+    events: Tuple = ()            # ((utc datetime, title), ...) for the news strategies
 
 
 @dataclass(frozen=True)
@@ -265,6 +270,27 @@ GENERATORS: Dict[str, Callable] = {
     "stoch_cross": sig_stoch_cross, "inside_break": sig_inside_break,
 }
 
+# The full catalogue (price action, SMC/ICT, sessions, indicators, patterns,
+# volume proxies, news). Same signature, same proof gate. See library/__init__.py.
+from core.strategy.library import LIBRARY_GENERATORS, resolve as resolve_strategies  # noqa: E402
+
+GENERATORS.update(LIBRARY_GENERATORS)
+LIBRARY_STRATEGIES: Tuple[str, ...] = tuple(LIBRARY_GENERATORS)
+
+
+def required_z(n_strategies: int, base_z: float, family_alpha: float = 0.025) -> float:
+    """The significance bar when ``n_strategies`` are tested at once.
+
+    Bonferroni on a one-sided test: each strategy must clear ``family_alpha / n``,
+    so the chance that ANY of them proves itself on pure noise stays near
+    ``family_alpha``. Never below ``base_z``. For the original 7 strategies this is
+    2.69 (the 2.7 the project settled on); for ~120 it is about 3.5.
+    """
+    from statistics import NormalDist
+    n = max(1, int(n_strategies))
+    alpha = min(0.5, max(1e-12, float(family_alpha) / n))
+    return max(float(base_z), NormalDist().inv_cdf(1.0 - alpha))
+
 
 # ── proof ────────────────────────────────────────────────────────────────────
 
@@ -371,11 +397,23 @@ def prove_walkforward(sig: np.ndarray, outcomes: np.ndarray, cfg: ScalpConfig) -
 class ScalpEngine:
     def __init__(self, cfg: Optional[ScalpConfig] = None):
         self.cfg = cfg or ScalpConfig()
+        # group tokens ("all", "smc", ...) and aliases -> canonical, de-duplicated names
+        self.names: Tuple[str, ...] = resolve_strategies(self.cfg.strategies)
+        self.min_z = (required_z(len(self.names), self.cfg.min_z, self.cfg.family_alpha)
+                      if self.cfg.auto_z else self.cfg.min_z)
+        self._gate = replace(self.cfg, min_z=self.min_z)
+        self._cache_key = None
+        self._cache: Optional[ScalpResult] = None
 
     def signals(self, df: pd.DataFrame) -> Dict[str, np.ndarray]:
         atr = _atr(df)
-        return {name: GENERATORS[name](df, atr, self.cfg)
-                for name in self.cfg.strategies if name in GENERATORS}
+        out: Dict[str, np.ndarray] = {}
+        for name in self.names:
+            try:
+                out[name] = np.asarray(GENERATORS[name](df, atr, self.cfg), dtype=np.int8)
+            except Exception:                          # one broken rule never stops the rest
+                out[name] = np.zeros(len(df), dtype=np.int8)
+        return out
 
     def outcomes(self, df: pd.DataFrame) -> np.ndarray:
         return first_barrier_labels(df["high"].to_numpy(dtype=float), df["low"].to_numpy(dtype=float),
@@ -384,17 +422,23 @@ class ScalpEngine:
 
     def evaluate(self, df: pd.DataFrame) -> ScalpResult:
         """Proof for every strategy, plus a vote from each proven one that is live now."""
-        c = self.cfg
+        c = self._gate
         result = ScalpResult()
         if len(df) < c.horizon + 60 or not isinstance(df.index, pd.DatetimeIndex):
             result.report = {name: {"proven": False, "reason": "not enough history"}
-                             for name in c.strategies}
+                             for name in self.names}
             return result
+        # The live loop calls this every second; recompute only when the bars changed.
+        key = (len(df), df.index[0], df.index[-1],
+               hash(df[["open", "high", "low", "close"]].to_numpy(dtype=float).tobytes()))
+        if key == self._cache_key and self._cache is not None:
+            return self._cache
         sigs = self.signals(df)
         outcomes = self.outcomes(df)
         n = len(df)
         for name, sig in sigs.items():
             proof = prove(sig, outcomes, c)
+            proof["min_z"] = self.min_z
             live = [t for t in range(max(0, n - c.valid_bars), n) if sig[t] != 0]
             proof["live"] = int(sig[live[-1]]) if live else 0
             result.report[name] = proof
@@ -402,6 +446,7 @@ class ScalpEngine:
                 strength = 0.6 + 0.4 * min(1.0, max(0.0, proof["edge"]))
                 result.votes.append(ScalpVote(name, int(sig[live[-1]]), strength, proof["edge"],
                                               proof["n_independent"]))
+        self._cache_key, self._cache = key, result
         return result
 
 
