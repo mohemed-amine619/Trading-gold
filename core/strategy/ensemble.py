@@ -11,6 +11,18 @@ from core.strategy.strategies import TrendFollowingStrategy, MomentumStrategy, M
 
 logger = logging.getLogger(__name__)
 
+# Regime-aware score floors: different minimum signal scores for different
+# market regimes. Trend strategies need lower floors (they have more room),
+# Fibonacci needs higher floors (confluence is stricter), ranging markets
+# use intermediate floors. Default of 48 maintained when regime is unknown.
+REGIME_SCORE_FLOORS: dict = {
+    "TRENDING": 45,
+    "RANGING": 50,
+    "BREAKOUT": 55,
+    "UNCERTAIN": 48,
+    "REVERSAL": 50,
+}
+
 
 class StrategyEnsemble:
     """
@@ -70,15 +82,16 @@ class StrategyEnsemble:
         buy_score = buy_score / buy_weight if buy_weight else 0.0
         sell_score = sell_score / sell_weight if sell_weight else 0.0
         
-        # Decide direction
-        if buy_score > sell_score and buy_score > 55:
+        # Decide direction — regime-aware score floor
+        floor = REGIME_SCORE_FLOORS.get(regime, 48)
+        if buy_score > sell_score and buy_score > floor:
             return Signal(
                 direction=1,
                 score=buy_score,
                 reason="; ".join(reasons),
                 invalidation="Price drops below recent swing low/Fib invalidation or momentum flips bearish."
             )
-        elif sell_score > buy_score and sell_score > 55:
+        elif sell_score > buy_score and sell_score > floor:
             return Signal(
                 direction=-1,
                 score=sell_score,

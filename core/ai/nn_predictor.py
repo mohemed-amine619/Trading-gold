@@ -174,7 +174,7 @@ def oos_report_lines(oos: dict, min_oos_edge: float = 0.0) -> list:
 
 class ModelPredictor:
     def __init__(self, artifact_path: str, min_confidence: float = 0.55,
-                 min_oos_edge: float = 0.0):
+                 min_oos_edge: float = 0.05):
         self.path = artifact_path
         self.min_confidence = float(min_confidence)
         self.min_oos_edge = float(min_oos_edge)

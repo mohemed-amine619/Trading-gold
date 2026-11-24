@@ -39,6 +39,7 @@ class DirectionPrediction:
     invalidation: str = ""
     nn: Optional[Dict[str, Any]] = None
     consensus: Optional[str] = None
+    prediction_features: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -184,6 +185,26 @@ def predict_direction(
             base.consensus = "nn-only"
         else:
             base.consensus = "none"
+
+    # --- log prediction features for diagnostics -----------------------
+    base.prediction_features = {
+        "range_position": base.range_position,
+        "bias": base.location_bias,
+        "structure_bias": base.structure_bias,
+        "adx": adx if "adx" in df.columns else None,
+        "nn_direction": base.nn.get("direction") if base.nn else None,
+        "nn_confidence": base.nn.get("confidence") if base.nn else None,
+        "consensus": base.consensus,
+        "score": base.score,
+        "signal_reason": base.reasons,
+        "invalidation": base.invalidation,
+    }
+    logger.info(
+        "PREDICTION_FEATURES %s %s: %s",
+        base.symbol or "?",
+        base.timeframe or "?",
+        str(base.prediction_features)[:200],
+    )
 
     return base
 
