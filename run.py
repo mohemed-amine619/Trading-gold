@@ -3823,7 +3823,12 @@ class StandaloneAIBot:
             if self._panel_thread is not None and self._panel_thread.is_alive():
                 return
             self._panel_bar = bar
-            frames = {"M15": m15p, "H1": h1p, "H4": h4p}
+            # Label by the configured timeframes: with TIMEFRAME=M5 the "m15p"
+            # frame holds M5 bars (and h1p/h4p hold TREND_TF / MACRO_TREND_TF).
+            labels = (str(os.getenv("TIMEFRAME") or "M15").strip().upper(),
+                      str(os.getenv("TREND_TF") or "H1").strip().upper(),
+                      str(os.getenv("MACRO_TREND_TF") or "H4").strip().upper())
+            frames = dict(zip(labels, (m15p, h1p, h4p)))
             frames = {tf: f.copy() for tf, f in frames.items() if f is not None and not f.empty}
             # Resolve the output path now, on the caller's thread: the background
             # thread may outlive a config/env change (and a test's tmp paths).
