@@ -676,7 +676,9 @@ CONFIG = {
     "trail_tighten1_mult":     _profile_cfg("TRAIL_TIGHTEN1_MULT", 1.0, 0.8),
     "trail_tighten2_atr":      _profile_cfg("TRAIL_TIGHTEN2_ATR", 3.0, 2.2),
     "trail_tighten2_mult":     _profile_cfg("TRAIL_TIGHTEN2_MULT", 0.6, 0.5),
-    "dynamic_risk":            True,
+    # Scale risk with ADX between MIN_RISK_SCALE and MAX_RISK_SCALE. Was hard-coded
+    # True, so DYNAMIC_RISK=false in .env was silently ignored.
+    "dynamic_risk":            os.getenv("DYNAMIC_RISK", "true").strip().lower() in ("1", "true", "yes"),
     "min_risk_scale":          0.5,
     "max_risk_scale":          _profile_cfg("MAX_RISK_SCALE", 1.2, 2.0),
     "max_margin_usage":        _profile_cfg("MAX_MARGIN_USAGE", 0.30, 0.60),
@@ -2658,7 +2660,9 @@ def _size_lot(account_equity, sl_dist_price, tick_size, tick_value,
 
     if ai_conf >= high_tier and edge >= min_edge:
         scale *= 1.5
-    elif 0.0 < ai_conf <= low_tier:
+    elif 0.5 < ai_conf <= low_tier:
+        # A weak AI opinion halves the size. Exactly 0.5 is NO opinion (AI off or
+        # neutralised by its edge gate): it must not shrink every trade.
         scale *= 0.5
     # Capital-preservation ladder: the caller halves size once the day's
     # drawdown has consumed half the daily budget.
