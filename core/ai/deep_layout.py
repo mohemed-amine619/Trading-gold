@@ -29,19 +29,34 @@ from core.ai.nn_features import FEATURE_NAMES, _atr, build_features
 
 ARCH_GRU = "gru"
 ARCH_DUAL = "dual"
+# GRU on the base features plus the compact strategy-library block
+# (core/strategy/features.py). Chosen at training time (train_nn_loop --arch
+# gru_strat, default when NN_STRATEGY_FEATURES=true); the live predictor follows
+# whatever arch the artifact was trained with.
+ARCH_GRU_STRAT = "gru_strat"
 N_SEQ = len(FEATURE_NAMES)
 EXCURSION_CAP_ATR = 6.0
+
+
+def _strategy_block(df: pd.DataFrame) -> np.ndarray:
+    from core.strategy.features import COMPACT_COLUMNS, strategy_feature_matrix
+    return strategy_feature_matrix(df, per_strategy=False)[list(COMPACT_COLUMNS)].to_numpy(dtype=float)
 
 
 def feature_names(arch: str) -> list:
     if arch == ARCH_DUAL:
         return list(FEATURE_NAMES) + list(STRUCT_FEATURE_NAMES)
+    if arch == ARCH_GRU_STRAT:
+        from core.strategy.features import COMPACT_COLUMNS
+        return list(FEATURE_NAMES) + list(COMPACT_COLUMNS)
     return list(FEATURE_NAMES)
 
 
 def build_model_features(df: pd.DataFrame, arch: str = ARCH_GRU, stride: int = 8) -> np.ndarray:
     """Training/evaluation matrix for ``df``: one row per bar."""
     base = build_features(df).to_numpy()
+    if arch == ARCH_GRU_STRAT:
+        return np.hstack([base, _strategy_block(df)])
     if arch != ARCH_DUAL:
         return base
     return np.hstack([base, build_location_features(df, stride).to_numpy()])
@@ -50,6 +65,8 @@ def build_model_features(df: pd.DataFrame, arch: str = ARCH_GRU, stride: int = 8
 def latest_model_window(df: pd.DataFrame, window: int, arch: str = ARCH_GRU):
     """The newest ``window`` rows as the model expects them, or ``None``."""
     base = build_features(df).to_numpy()
+    if arch == ARCH_GRU_STRAT:
+        base = np.hstack([base, _strategy_block(df)])
     if len(base) < window:
         return None
     w = base[-window:]

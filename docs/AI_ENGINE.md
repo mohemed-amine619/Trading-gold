@@ -1315,6 +1315,25 @@ final_confidence = 0.668 × 1.0 × 0.85
 
 ---
 
+## Strategy-library features (AI_STRATEGY_FEATURES / NN_STRATEGY_FEATURES)
+
+Both default to `false`.
+
+* `AI_STRATEGY_FEATURES=true` (restart required): `AIEnsemble._features()` joins the compact
+  block from `core/strategy/features.py` (`strat_long_n`, `strat_short_n`, `strat_breadth`,
+  `cat_<category>_net`) to `build_features()`. Training, prediction and the persisted-model
+  check use `FEATURE_COLS + COMPACT_COLUMNS`. A persisted model trained without the block
+  keeps working; one trained with it is refused once the flag is off.
+* `NN_STRATEGY_FEATURES=true`: `scripts/train_nn_loop.py` defaults to `--arch gru_strat`
+  (base NN features + the same block, `core/ai/deep_layout.py`). The live predictor follows
+  the architecture stored in the artifact.
+
+Reading the logs: every AI promotion line ends with `features=base` or
+`features=base+strategy(13)`, next to `oos_acc`, `auc` and `lift`. A before/after comparison
+on the same folds is produced offline by `scripts/evaluate_strategy_features.py`; on a year of
+XAUUSDm M15 the block added +0.002 AUC (no measurable gain), so keep the flags off unless a
+new measurement says otherwise.
+
 ## Appendix A — Configuration Reference
 
 ```python

@@ -430,6 +430,15 @@ _add(_p("scalp_auto_z", "Strategies: auto significance", "Strategies", "bool", T
 _add(_p("scalp_server_utc_offset", "Strategies: data clock vs UTC (hours)", "Strategies", "float", 0.0, -12.0, 14.0, 0.5,
         env="SCALP_SERVER_UTC_OFFSET",
         help="Hours the broker's chart clock is ahead of UTC, for the New York session strategies (kill zones, opens, macros, Silver Bullet). Exness = 0; many brokers use 2 (winter) / 3 (summer)."))
+_add(_p("strategy_panel_enabled", "Strategies: live panel of every strategy", "Strategies", "bool", True,
+        env="STRATEGY_PANEL_ENABLED",
+        help="Read every library strategy on M15/H1/H4 once per new bar (log, data/strategy_panel_<symbol>.json, dashboard). Information only: never adds score points."))
+_add(_p("ai_strategy_features", "AI: strategy signals as features", "AI", "bool", False,
+        env="AI_STRATEGY_FEATURES", requires_restart=True,
+        help="Append the compact strategy-library block (13 columns) to the AI ensemble's features. The out-of-sample promotion gate decides whether it helps; test in paper mode first."))
+_add(_p("nn_strategy_features", "NN: strategy signals as features", "AI", "bool", False,
+        env="NN_STRATEGY_FEATURES", requires_restart=True,
+        help="Train the NN with the strategy-library block (arch gru_strat). Takes effect at the next NN training; the live predictor follows the trained model."))
 _add(_p("fib_zone_low", "Fib discount zone start", "Strategies", "float", 0.382, 0.0, 1.0, 0.001,
         env="FIB_ZONE_LOW"))
 _add(_p("fib_zone_high", "Fib discount zone end", "Strategies", "float", 0.786, 0.0, 1.0, 0.001,

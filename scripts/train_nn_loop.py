@@ -25,6 +25,7 @@ this machine" (torch missing); the supervisor does not restart it.
 from __future__ import annotations
 
 import argparse
+import os
 import logging
 import sys
 import threading
@@ -82,8 +83,11 @@ def main(argv: Optional[List[str]] = None,
                              "the model (run.py forwards NN_MIN_CONFIDENCE)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--models", type=int, default=3, help="seeds averaged per model")
-    parser.add_argument("--arch", choices=("gru", "dual"), default="gru",
-                        help="network: the original GRU, or the dual-stream deep net")
+    parser.add_argument("--arch", choices=("gru", "dual", "gru_strat"),
+                        default=("gru_strat" if os.getenv("NN_STRATEGY_FEATURES", "false").strip().lower()
+                                 in ("1", "true", "yes") else "gru"),
+                        help="network: the original GRU, the dual-stream deep net, or the GRU with the "
+                             "strategy-library block (default when NN_STRATEGY_FEATURES=true)")
     parser.add_argument("--preset", choices=("small", "medium", "large"), default="small",
                         help="dual only: capacity preset")
     parser.add_argument("--tolerance", type=float, default=0.02,

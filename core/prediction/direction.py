@@ -12,6 +12,7 @@ honest ``NEUTRAL`` verdict with a reason, never a fabricated direction.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,8 @@ import pandas as pd
 from core.market.location import analyse_location
 from core.market.pipeline import add_indicators
 from core.strategy.ensemble import get_default_ensemble
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,6 +43,9 @@ class DirectionPrediction:
     nn: Optional[Dict[str, Any]] = None
     consensus: Optional[str] = None
     prediction_features: Dict[str, Any] = field(default_factory=dict)
+    # Every library strategy read on this frame (core/strategy/panel.py).
+    # Information only: it never changes direction, score or confidence.
+    strategy_panel: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -71,14 +77,51 @@ def _as_of(df: pd.DataFrame) -> Optional[str]:
         return None
 
 
+# Bars the strategy panel looks at: the live bot's HISTORY_CANDLES for gold.
+PANEL_MAX_BARS = 4500
+
+
+def _attach_panel(pred: DirectionPrediction, df: pd.DataFrame, strategies) -> None:
+    if not strategies or not isinstance(df, pd.DataFrame) or df.empty:
+        return
+    try:
+        from core.strategy.panel import build_panel
+        names = (strategies,) if isinstance(strategies, str) else tuple(strategies)
+        frame = df.tail(PANEL_MAX_BARS)
+        panel = build_panel(frame, pred.timeframe or "?", strategies=names)
+        pred.strategy_panel = panel.to_dict()
+    except Exception as exc:  # observability must never break the prediction
+        logger.warning("strategy panel failed: %r", exc)
+
+
 def predict_direction(
     df: pd.DataFrame,
     symbol: Optional[str] = None,
     timeframe: Optional[str] = None,
     model_path: Optional[str] = None,
     min_oos_edge: float = 0.0,
+    include_strategies=True,
 ) -> DirectionPrediction:
-    """Return a directional bias for ``df`` (OHLCV, oldest->newest)."""
+    """Return a directional bias for ``df`` (OHLCV, oldest->newest).
+
+    ``include_strategies``: ``True`` (= ``"all"``), a group/name or a tuple of them,
+    or ``False``/``None`` to skip the strategy panel. The panel is attached to the
+    result for information and does not change the verdict.
+    """
+    pred = _predict_direction_core(df, symbol=symbol, timeframe=timeframe,
+                                   model_path=model_path, min_oos_edge=min_oos_edge)
+    if include_strategies:
+        _attach_panel(pred, df, "all" if include_strategies is True else include_strategies)
+    return pred
+
+
+def _predict_direction_core(
+    df: pd.DataFrame,
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    model_path: Optional[str] = None,
+    min_oos_edge: float = 0.0,
+) -> DirectionPrediction:
 
     base = DirectionPrediction(symbol=symbol, timeframe=timeframe)
 
@@ -242,6 +285,8 @@ class MultiTimeframePrediction:
             "alignment": self.alignment,
             "conflicting": list(self.conflicting),
             "reasons": list(self.reasons),
+            "strategy_panels": {k: v.strategy_panel for k, v in self.timeframes.items()
+                                if v.strategy_panel is not None},
         }
 
 
@@ -251,6 +296,7 @@ def predict_multi_timeframe(
     model_path: Optional[str] = None,
     higher_timeframe: Optional[str] = None,
     min_oos_edge: float = 0.0,
+    include_strategies=True,
 ) -> MultiTimeframePrediction:
     """Combine per-timeframe predictions into one confluence read.
 
@@ -270,6 +316,7 @@ def predict_multi_timeframe(
         preds[tf] = predict_direction(
             df, symbol=symbol, timeframe=tf,
             model_path=model_path, min_oos_edge=min_oos_edge,
+            include_strategies=include_strategies,
         )
     result.timeframes = preds
 

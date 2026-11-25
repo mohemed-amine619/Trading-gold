@@ -550,6 +550,28 @@
                     <button class="px-4 py-2 bg-accent text-white font-semibold rounded text-sm" onclick="saveConfig('strategy')">Save Strategies</button>
                 </div>
                 <div class="grid grid-cols-1 gap-6">
+                    <div class="glass-panel p-5" id="strategy-panel-box">
+                        <div class="flex justify-between items-center mb-4 border-b border-bordercol pb-2">
+                            <h3 class="text-md font-semibold text-white">Strategy Library — live readings</h3>
+                            <div class="flex items-center gap-2">
+                                <select id="sp-tf" class="bg-slate-800 text-slate-200 text-xs rounded px-2 py-1" onchange="renderStrategyPanel()">
+                                    <option>M15</option><option>H1</option><option>H4</option>
+                                </select>
+                                <button class="px-3 py-1 bg-slate-700 text-white text-xs rounded" onclick="loadStrategyPanel()">Refresh</button>
+                            </div>
+                        </div>
+                        <p class="text-xs text-slate-400 mb-3">Information only: these readings never add score points. Only strategies listed in SCALP_STRATEGIES that pass the proof gate can vote.</p>
+                        <div id="sp-summary" class="text-sm text-slate-300 mb-3">Loading…</div>
+                        <div class="overflow-x-auto max-h-96 overflow-y-auto">
+                            <table class="w-full text-xs text-left text-slate-300">
+                                <thead class="text-slate-400 sticky top-0 bg-slate-900"><tr>
+                                    <th class="py-1 pr-2">Strategy</th><th class="pr-2">Category</th><th class="pr-2">Now</th>
+                                    <th class="pr-2 text-right">Calls</th><th class="pr-2 text-right">Edge</th><th class="pr-2 text-right">z</th><th>Proven</th>
+                                </tr></thead>
+                                <tbody id="sp-rows"></tbody>
+                            </table>
+                        </div>
+                    </div>
                     <div class="glass-panel p-5">
                         <h3 class="text-md font-semibold text-white mb-4 border-b border-bordercol pb-2">Active Strategies</h3>
                         <div class="space-y-4">
@@ -1991,6 +2013,39 @@
             if(!document.getElementById('tab-performance').classList.contains('hidden')) renderCharts();
         });
 
-    </script>
+    
+        // ── Strategy library panel (GET /api/strategies, read-only) ──
+        let _strategyData = null;
+        function _esc(t) { const d = document.createElement('div'); d.textContent = String(t ?? ''); return d.innerHTML; }
+        async function loadStrategyPanel() {
+            try {
+                const r = await fetch('/api/strategies');
+                _strategyData = await r.json();
+            } catch (e) { _strategyData = null; }
+            renderStrategyPanel();
+        }
+        function renderStrategyPanel() {
+            const sum = document.getElementById('sp-summary');
+            const body = document.getElementById('sp-rows');
+            if (!sum || !body) return;
+            const tf = document.getElementById('sp-tf').value;
+            const bot = _strategyData && _strategyData.data && _strategyData.data[0];
+            const p = bot && bot.panels ? bot.panels[tf] : null;
+            if (!p) { sum.textContent = 'No reading yet (built once per new M15 bar).'; body.innerHTML = ''; return; }
+            const proven = (p.proven || []).join(', ') || 'none';
+            sum.innerHTML = `${_esc(bot.symbol)} ${_esc(tf)} @ ${_esc(p.as_of)} — <b>${p.long_count}</b> long / <b>${p.short_count}</b> short / ${p.flat_count} flat · breadth ${(+p.net_breadth).toFixed(2)} · proof bar ${(+p.required_z).toFixed(2)}σ over ${p.n_tested} · proven: ${_esc(proven)} · voting: ${_esc(bot.voting)}`;
+            const rows = (p.readings || []).slice().sort((a, b) => Math.abs(b.z || 0) - Math.abs(a.z || 0));
+            body.innerHTML = rows.map(r => {
+                const now = r.signal === 1 ? '<span class="text-green-400">BUY</span>' : r.signal === -1 ? '<span class="text-red-400">SELL</span>' : '-';
+                const state = !r.available ? 'n/a (no data)' : r.error ? 'error' : (r.proven ? '<span class="text-green-400">yes</span>' : 'no');
+                const f = v => (v === null || v === undefined) ? '' : (+v).toFixed(2);
+                return `<tr class="border-t border-slate-800"><td class="py-1 pr-2">${_esc(r.name)}</td><td class="pr-2">${_esc(r.category)}</td><td class="pr-2">${now}</td><td class="pr-2 text-right">${r.calls || ''}</td><td class="pr-2 text-right">${f(r.edge)}</td><td class="pr-2 text-right">${f(r.z)}</td><td>${state}</td></tr>`;
+            }).join('');
+        }
+        document.addEventListener('click', e => {
+            const btn = e.target.closest && e.target.closest('[data-tab="tab-strategy"]');
+            if (btn) loadStrategyPanel();
+        });
+</script>
 </body>
 </html>

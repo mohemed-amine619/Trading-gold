@@ -790,6 +790,14 @@ CONFIG = {
     # Hours the broker/data clock is ahead of UTC, for the New York session
     # strategies (ICT kill zones, opens, macros). Exness server time = UTC = 0.
     "scalp_server_utc_offset": float(os.getenv("SCALP_SERVER_UTC_OFFSET", "0")),
+    # ── every library strategy in the analysis (core/strategy/panel.py, features.py) ──
+    # Panel: information only (log line, data/strategy_panel_<symbol>.json,
+    # GET /api/strategies). Never adds score points.
+    "strategy_panel_enabled":  os.getenv("STRATEGY_PANEL_ENABLED", "true").lower() in ("1", "true", "yes"),
+    # Strategy signals as model inputs. OFF by default: the OOS promotion gates
+    # decide whether they help; turn on only to test in paper mode.
+    "ai_strategy_features":    os.getenv("AI_STRATEGY_FEATURES", "false").lower() in ("1", "true", "yes"),
+    "nn_strategy_features":    os.getenv("NN_STRATEGY_FEATURES", "false").lower() in ("1", "true", "yes"),
     # ── position-size progressions and adds (core/risk/progression.py) ──
     # OFF by default. off | martingale | anti_martingale | kelly
     "sizing_progression":      os.getenv("SIZING_PROGRESSION", "off").strip().lower(),
@@ -1692,6 +1700,29 @@ class AIEnsemble:
         self._trained: bool = False
         self._lock = threading.Lock()   # guards pipeline swap during training
 
+    def _strategy_features_on(self) -> bool:
+        return bool(getattr(self.config, "AI_STRATEGY_FEATURES", False))
+
+    def _all_feature_cols(self) -> List[str]:
+        """FEATURE_COLS, plus the compact strategy block when AI_STRATEGY_FEATURES is on."""
+        if self._strategy_features_on():
+            from core.strategy.features import COMPACT_COLUMNS
+            return FEATURE_COLS + list(COMPACT_COLUMNS)
+        return FEATURE_COLS[:]
+
+    def _features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """build_features(), with the strategy-library block joined when enabled.
+        Every generator is causal, so the block adds no look-ahead."""
+        feat = build_features(df)
+        if self._strategy_features_on():
+            try:
+                from core.strategy.features import add_strategy_features
+                feat = add_strategy_features(feat, df)
+            except Exception as exc:
+                logger.warning("[AI] %s strategy features failed, using base features: %r",
+                               self.symbol, exc)
+        return feat
+
     def top_features(self, n: int = 5) -> List[Tuple[str, float]]:
         """Highest-weighted features of the live model, for logging/audit."""
         with self._lock:
@@ -1759,7 +1790,7 @@ class AIEnsemble:
         moves from noise, the way a professional trader would frame it:
         "did this setup produce a move worth trading?"
         """
-        df = build_features(df)
+        df = self._features(df)
         cl  = df["close"]
         atr = df.get("atr", pd.Series(0.0, index=df.index))
         horizon = self._label_horizon()
@@ -1772,7 +1803,7 @@ class AIEnsemble:
         else:
             df["_target"] = self._close_label(cl, atr)
         df = df.iloc[:-horizon].copy()   # drop last rows: no forward data
-        avail = [c for c in FEATURE_COLS if c in df.columns]
+        avail = [c for c in self._all_feature_cols() if c in df.columns]
         df_clean = df[avail + ["_target"]].dropna()
         if len(df_clean) < _MIN_TRAIN:
             return None, None, avail
@@ -1981,13 +2012,15 @@ class AIEnsemble:
         top = ", ".join("%s=%.3f" % (k, v) for k, v in list(importance.items())[:5])
         logger.info(
             "[AI] %s promoted run #%d | train=%d | oos_acc=%s | auc=%s | "
-            "base=%s | lift=%s | calibrated=%s | top: %s",
+            "base=%s | lift=%s | calibrated=%s | features=%s | top: %s",
             self.symbol, self._n_trains, n_train,
             ("%.3f" % oos_acc) if oos_acc is not None else "n/a",
             ("%.3f" % oos_auc) if oos_auc is not None else "n/a",
             ("%.3f" % oos_base_rate) if oos_base_rate is not None else "n/a",
             ("%+.3f" % oos_edge) if oos_edge is not None else "n/a",
             calibrator is not None,
+            "base+strategy(%d)" % sum(1 for c in avail if c.startswith(("strat_", "cat_")))
+            if self._strategy_features_on() else "base",
             top or "n/a")
         # Persist only on promotion, never on rejection: the file must always
         # hold a model that cleared the out-of-sample gate.
@@ -2085,7 +2118,7 @@ class AIEnsemble:
             # If the feature builder stopped producing a column the model was
             # trained on, the model cannot be trusted: silently dropping the
             # column would shift the input vector under sklearn.
-            missing = [c for c in cols if c not in FEATURE_COLS]
+            missing = [c for c in cols if c not in self._all_feature_cols()]
             if missing:
                 logger.warning(
                     "[AI] %s ignoring model: features no longer produced: %s",
@@ -2197,7 +2230,7 @@ class AIEnsemble:
         if len(df) < _MIN_PRED:
             return AISignal(0, 0.5, "not enough bars for prediction")
         try:
-            feat_df = build_features(df)
+            feat_df = self._features(df)
             avail   = [c for c in feature_cols if c in feat_df.columns]
             row     = feat_df[avail].iloc[[-1]]
             if row.isnull().any(axis=1).values[0]:
@@ -2704,6 +2737,10 @@ class StandaloneAIBot:
         self._scalp_key = None
         self._scalp_failed = False
         self._scalp_proven: tuple = ()
+        self._panel_builder = None        # all-strategy panel (information only)
+        self._panel_bar = None            # newest M15 bar the panel was built for
+        self._panel_thread = None
+        self._strategy_panels: dict = {}  # timeframe -> panel dict
         self._nn_predictor = None         # neural-network predictor, built on first use
         self._last_nn = None              # newest NN signal (direction, confidence)
         self._nn_key = None
@@ -3770,6 +3807,66 @@ class StandaloneAIBot:
         except Exception:
             return ()
 
+    def _update_strategy_panel(self, m15p, h1p, h4p) -> None:
+        """Read every library strategy on M15/H1/H4, once per new M15 bar, in a
+        background thread (the full library takes a few seconds). Information only:
+        the result is logged, written to data/strategy_panel_<symbol>.json and served
+        by GET /api/strategies; it never touches the score."""
+        if not self.cfg.get("strategy_panel_enabled", True):
+            return
+        try:
+            if m15p is None or m15p.empty:
+                return
+            bar = m15p.index[-1]
+            if bar == self._panel_bar:
+                return
+            if self._panel_thread is not None and self._panel_thread.is_alive():
+                return
+            self._panel_bar = bar
+            frames = {"M15": m15p, "H1": h1p, "H4": h4p}
+            frames = {tf: f.copy() for tf, f in frames.items() if f is not None and not f.empty}
+            # Resolve the output path now, on the caller's thread: the background
+            # thread may outlive a config/env change (and a test's tmp paths).
+            try:
+                out_path = os.path.join(os.path.dirname(_get_sqlite_db_path()),
+                                        f"strategy_panel_{self.cfg.get('symbol', '')}.json")
+            except Exception:
+                out_path = None
+            self._panel_thread = threading.Thread(target=self._build_strategy_panels,
+                                                  args=(frames, out_path), daemon=True)
+            self._panel_thread.start()
+        except Exception as exc:
+            logger.debug("[%s] strategy panel skipped: %r", self.cfg.get("symbol"), exc)
+
+    def _build_strategy_panels(self, frames: dict, out_path: Optional[str] = None) -> None:
+        try:
+            from core.strategy.panel import PanelBuilder
+            if self._panel_builder is None:
+                self._panel_builder = PanelBuilder(_ScalpConfig(
+                    horizon=int(self.cfg.get("scalp_horizon", 12)),
+                    check_bars=int(self.cfg.get("scalp_check_bars", 4000)),
+                    min_calls=int(self.cfg.get("scalp_min_calls", 15)),
+                    min_edge=float(self.cfg.get("scalp_min_edge", 0.10)),
+                    min_z=float(self.cfg.get("scalp_min_z", 2.7)),
+                    open_hour=int(self.cfg.get("scalp_open_hour", 7)),
+                    server_utc_offset=float(self.cfg.get("scalp_server_utc_offset", 0.0) or 0.0),
+                    events=self._scalp_events()))
+            panels = {}
+            for tf, frame in frames.items():
+                panel = self._panel_builder.build(frame, tf)
+                panels[tf] = panel.to_dict()
+                logger.info("[%s] %s", self.cfg.get("symbol"), panel.summary())
+            self._strategy_panels = panels
+            if out_path:
+                try:
+                    import json as _json
+                    with open(out_path, "w", encoding="utf-8") as fh:
+                        _json.dump(panels, fh, indent=1, default=str)
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("[%s] strategy panel failed and is skipped: %r", self.cfg.get("symbol"), exc)
+
     def _get_scalp(self, m15p):
         """Live votes from the scalping strategies that have proven themselves, or
         ``None`` when the component is off or failed. Never raises into the signal
@@ -3874,6 +3971,7 @@ class StandaloneAIBot:
                     "AI_LABEL_HORIZON":        self.cfg.get("ai_label_horizon", 12),
                     "AI_SL_ATR_MULT":          self.cfg["sl_atr_mult"],
                     "AI_MODEL_PERSIST":        self.cfg.get("ai_model_persist", True),
+                    "AI_STRATEGY_FEATURES":    bool(self.cfg.get("ai_strategy_features", False)),
                     "MODEL_TIMEFRAME":         self.cfg.get("timeframe"),
                 })())
                 # A persisted model is only restored once, at construction.
@@ -3919,6 +4017,7 @@ class StandaloneAIBot:
                         self._nn_predictor.oos_edge or 0.0)
 
         scalp = self._get_scalp(m15p)
+        self._update_strategy_panel(m15p, h1p, h4p)
         if scalp:
             logger.info("[%s] Scalping signals: %s", self.cfg["symbol"], ", ".join(
                 f"{v.name} {'BUY' if v.direction == 1 else 'SELL'} (edge {v.edge:+.2f} over "
@@ -5878,6 +5977,18 @@ def create_app(bots: Optional[List[Any]] = None) -> FastAPI:
             except Exception:
                 pass
         return {"positions": all_positions}
+
+    @app.get("/api/strategies")
+    def api_strategies():
+        """Every library strategy, per symbol and timeframe (read-only, information
+        only: these readings never add score points; only the gated vote does)."""
+        data = []
+        for b in bots:
+            data.append({"symbol": b.cfg.get("symbol"),
+                         "enabled": bool(b.cfg.get("strategy_panel_enabled", True)),
+                         "voting": str(b.cfg.get("scalp_strategies", "")),
+                         "panels": getattr(b, "_strategy_panels", {}) or {}})
+        return {"data": data}
 
     @app.get("/api/intelligence")
     def api_intelligence():

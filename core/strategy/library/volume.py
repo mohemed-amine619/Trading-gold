@@ -30,15 +30,31 @@ def _delta(df) -> np.ndarray:
     return volume(df) * clv
 
 
+_PROFILE_CACHE: dict = {}
+
+
+def _rolling_profile(l, h, v, window: int):
+    """(POC, VAL, VAH) of the ``window`` bars BEFORE each bar (causal), shared by
+    ``volume_profile`` and ``poc`` so the panel computes it once per frame."""
+    key = (len(l), window, hash(np.asarray(l, dtype=float).tobytes()),
+           hash(np.asarray(h, dtype=float).tobytes()), hash(np.asarray(v, dtype=float).tobytes()))
+    hit = _PROFILE_CACHE.get("last")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    n = len(l)
+    poc = np.full(n, np.nan); val = np.full(n, np.nan); vah = np.full(n, np.nan)
+    for t in range(window, n):
+        poc[t], val[t], vah[t] = volume_profile(l[t - window:t], h[t - window:t], v[t - window:t])
+    out = (poc, val, vah)
+    _PROFILE_CACHE["last"] = (key, out)
+    return out
+
+
 def sig_volume_profile(df, atr, cfg, window: int = 200, step: int = 1):
     """Volume profile (rolling 200 bars, tick-volume weighted): rejection of the value
     area low (buy) or high (sell)."""
     o, h, l, c = ohlc(df)
-    v = volume(df)
-    n = len(c)
-    val = np.full(n, np.nan); vah = np.full(n, np.nan)
-    for t in range(window, n):
-        _, val[t], vah[t] = volume_profile(l[t - window:t], h[t - window:t], v[t - window:t])
+    _, val, vah = _rolling_profile(l, h, volume(df), window)
     return to_signal((l <= val) & (c > val) & (c > o), (h >= vah) & (c < vah) & (c < o))
 
 
@@ -46,10 +62,7 @@ def sig_poc(df, atr, cfg, window: int = 200):
     """Point of control: a close crossing the rolling 200-bar POC on 1.5x average tick volume."""
     o, h, l, c = ohlc(df)
     v = volume(df)
-    n = len(c)
-    poc = np.full(n, np.nan)
-    for t in range(window, n):
-        poc[t], _, _ = volume_profile(l[t - window:t], h[t - window:t], v[t - window:t])
+    poc, _, _ = _rolling_profile(l, h, v, window)
     avg = pd.Series(v).shift(1).rolling(20).mean().to_numpy()
     pc = np.r_[np.nan, c[:-1]]
     loud = v >= 1.5 * avg

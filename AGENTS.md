@@ -107,6 +107,13 @@ unavailable) — see `docs/STRATEGY_LIBRARY.md`. Any new generator must pass the
 look-ahead tests in `tests/unit/test_strategy_library.py` (they run on every name
 in `LIBRARY_STRATEGIES` automatically).
 
+**Panel and features never add score points; only the gated vote does.** The strategy
+panel (`core/strategy/panel.py`) and the strategy feature block
+(`core/strategy/features.py`, `AI_STRATEGY_FEATURES` / `NN_STRATEGY_FEATURES`, default
+off) are observability and model inputs. `_score_direction` must not take a panel
+argument (`tests/unit/test_strategy_analysis_wiring.py` checks this). Measure with
+`scripts/evaluate_strategy_features.py` before turning a feature flag on.
+
 ## Multi-asset
 
 Do not hardcode gold assumptions. This is an explicit project mandate.

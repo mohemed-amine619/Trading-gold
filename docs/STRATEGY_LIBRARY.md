@@ -42,6 +42,42 @@ offline first:
 .venv\Scripts\python.exe scripts\evaluate_scalp.py --csv data\history\XAUUSDm_M15.csv --strategies smc,ict --window 4000
 ```
 
+## Strategies in the analysis
+
+Every implemented strategy (118 for `all`) now appears in the analysis in three layers.
+**A panel reading is information, not a trade signal.**
+
+1. **Strategy panel** (`core/strategy/panel.py`, `STRATEGY_PANEL_ENABLED=true`). Once per new
+   M15 bar, in a background thread, the bot reads every strategy on M15, H1 and H4: the
+   call on the newest closed bar, bars since the last call, independent calls in the replay
+   window, their edge under the ±1 ATR first-barrier rule, `z = edge·√calls`, and whether
+   it clears the proof bar *for all strategies on the panel* (Bonferroni over 118 ≈ 3.52σ,
+   stricter than the live vote's bar, which only counts `SCALP_STRATEGIES`). Also long /
+   short / flat counts, breadth, and counts per category. Output: one log line per
+   timeframe, `data/strategy_panel_<symbol>.json`, `GET /api/strategies`, the
+   "Strategy Library — live readings" table on the dashboard's Strategies tab, and
+   `scripts/predict_direction.py --strategies all|<group>|none` (the panel is attached as
+   `strategy_panel` to every `DirectionPrediction`).
+2. **Strategy signals as model inputs** (`core/strategy/features.py`), off by default:
+   `AI_STRATEGY_FEATURES=true` appends the compact block (13 columns: long/short counts,
+   breadth, net call per category) to the AI ensemble; `NN_STRATEGY_FEATURES=true` makes
+   `train_nn_loop.py` train the `gru_strat` architecture (base features + the same block).
+   The out-of-sample promotion gates decide whether the model is used.
+3. **Proven-strategy vote** — unchanged. Only `SCALP_STRATEGIES` that pass the proof gate
+   can add points (≤ `SCALP_WEIGHT`). The panel and the features never add points.
+
+Measure before switching anything on:
+
+```
+.venv\Scripts\python.exe scripts\evaluate_strategy_features.py --csv data\history\XAUUSDm_M15.csv --full
+```
+
+Result on XAUUSDm M15, 2025-11-25 → 2026-11-25 (last 91 days held out): no strategy passes
+the Bonferroni bar on the training part (best z 2.17 vs 3.52); train z mean −0.08, sd 0.96
+(what pure noise gives); train/holdout z correlation +0.22. Model comparison (gradient
+boosting, 4 walk-forward folds + holdout): base AUC 0.508, + compact block 0.510, + every
+strategy 0.510 — **no measurable gain**, so both feature flags stay `false`.
+
 ## Sizing rules (not entry signals) — OFF by default
 
 | Variable | Default | |

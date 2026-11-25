@@ -166,6 +166,16 @@ Logs are **UTC**, rotated at 10 MB × 5, with credentials redacted.
 
 ---
 
+## Strategy library in the analysis
+
+| Variable | Default | |
+|---|---|---|
+| `STRATEGY_PANEL_ENABLED` | `true` | read every strategy on M15/H1/H4 once per bar (log, `data/strategy_panel_<symbol>.json`, dashboard). Information only |
+| `AI_STRATEGY_FEATURES` | `false` | AI ensemble also learns from the compact strategy block (restart) |
+| `NN_STRATEGY_FEATURES` | `false` | NN training defaults to `--arch gru_strat` |
+
+See `docs/STRATEGY_LIBRARY.md` → "Strategies in the analysis".
+
 ## Changing configuration
 
 ```powershell
