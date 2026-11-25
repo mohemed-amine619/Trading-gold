@@ -190,6 +190,8 @@ _add(_p("grid_max_total_risk", "Grid max total risk", "Risk", "float", 0.03, 0.0
         help="Refuse an add if all legs stopped out together would lose more than this share of equity."))
 _add(_p("dynamic_risk", "Scale risk with ADX", "Risk", "bool", True,
         env="DYNAMIC_RISK"))
+_add(_p("vol_sizing", "Volatility-adjusted size", "Risk", "bool", True, env="VOL_SIZING",
+        help="Shrink the risk budget (down to half) when ATR is above its recent median. On a small account that always trades the minimum lot this only makes MAX_RISK_OVERSHOOT refuse trades on volatile days."))
 _add(_p("min_risk_scale", "Minimum risk scale", "Risk", "float", 0.5, 0.0, 1.0, 0.05,
         env="MIN_RISK_SCALE"))
 _add(_p("max_risk_scale", "Maximum risk scale", "Risk", "float", 1.2, 0.0, 3.0, 0.05,

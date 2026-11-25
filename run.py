@@ -679,6 +679,8 @@ CONFIG = {
     # Scale risk with ADX between MIN_RISK_SCALE and MAX_RISK_SCALE. Was hard-coded
     # True, so DYNAMIC_RISK=false in .env was silently ignored.
     "dynamic_risk":            os.getenv("DYNAMIC_RISK", "true").strip().lower() in ("1", "true", "yes"),
+    # Shrink size when ATR is above its recent median (down to x0.5).
+    "vol_sizing":              os.getenv("VOL_SIZING", "true").strip().lower() in ("1", "true", "yes"),
     "min_risk_scale":          0.5,
     "max_risk_scale":          _profile_cfg("MAX_RISK_SCALE", 1.2, 2.0),
     "max_margin_usage":        _profile_cfg("MAX_MARGIN_USAGE", 0.30, 0.60),
@@ -4383,7 +4385,10 @@ class StandaloneAIBot:
         # Volatility-adjusted sizing: shrink when ATR is above recent median.
         vol_scale = 1.0
         try:
-            _atr_series = m15p.get("atr")
+            # VOL_SIZING=false turns this off: on a small account every trade is
+            # the 0.01 minimum lot anyway, and shrinking the budget only makes the
+            # MAX_RISK_OVERSHOOT check refuse trades on volatile days.
+            _atr_series = m15p.get("atr") if self.cfg.get("vol_sizing", True) else None
             if _atr_series is not None:
                 _med = float(_atr_series.dropna().tail(50).median())
                 if _med > 0 and atr > _med:
