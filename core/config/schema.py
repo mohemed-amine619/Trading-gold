@@ -399,9 +399,9 @@ _add(_p("nn_entry_required", "Neural network must confirm every entry", "Strateg
 _add(_p("nn_size_boost_max", "Neural network: max size boost", "Strategies", "float", 0.5, 0.0, 1.0, 0.05,
         env="NN_SIZE_BOOST_MAX",
         help="Extra size earned by confidence above the threshold (0.5 = up to 1.5x). Only applied at full size, never while the drawdown ladder or a losing streak has reduced it, and never because a profit target is still far away. 0 disables."))
-_add(_p("nn_min_oos_edge", "Neural network: minimum measured edge", "Strategies", "float", 0.05, 0.0, 1.0, 0.01,
+_add(_p("nn_min_oos_edge", "Neural network: minimum measured edge", "Strategies", "float", 0.0, 0.0, 1.0, 0.01,
         env="NN_MIN_OOS_EDGE",
-        help="Mean R-multiple of the model's trades on bars it never saw (at least 30 non-overlapping trades). For models from the current trainer the lower 95% confidence bound of that edge must exceed this, and the edge must also beat the naive always-long/always-short baseline. A model below this, or with no measurement, does not vote. Also the trainer's promotion floor (read at bot start-up)."))
+        help="Mean R-multiple of the model's trades on bars it never saw (at least 30 non-overlapping trades). For models from the current trainer the lower 95% confidence bound of that edge must exceed this, and the edge must also beat the naive always-long/always-short baseline. A model below this, or with no measurement, does not vote. Also the trainer's promotion floor (read at bot start-up). Lowering this allows models with marginal edge to vote. Set NN_MIN_OOS_EDGE env var to override."))
 _add(_p("scalp_enabled", "Strategy library", "Strategies", "bool", True,
         env="SCALP_ENABLED",
         help="The strategy library: price action, SMC/ICT, session, indicator, chart-pattern, volume and news strategies plus the original scalping set. Each votes only while its own replay over the recent bars shows a statistically clear edge; with none proven and live the score is exactly as if this were off."))
@@ -435,10 +435,10 @@ _add(_p("scalp_server_utc_offset", "Strategies: data clock vs UTC (hours)", "Str
 _add(_p("strategy_panel_enabled", "Strategies: live panel of every strategy", "Strategies", "bool", True,
         env="STRATEGY_PANEL_ENABLED",
         help="Read every library strategy on M15/H1/H4 once per new bar (log, data/strategy_panel_<symbol>.json, dashboard). Information only: never adds score points."))
-_add(_p("ai_strategy_features", "AI: strategy signals as features", "AI", "bool", False,
+_add(_p("ai_strategy_features", "AI: strategy signals as features", "AI", "bool", True,
         env="AI_STRATEGY_FEATURES", requires_restart=True,
         help="Append the compact strategy-library block (13 columns) to the AI ensemble's features. The out-of-sample promotion gate decides whether it helps; test in paper mode first."))
-_add(_p("nn_strategy_features", "NN: strategy signals as features", "AI", "bool", False,
+_add(_p("nn_strategy_features", "NN: strategy signals as features", "AI", "bool", True,
         env="NN_STRATEGY_FEATURES", requires_restart=True,
         help="Train the NN with the strategy-library block (arch gru_strat). Takes effect at the next NN training; the live predictor follows the trained model."))
 _add(_p("fib_zone_low", "Fib discount zone start", "Strategies", "float", 0.382, 0.0, 1.0, 0.001,
